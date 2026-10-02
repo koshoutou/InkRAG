@@ -198,7 +198,7 @@ export function SettingsDialog() {
                 <p className="font-medium text-foreground">说明</p>
                 Embedding 使用 <span className="font-mono">OpenAI 兼容协议</span>：向 <span className="font-mono">{'{apiBase}/embeddings'}</span> 发 POST 请求，
                 body 为 <span className="font-mono">{'{ model, input }'}</span>，返回 <span className="font-mono">{'{ data: [{ embedding: [...] }] }'}</span>。
-                支持任何 OpenAI 兼容服务（OpenAI 官方 / Azure / edgefn / Ollama / vLLM / LocalAI 等）。
+                支持任何 OpenAI 兼容服务（OpenAI 官方 / Azure / Ollama / vLLM / LocalAI 等）。
                 向量维度会从 API 响应自动推断，<b>不需要手动填写</b>。
               </div>
               <div>
@@ -207,7 +207,7 @@ export function SettingsDialog() {
                   id="embed-base"
                   value={form.embedApiBase}
                   onChange={(e) => update('embedApiBase', e.target.value)}
-                  placeholder="https://api.openai.com/v1  或  https://api.edgefn.net/v1"
+                  placeholder="https://api.openai.com/v1  或  http://localhost:11434/v1"
                   className="mt-1.5 h-10 text-sm font-mono"
                 />
               </div>
@@ -222,7 +222,7 @@ export function SettingsDialog() {
                 />
                 <p className="mt-1.5 text-[11px] text-muted-foreground">
                   填写服务商的模型标识。例：OpenAI 用 <span className="font-mono">text-embedding-3-small</span>（1536d），
-                  edgefn 用 <span className="font-mono">BAAI/bge-m3</span>（1024d），
+                  兼容服务常用 <span className="font-mono">BAAI/bge-m3</span>（1024d），
                   本地 Ollama 用 <span className="font-mono">bge-m3</span>。
                 </p>
               </div>
