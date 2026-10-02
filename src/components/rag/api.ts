@@ -12,6 +12,7 @@ import type {
   DashboardData,
   DashboardTrends,
   DocVersionInfo,
+  RestoreVersionResult,
   VersionCompareResult,
   DocDetail,
   DocSummary,
@@ -454,6 +455,24 @@ export const ragApi = {
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------
   async listDocVersions(docId: string): Promise<{ versions: DocVersionInfo[] }> {
     return asJson(await fetch(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))
+  },
+  /** §27 恢复历史版本（归档当前 → 版本号+1 → 重建 chunks → 入队重嵌入） */
+  async restoreDocVersion(docId: string, version: string): Promise<RestoreVersionResult> {
+    return asJson(
+      await fetch(
+        `/api/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(version)}/restore`,
+        { method: 'POST' },
+      ),
+    )
+  },
+  /** §27 删除历史版本快照 */
+  async deleteDocVersion(docId: string, version: string): Promise<{ ok: true }> {
+    return asJson(
+      await fetch(
+        `/api/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(version)}`,
+        { method: 'DELETE' },
+      ),
+    )
   },
   async compareDocVersions(docId: string, v1: string, v2: string): Promise<{ compare: VersionCompareResult }> {
     return asJson(

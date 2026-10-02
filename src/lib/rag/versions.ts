@@ -1,16 +1,21 @@
-// 文档版本快照与对比（契约 §17）
-// 快照时机：reparse / rechunk 动作触发前（parseConfigV 递增前）归档当前 chunk 集
+// 文档版本快照 / 对比 / 恢复 / 删除（契约 §17 / §27）
+// 快照时机：reparse / rechunk / chunk 编辑 / 启停 / 删除 / 版本恢复 触发前（parseConfigV 递增前）归档当前 chunk 集
 // 存储：{ARTIFACTS_ROOT}/{kbId}/{docId}/versions/v{n}.json（随备份 includeArtifacts 一并留存）
 // 对比：任意两版本（文件快照 或 'current'=DB 当前）做 chunk 级 diff：
 //   - 内容指纹（isParent + textPreview 的 sha1 前 16 位）序列上求 LCS 锚点
 //   - 匹配 → same；v1 独有 → removed；v2 独有 → added
 //   - 相邻 removed/added 段按序配对 → changed（bigram dice 相似度）
+// 恢复（§27）：快照含 fullText → 归档当前 → parseConfigV+1 → 重建 chunks 行/磁盘 → 入队 embed 重写向量库
+// 删除（§27）：fs.rm(v{n}.json)；'current' 无文件不可删
 
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { db } from '@/lib/db'
-import { docDir } from './artifacts'
+import { docDir, chunksDir, resolveStorageKey } from './artifacts'
+import { getVectorStore } from './vectorstore'
+import { enqueueDocument } from './pipeline'
+import { emitToRoom } from './events'
 
 export const CURRENT_VERSION = 'current'
 
@@ -27,6 +32,15 @@ export interface VersionChunkSnapshot {
   charStart: number
   charEnd: number
   enabled: boolean
+  // ---- §27 恢复所需字段（旧快照缺失时降级：fullText→textPreview / 其余取默认值） ----
+  parentId?: string | null
+  docType?: string
+  pageFrom?: number
+  pageTo?: number
+  bboxFrom?: string
+  bboxTo?: string
+  storageKey?: string
+  fullText?: string
 }
 
 export interface VersionSnapshotFile {
@@ -78,6 +92,35 @@ export async function snapshotDocVersion(docId: string): Promise<boolean> {
       /* 不存在则写 */
     }
 
+    // §27：快照携带全文与溯源字段（恢复历史版本的完整依据）
+    const snapshotChunks: VersionChunkSnapshot[] = []
+    for (const c of chunks) {
+      let fullText = ''
+      try {
+        fullText = await fs.readFile(resolveStorageKey(c.storageKey), 'utf-8')
+      } catch {
+        fullText = c.textPreview
+      }
+      snapshotChunks.push({
+        id: c.id,
+        seq: c.seq,
+        isParent: c.isParent,
+        textPreview: c.textPreview,
+        tokenCount: c.tokenCount,
+        charStart: c.charStart,
+        charEnd: c.charEnd,
+        enabled: c.enabled,
+        parentId: c.parentId,
+        docType: c.docType,
+        pageFrom: c.pageFrom,
+        pageTo: c.pageTo,
+        bboxFrom: c.bboxFrom,
+        bboxTo: c.bboxTo,
+        storageKey: c.storageKey,
+        fullText,
+      })
+    }
+
     const file: VersionSnapshotFile = {
       meta: {
         version: doc.parseConfigV,
@@ -88,16 +131,7 @@ export async function snapshotDocVersion(docId: string): Promise<boolean> {
         chunkCount: chunks.length,
         totalTokens: chunks.reduce((acc, c) => acc + c.tokenCount, 0),
       },
-      chunks: chunks.map((c) => ({
-        id: c.id,
-        seq: c.seq,
-        isParent: c.isParent,
-        textPreview: c.textPreview,
-        tokenCount: c.tokenCount,
-        charStart: c.charStart,
-        charEnd: c.charEnd,
-        enabled: c.enabled,
-      })),
+      chunks: snapshotChunks,
     }
     await fs.mkdir(versionsDir(doc.kbId, docId), { recursive: true })
     await fs.writeFile(target, JSON.stringify(file), 'utf-8')
@@ -106,6 +140,37 @@ export async function snapshotDocVersion(docId: string): Promise<boolean> {
     console.warn('[versions] 快照失败（忽略）:', (e as Error).message)
     return false
   }
+}
+
+// ---------------------------------------------------------------------------
+// §27 版本号递增（三屏联动 / 沙盒入库 / 恢复共用）
+// ---------------------------------------------------------------------------
+
+/** 流水线进行中的状态（这些状态下禁止编辑 / 恢复 / 删除 chunk） */
+const RUNNING_STATUSES = new Set(['queued', 'parsing', 'chunking', 'embedding', 'upserting'])
+
+export function isDocRunning(status: string): boolean {
+  return RUNNING_STATUSES.has(status)
+}
+
+/**
+ * 归档当前 chunk 集并递增文档版本号（parseConfigV+1）。
+ * 三屏联动 enable / edit / delete 与沙盒入库统一调用：任何内容变更前先留快照，
+ * 保证「文档版本管理」视图可随时回滚。返回递增后的新版本号。
+ */
+export async function bumpDocVersion(docId: string): Promise<number> {
+  const doc = await db.document.findUnique({ where: { id: docId } })
+  if (!doc) throw new Error('文档不存在')
+  if (isDocRunning(doc.status)) {
+    throw new Error(`文档正在流水线中（${doc.status}），请等待完成后再操作`)
+  }
+  await snapshotDocVersion(docId)
+  const nextV = doc.parseConfigV + 1
+  await db.document.update({
+    where: { id: docId },
+    data: { parseConfigV: nextV, updatedAt: new Date() },
+  })
+  return nextV
 }
 
 // ---------------------------------------------------------------------------
@@ -121,6 +186,17 @@ export interface DocVersionSummary {
   chunkConfigSnap: string
   docStatus: string
   parseEngine: string
+  /** §27 快照元信息（含 hasFullText 恢复能力判定；current 无） */
+  meta?: {
+    version: number
+    createdAt: string
+    docStatus: string
+    parseEngine: string
+    chunkConfigSnap: string
+    chunkCount: number
+    totalTokens: number
+    hasFullText: boolean
+  }
 }
 
 export async function listDocVersions(docId: string): Promise<DocVersionSummary[]> {
@@ -160,6 +236,7 @@ export async function listDocVersions(docId: string): Promise<DocVersionSummary[
     )
     for (const p of parsed) {
       if (!p || typeof p.meta?.version !== 'number') continue
+      const hasFullText = (p.chunks ?? []).some((c) => typeof c.fullText === 'string' && c.fullText.length > 0)
       out.push({
         version: String(p.meta.version),
         source: 'snapshot',
@@ -169,6 +246,16 @@ export async function listDocVersions(docId: string): Promise<DocVersionSummary[
         chunkConfigSnap: p.meta.chunkConfigSnap ?? '{}',
         docStatus: p.meta.docStatus ?? '',
         parseEngine: p.meta.parseEngine ?? '',
+        meta: {
+          version: p.meta.version,
+          createdAt: p.meta.createdAt ?? new Date(0).toISOString(),
+          docStatus: p.meta.docStatus ?? '',
+          parseEngine: p.meta.parseEngine ?? '',
+          chunkConfigSnap: p.meta.chunkConfigSnap ?? '{}',
+          chunkCount: p.meta.chunkCount ?? p.chunks?.length ?? 0,
+          totalTokens: p.meta.totalTokens ?? 0,
+          hasFullText,
+        },
       })
     }
   } catch {
@@ -553,4 +640,145 @@ export function compareResultToMarkdown(r: VersionCompareResult): string {
   }
   lines.push('')
   return lines.join('\n')
+}
+
+// ---------------------------------------------------------------------------
+// §27 恢复历史版本 / 删除版本
+// ---------------------------------------------------------------------------
+
+export interface RestoreVersionResult {
+  ok: true
+  restoredVersion: number // 恢复产生的新版本号（= 恢复前 parseConfigV + 1）
+  fromVersion: string
+  chunkCount: number
+  degradedChunks: number // 缺 fullText 降级用 textPreview 的 chunk 数
+}
+
+/**
+ * 恢复文档到历史版本 v{n}（契约 §27）：
+ * 1) 校验快照存在 + 文档不在流水线中
+ * 2) 归档当前版本（bumpDocVersion：当前 chunk 集 → v{parseConfigV}.json，parseConfigV+1）
+ * 3) 清空当前 chunks（行 + 磁盘 + 向量点）
+ * 4) 按快照重建 chunks 行与磁盘全文（快照缺 fullText 的降级 textPreview）
+ * 5) 入队 embed（重新嵌入 + 向量库重写——chunk ID 确定性，与快照一致）
+ */
+export async function restoreDocVersion(docId: string, version: string): Promise<RestoreVersionResult> {
+  const doc = await db.document.findUnique({ where: { id: docId } })
+  if (!doc) throw new Error('文档不存在')
+  if (version === CURRENT_VERSION) throw new Error('current 即当前版本，无需恢复')
+  if (isDocRunning(doc.status)) {
+    throw new Error(`文档正在流水线中（${doc.status}），请等待完成后再恢复`)
+  }
+
+  const vNum = Number(version)
+  if (!Number.isInteger(vNum) || vNum < 1) throw new Error(`无效版本: ${version}`)
+  let file: VersionSnapshotFile
+  try {
+    file = JSON.parse(await fs.readFile(snapshotPath(doc.kbId, docId, vNum), 'utf-8')) as VersionSnapshotFile
+  } catch {
+    throw new Error(`版本 v${version} 不存在`)
+  }
+  const snapChunks = (file.chunks ?? []).slice().sort((a, b) => a.seq - b.seq)
+  if (snapChunks.length === 0) throw new Error(`版本 v${version} 快照为空，无法恢复`)
+
+  const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
+  if (!kb) throw new Error('知识库不存在')
+
+  // 1) 归档当前 + 版本号递增
+  const restoredVersion = await bumpDocVersion(docId)
+
+  // 2) 清旧 chunks：行 + 磁盘目录 + 向量
+  await db.chunk.deleteMany({ where: { documentId: docId } })
+  await fs.rm(chunksDir(doc.kbId, docId), { recursive: true, force: true })
+  await fs.mkdir(chunksDir(doc.kbId, docId), { recursive: true })
+  try {
+    const store = await getVectorStore()
+    await store.deleteByFilter(kb.collection, { must: [{ key: 'doc_id', match: { value: docId } }] })
+  } catch (e) {
+    console.warn('[versions] 恢复前清理旧向量跳过（可能无旧数据）:', (e as Error).message)
+  }
+
+  // 3) 重建 chunks 行 + 磁盘全文
+  let degraded = 0
+  const rows: Parameters<typeof db.chunk.create>[0]['data'][] = []
+  for (const c of snapChunks) {
+    const fullText = typeof c.fullText === 'string' && c.fullText.length > 0 ? c.fullText : c.textPreview
+    if (typeof c.fullText !== 'string' || c.fullText.length === 0) degraded++
+    const storageKey = c.storageKey ?? `${doc.kbId}/${docId}/chunks/${c.id}.txt`
+    await fs.writeFile(resolveStorageKey(storageKey), fullText, 'utf-8')
+    rows.push({
+      id: c.id,
+      documentId: docId,
+      kbId: doc.kbId,
+      isParent: c.isParent,
+      parentId: c.parentId ?? null,
+      seq: c.seq,
+      docType: c.docType ?? 'text',
+      tokenCount: c.tokenCount,
+      charStart: c.charStart,
+      charEnd: c.charEnd,
+      pageFrom: c.pageFrom ?? 0,
+      pageTo: c.pageTo ?? 0,
+      bboxFrom: c.bboxFrom ?? '[]',
+      bboxTo: c.bboxTo ?? '[]',
+      textPreview: c.textPreview,
+      storageKey,
+      enabled: c.enabled,
+    })
+  }
+  const TX = 100
+  for (let i = 0; i < rows.length; i += TX) {
+    await db.$transaction(rows.slice(i, i + TX).map((r) => db.chunk.create({ data: r })))
+  }
+
+  // 4) 状态回写 + 入队 embed（重嵌入 + 向量库重写）
+  const meta = safeMeta(doc.metaJson)
+  await db.document.update({
+    where: { id: docId },
+    data: {
+      status: 'queued',
+      stageProgress: 0,
+      errorCode: null,
+      errorMessage: null,
+      metaJson: JSON.stringify({
+        ...meta,
+        restoredFrom: vNum,
+        parentCount: snapChunks.filter((c) => c.isParent).length,
+        childCount: snapChunks.filter((c) => !c.isParent).length,
+      }),
+    },
+  })
+  await enqueueDocument(docId, 'embed')
+  await emitToRoom('global', 'pipeline:activity', {
+    at: Date.now(),
+    level: 'info',
+    message: `版本恢复：${doc.filename} → v${version}（新版本 v${restoredVersion}，${snapChunks.length} chunks 重新向量化中）`,
+  })
+
+  return { ok: true, restoredVersion, fromVersion: version, chunkCount: snapChunks.length, degradedChunks: degraded }
+}
+
+/** 删除历史版本快照（§27）：'current' 无文件不可删 */
+export async function deleteDocVersion(docId: string, version: string): Promise<void> {
+  const doc = await db.document.findUnique({ where: { id: docId } })
+  if (!doc) throw new Error('文档不存在')
+  if (version === CURRENT_VERSION) throw new Error('当前版本不可删除（删除文档请到文档中心）')
+  const vNum = Number(version)
+  if (!Number.isInteger(vNum) || vNum < 1) throw new Error(`无效版本: ${version}`)
+  const target = snapshotPath(doc.kbId, docId, vNum)
+  try {
+    await fs.access(target)
+  } catch {
+    throw new Error(`版本 v${version} 不存在`)
+  }
+  await fs.rm(target, { force: true })
+}
+
+function safeMeta(s: string): Record<string, unknown> {
+  try {
+    const v = JSON.parse(s || '{}')
+    return typeof v === 'object' && v !== null ? v : {}
+  } catch {
+    return {}
+  }
 }

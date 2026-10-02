@@ -1,8 +1,9 @@
 'use client'
 
-// 切分沙盒（对标 RAGFlow，M4 核心）
+// 切分沙盒（对标 RAGFlow，M4 核心；§27 入库语义）
 // 参数面板（滑块/策略/保护块）→ 300ms 防抖 POST chunk-preview → 统计卡 + 预览列表
-// 与当前生效配置 diff 高亮；「应用此配置并重切」AlertDialog → POST action rechunk
+// 与当前生效配置 diff 高亮；主操作「入库此切分结果」/ 次「按当前配置重新入库」AlertDialog
+//   → POST action rechunk（后端：旧版本自动快照 + parse_config_v+1 + 清旧向量 + 重切 + 重嵌入）
 
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
@@ -10,6 +11,7 @@ import {
   AlertTriangle,
   ArrowRight,
   CheckCircle2,
+  DatabaseZap,
   FlaskConical,
   Gauge,
   Layers,
@@ -64,6 +66,8 @@ export function SandboxView() {
   const [appliedSnapKey, setAppliedSnapKey] = useState<string | null>(null)
   const [previewPage, setPreviewPage] = useState(0)
   const [applyOpen, setApplyOpen] = useState(false)
+  // 入库模式：new = 沙盒参数入库（主按钮）；asis = 按当前生效配置原样重新入库（次按钮）
+  const [applyMode, setApplyMode] = useState<'new' | 'asis'>('new')
 
   const kbsQuery = useQuery({ queryKey: ['kbs'], queryFn: () => ragApi.listKbs() })
   const kbs = kbsQuery.data?.kbs ?? []
@@ -110,15 +114,24 @@ export function SandboxView() {
   })
 
   const applyMutation = useMutation({
-    mutationFn: () => ragApi.docAction(docId!, 'rechunk', debouncedConfig),
-    onSuccess: () => {
-      toast.success('已应用新配置，文档已重新入队切分')
+    // asis 不传 chunkConfig → 后端按文档存储的当前生效配置重切
+    mutationFn: (mode: 'new' | 'asis') =>
+      mode === 'asis'
+        ? ragApi.docAction(docId!, 'rechunk')
+        : ragApi.docAction(docId!, 'rechunk', debouncedConfig),
+    onSuccess: (_r, mode) => {
+      toast.success(
+        mode === 'asis'
+          ? '已按当前配置重新入库：生成新版本并重新向量化'
+          : '已入库切分结果：生成新版本并重新向量化，可在「文档版本管理」回滚',
+      )
       setApplyOpen(false)
       queryClient.invalidateQueries({ queryKey: ['doc', docId] })
       queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
+      queryClient.invalidateQueries({ queryKey: ['doc-versions'] })
       if (activeKbId) gotoDocs(activeKbId)
     },
-    onError: (e: Error) => toast.error('应用失败：' + e.message),
+    onError: (e: Error) => toast.error('入库失败：' + e.message),
   })
 
   const preview = previewQuery.data?.preview
@@ -351,11 +364,31 @@ export function SandboxView() {
                     size="sm"
                     className="gap-1.5"
                     disabled={!changed || applyMutation.isPending}
-                    onClick={() => setApplyOpen(true)}
+                    onClick={() => {
+                      setApplyMode('new')
+                      setApplyOpen(true)
+                    }}
                   >
                     <Zap className="h-3.5 w-3.5" />
-                    应用此配置并重切
+                    入库此切分结果
                   </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="gap-1.5"
+                    disabled={!snapConfig || applyMutation.isPending}
+                    title="切分参数不变，按当前生效配置重新生成版本快照并重新向量化（可用于重建向量库数据）"
+                    onClick={() => {
+                      setApplyMode('asis')
+                      setApplyOpen(true)
+                    }}
+                  >
+                    <DatabaseZap className="h-3.5 w-3.5" />
+                    按当前配置重新入库
+                  </Button>
+                  <p className="text-[10px] leading-relaxed text-muted-foreground">
+                    入库 = 生成新版本快照 + 重嵌入 + 向量库更新；旧版本可在「文档版本管理」恢复或删除
+                  </p>
                   <Button
                     size="sm"
                     variant="outline"
@@ -499,18 +532,32 @@ export function SandboxView() {
         </div>
       )}
 
-      {/* 应用确认 */}
-      <AlertDialog open={applyOpen} onOpenChange={setApplyOpen}>
+      {/* 入库确认（§27：rechunk = 旧版本自动快照 + 版本号+1 + 清旧向量 + 重切 + 重嵌入） */}
+      <AlertDialog
+        open={applyOpen}
+        onOpenChange={(o) => {
+          setApplyOpen(o)
+          if (!o) setApplyMode('new')
+        }}
+      >
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle className="flex items-center gap-2">
               <CheckCircle2 className="h-4 w-4 text-emerald-500" />
-              应用切分配置并重切「{currentDoc?.filename}」？
+              {applyMode === 'new'
+                ? `入库此切分结果到「${currentDoc?.filename}」？`
+                : `按当前配置重新入库「${currentDoc?.filename}」？`}
             </AlertDialogTitle>
             <AlertDialogDescription className="leading-relaxed">
-              将以当前沙盒参数执行 rechunk：parse_config_v + 1，先清空旧 chunk 与向量点，再重新切分 / 向量化 / 写入。
-              <br />
-              {changed && (
+              入库后文档版本号 +1（旧版本自动快照），
+              {applyMode === 'new' ? '当前切分结果' : '当前文档内容按现有切分参数'}将重新向量化写入向量库，
+              可在「文档版本管理」回滚。
+              {applyMode === 'asis' && (
+                <span className="mt-1 block text-[11px] text-muted-foreground">
+                  切分参数保持当前生效值不变，仅重新生成版本快照并重建向量数据。
+                </span>
+              )}
+              {applyMode === 'new' && changed && (
                 <span className="mt-1 block font-mono text-[11px] text-amber-600 dark:text-amber-400">
                   变更项：{changed.join('；')}
                 </span>
@@ -519,8 +566,11 @@ export function SandboxView() {
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>取消</AlertDialogCancel>
-            <AlertDialogAction onClick={() => applyMutation.mutate()} disabled={applyMutation.isPending}>
-              {applyMutation.isPending ? '提交中…' : '确认应用'}
+            <AlertDialogAction
+              onClick={() => applyMutation.mutate(applyMode)}
+              disabled={applyMutation.isPending}
+            >
+              {applyMutation.isPending ? '提交中…' : '确认入库'}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

@@ -629,6 +629,29 @@ export interface DocVersionInfo {
   chunkConfigSnap: string
   docStatus: string
   parseEngine: string
+  /** §27 快照元信息（恢复/删除操作依据；current 无此字段） */
+  meta?: {
+    version: number
+    createdAt: string
+    docStatus: string
+    parseEngine: string
+    chunkConfigSnap: string
+    chunkCount: number
+    totalTokens: number
+    /** 快照是否含全文（§27 增强后创建的快照才可无损恢复） */
+    hasFullText?: boolean
+  }
+}
+
+/** §27 版本恢复结果 */
+export interface RestoreVersionResult {
+  ok: true
+  /** 恢复产生的新版本号 */
+  restoredVersion: number
+  fromVersion: string
+  chunkCount: number
+  /** 缺 fullText 降级用 textPreview 的 chunk 数 */
+  degradedChunks: number
 }
 
 export type VersionDiffType = 'same' | 'added' | 'removed' | 'changed'

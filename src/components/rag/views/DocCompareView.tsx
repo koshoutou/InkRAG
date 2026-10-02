@@ -1,13 +1,13 @@
 'use client'
 
-// RAG 知识库平台 · 文档文档版本管理视图（契约 §17，Task 9-c 完整实现；Task 11-c 增补导出报告 §22）
+// RAG 知识库平台 · 文档版本管理视图（契约 §17，Task 9-c；Task 11-c 导出报告 §22；Task 14-b 恢复/删除 §27）
 // 数据流：选 KB / 文档 → GET /api/documents/{id}/versions → 选 v1 / v2 → GET …/versions/compare?v1=&v2=
 // 导出：diff 就绪后版本信息条右端「导出报告」下拉 → compare/export?format=md|json 直链下载
 // 可视化对标 RAGFlow 版本管理 + Git diff：same 折叠 / added emerald / removed rose / changed amber 双栏 + 相似度
 // 颜色体系：same teal · added emerald · removed rose · changed amber（禁 indigo/blue）
 
 import { useEffect, useMemo, useState } from 'react'
-import { keepPreviousData, useQuery } from '@tanstack/react-query'
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { motion } from 'framer-motion'
 import { toast } from 'sonner'
 import {
@@ -27,8 +27,20 @@ import {
   History,
   ListFilter,
   Loader2,
+  RotateCcw,
   Settings2,
+  Trash2,
 } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -44,8 +56,9 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { cn } from '@/lib/utils'
 import { ragApi } from '../api'
 import { usePlatformStore } from '../store'
-import type { DocVersionInfo, VersionDiffType } from '../types'
-import { EmptyHint, ErrorCard, StatCard, ViewPage, formatNumber, ragScrollbar } from '../ui'
+import { PROCESSING_STATUSES } from '../types'
+import type { DocStatus, DocVersionInfo, VersionDiffType } from '../types'
+import { EmptyHint, ErrorCard, StatCard, StatusBadge, ViewPage, formatNumber, ragScrollbar } from '../ui'
 import { DIFF_TYPE_META, DiffItemCard, SameOnlyHint } from './compare/DiffItemCard'
 import { TrendStatCard } from './compare/TrendStatCard'
 
@@ -191,6 +204,7 @@ function ExportCompareMenu({ docId, v1, v2 }: { docId: string; v1: string; v2: s
 // ---------------------------------------------------------------------------
 
 export function DocCompareView() {
+  const queryClient = useQueryClient()
   const activeKbId = usePlatformStore((s) => s.activeKbId)
   const setKb = usePlatformStore((s) => s.setKb)
   const activeDocId = usePlatformStore((s) => s.activeDocId)
@@ -201,6 +215,9 @@ export function DocCompareView() {
   const [docSel, setDocSel] = useState<string | null>(null)
   const [vSel, setVSel] = useState<{ docId: string; v1: string | null; v2: string | null } | null>(null)
   const [filter, setFilter] = useState<FilterMode>('changes')
+  // §27 版本恢复 / 删除的确认弹窗目标（null = 关闭）
+  const [restoreTarget, setRestoreTarget] = useState<DocVersionInfo | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<DocVersionInfo | null>(null)
 
   // -- KB 列表（与文档中心 / 三屏一致：默认 activeKbId，无则第一个） ------------------
   const kbsQuery = useQuery({ queryKey: ['kbs'], queryFn: () => ragApi.listKbs() })
@@ -221,13 +238,19 @@ export function DocCompareView() {
   const inDocs = (id: string | null) => !!id && docs.some((d) => d.id === id)
   const docId = inDocs(docSel) ? docSel : inDocs(activeDocId) ? activeDocId : (docs[0]?.id ?? null)
 
-  // -- 版本列表 -----------------------------------------------------------------------
+  // -- 版本列表（current 行 docStatus 处理中 → 2s 轮询实时刷新） -----------------------
   const versionsQuery = useQuery({
     queryKey: ['doc-versions', docId],
     queryFn: () => ragApi.listDocVersions(docId!),
     enabled: !!docId,
+    refetchInterval: (query) => {
+      const cur = query.state.data?.versions.find((v) => v.source === 'current')
+      return cur && PROCESSING_STATUSES.includes(cur.docStatus as DocStatus) ? 2000 : false
+    },
   })
   const versions = versionsQuery.data?.versions ?? []
+  const currentVer = versions.find((v) => v.source === 'current') ?? null
+  const docProcessing = !!currentVer && PROCESSING_STATUSES.includes(currentVer.docStatus as DocStatus)
 
   // 当前版本对（派生）：用户选择（按 docId 锁定且仍有效）优先；默认 v2 = current、v1 = 最新快照
   const hasPair = versions.length > 1
@@ -262,6 +285,37 @@ export function DocCompareView() {
   const swapVersions = () => {
     if (docId && v1Sel && v2Sel) setVSel({ docId, v1: v2Sel, v2: v1Sel })
   }
+
+  // -- §27 版本恢复 / 删除 -------------------------------------------------------------
+  const restoreMutation = useMutation({
+    mutationFn: (v: DocVersionInfo) => ragApi.restoreDocVersion(docId!, v.version),
+    onSuccess: (r) => {
+      toast.success(
+        `已恢复到 v${r.fromVersion}（新版本 v${r.restoredVersion}）：重建 ${r.chunkCount} 个 chunk，文档已入队重新向量化`,
+      )
+      if (r.degradedChunks > 0) {
+        toast.warning(`${r.degradedChunks} 个 chunk 缺全文，已降级为 500 字预览入库`)
+      }
+      setRestoreTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['doc-versions'] })
+      queryClient.invalidateQueries({ queryKey: ['doc-compare'] })
+      queryClient.invalidateQueries({ queryKey: ['doc', docId] })
+      queryClient.invalidateQueries({ queryKey: ['docs'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+    onError: (e: Error) => toast.error('恢复失败：' + e.message),
+  })
+
+  const deleteMutation = useMutation({
+    mutationFn: (v: DocVersionInfo) => ragApi.deleteDocVersion(docId!, v.version),
+    onSuccess: (_r, v) => {
+      toast.success(`已删除版本快照 v${v.version}`)
+      setDeleteTarget(null)
+      queryClient.invalidateQueries({ queryKey: ['doc-versions'] })
+      queryClient.invalidateQueries({ queryKey: ['doc-compare'] })
+    },
+    onError: (e: Error) => toast.error('删除失败：' + e.message),
+  })
 
   // -- 过滤与计数 ---------------------------------------------------------------------
   const items = useMemo(() => compare?.items ?? [], [compare])
@@ -447,6 +501,118 @@ export function DocCompareView() {
               )}
             </div>
           )}
+        </Card>
+      )}
+
+      {/* 版本历史（§27：快照行恢复 / 删除；current 行实时 docStatus） */}
+      {docId && docs.length > 0 && versionsQuery.isSuccess && (
+        <Card>
+          <CardHeader className="pb-2">
+            <CardTitle className="flex flex-wrap items-center gap-2 text-xs">
+              <History className="h-3.5 w-3.5 text-primary" aria-hidden />
+              版本历史
+              <Badge variant="secondary" className="text-[10px] tabular-nums">
+                {versions.length}
+              </Badge>
+              <span className="ml-auto text-[10px] font-normal text-muted-foreground">
+                重解析 / 重切分 / chunk 编辑 / 恢复前自动归档快照
+              </span>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="p-3 sm:p-4">
+            <div
+              className={cn('max-h-[22rem] space-y-1.5 overflow-y-auto pr-0.5', ragScrollbar)}
+              role="region"
+              aria-label="版本历史列表"
+            >
+              {versions.map((v) => {
+                const isCurrent = v.source === 'current'
+                const lossless = v.meta?.hasFullText === true
+                return (
+                  <div
+                    key={v.version}
+                    className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-2"
+                  >
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        'shrink-0 font-mono text-[10px]',
+                        isCurrent && 'border-primary/40 bg-primary/10 text-primary',
+                      )}
+                    >
+                      {isCurrent ? '当前' : `v${v.version}`}
+                    </Badge>
+                    <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                      {formatNumber(v.chunkCount)} chunks · {formatNumber(v.totalTokens)} tokens
+                    </span>
+                    <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/80">
+                      {fmtShort(v.createdAt)}
+                    </span>
+                    {isCurrent ? (
+                      <>
+                        <StatusBadge status={v.docStatus as DocStatus} className="shrink-0" />
+                        <Badge
+                          variant="outline"
+                          className="shrink-0 border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300"
+                        >
+                          当前生效
+                        </Badge>
+                      </>
+                    ) : (
+                      <Badge
+                        variant="outline"
+                        className={cn(
+                          'shrink-0 text-[10px]',
+                          lossless
+                            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                            : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+                        )}
+                        title={
+                          lossless
+                            ? '快照含全文，恢复后 chunk 内容完整'
+                            : '快照缺全文，恢复时部分 chunk 将截断至 500 字预览'
+                        }
+                      >
+                        {lossless ? '可无损恢复' : '降级恢复（缺全文）'}
+                      </Badge>
+                    )}
+                    {!isCurrent && (
+                      <div className="ml-auto flex shrink-0 items-center gap-1.5 pl-2">
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1 border-emerald-500/40 px-2 text-[11px] text-emerald-600 hover:bg-emerald-500/10 hover:text-emerald-700 dark:text-emerald-400 dark:hover:bg-emerald-500/10 dark:hover:text-emerald-300"
+                          disabled={docProcessing || restoreMutation.isPending}
+                          title={docProcessing ? '文档处理中，暂不可恢复' : `恢复文档到 v${v.version}`}
+                          onClick={() => setRestoreTarget(v)}
+                        >
+                          <RotateCcw className="h-3 w-3" aria-hidden />
+                          恢复
+                        </Button>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-7 gap-1 border-rose-500/40 px-2 text-[11px] text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-400 dark:hover:bg-rose-500/10 dark:hover:text-rose-300"
+                          disabled={deleteMutation.isPending}
+                          title={`删除快照 v${v.version}（不可撤销）`}
+                          onClick={() => setDeleteTarget(v)}
+                        >
+                          <Trash2 className="h-3 w-3" aria-hidden />
+                          删除
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+            {docProcessing && (
+              <p className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+                <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                文档正在重新向量化（「当前」行状态实时刷新），期间暂不可恢复版本
+              </p>
+            )}
+          </CardContent>
         </Card>
       )}
 
@@ -647,6 +813,93 @@ export function DocCompareView() {
           )}
         </>
       )}
+
+      {/* 恢复版本确认（§27） */}
+      <AlertDialog open={!!restoreTarget} onOpenChange={(o) => !o && setRestoreTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <RotateCcw className="h-4 w-4 text-emerald-500" aria-hidden />
+              恢复到 v{restoreTarget?.version}？
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-relaxed">
+              将恢复到 v{restoreTarget?.version}（{restoreTarget ? formatNumber(restoreTarget.chunkCount) : 0} chunks /{' '}
+              {restoreTarget ? formatNumber(restoreTarget.totalTokens) : 0} tokens）。当前内容会先自动快照为新版本，随后重建
+              chunks 并重新向量化写入向量库。
+              {restoreTarget && (
+                <span
+                  className={cn(
+                    'mt-2 inline-flex items-center rounded-md border px-1.5 py-0.5 text-[11px] font-medium leading-none',
+                    restoreTarget.meta?.hasFullText
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                      : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+                  )}
+                >
+                  {restoreTarget.meta?.hasFullText
+                    ? '可无损恢复（快照含全文）'
+                    : '降级恢复（快照缺全文，部分 chunk 将截断至 500 字预览）'}
+                </span>
+              )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoreMutation.isPending}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-emerald-600 text-white hover:bg-emerald-700 dark:bg-emerald-600 dark:hover:bg-emerald-700"
+              disabled={restoreMutation.isPending}
+              onClick={(e) => {
+                e.preventDefault() // 恢复期间保持弹窗展示，由 onSuccess 关闭
+                if (restoreTarget) restoreMutation.mutate(restoreTarget)
+              }}
+            >
+              {restoreMutation.isPending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  恢复中…
+                </>
+              ) : (
+                '确认恢复'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* 删除版本确认（§27） */}
+      <AlertDialog open={!!deleteTarget} onOpenChange={(o) => !o && setDeleteTarget(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle className="flex items-center gap-2">
+              <Trash2 className="h-4 w-4 text-rose-500" aria-hidden />
+              删除版本快照 v{deleteTarget?.version}？
+            </AlertDialogTitle>
+            <AlertDialogDescription className="leading-relaxed">
+              仅删除快照文件 v{deleteTarget?.version}.json（{deleteTarget ? formatNumber(deleteTarget.chunkCount) : 0}{' '}
+              chunks / {deleteTarget ? formatNumber(deleteTarget.totalTokens) : 0} tokens）。删除后该历史版本不可再恢复或对比，当前生效的文档内容与向量数据不受影响。
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deleteMutation.isPending}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-700 dark:bg-rose-600 dark:hover:bg-rose-700"
+              disabled={deleteMutation.isPending}
+              onClick={(e) => {
+                e.preventDefault()
+                if (deleteTarget) deleteMutation.mutate(deleteTarget)
+              }}
+            >
+              {deleteMutation.isPending ? (
+                <>
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  删除中…
+                </>
+              ) : (
+                '确认删除'
+              )}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </ViewPage>
   )
 }

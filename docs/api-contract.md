@@ -486,3 +486,40 @@ TrendsCard（派发端）→ RetrievalDebugView（消费端）双通道事件：
 - 上传进度：XHR `upload.onprogress` 字节级百分比；解析进度：复用 §9 socket 事件（`document:status/progress/done`），客户端按 `docId` 关联任务卡
 - 终态语义：`ready`（emerald，含 chunkCount/tookMs）| `failed`（rose，含 errorMessage + 单文件重试）| `deduplicated`（amber 秒传）
 - 完成后客户端 invalidate：`['docs', kbId]`、`['dashboard']`、`['kbs']`
+
+## §27 文档版本管理：恢复历史版本 / 删除版本（v1.4）
+
+用户需求：文档版本管理升级为「文档版本管理」——可恢复历史版本（含向量数据），也可删除文档版本。
+
+### 27.1 快照增强（向后兼容）
+
+- `v{n}.json` 的 chunks 自 §27 起携带恢复所需完整字段：`fullText`（全文）、`parentId`、`docType`、`pageFrom/pageTo`、`bboxFrom/bboxTo`、`storageKey`。
+- 旧快照（缺 fullText）恢复时降级：该 chunk 以 `textPreview`（≤500 字）入库，响应中 `degradedChunks` 计数。
+- `GET /api/documents/[id]/versions` 的快照行新增 `meta: { hasFullText }`，UI 据此提示「无损恢复 / 降级恢复」。
+
+### 27.2 版本号递增语义（bumpDocVersion）
+
+三屏联动的**启用/停用/编辑/还原/删除** chunk 与沙盒入库统一调用：变更前先归档当前 chunk 集为 `v{parseConfigV}.json`（幂等），再 `parseConfigV+1`。文档版本因此完整覆盖「切分配置变更」与「chunk 级内容变更」两类历史，均可回滚。
+
+- 文档处于流水线中（queued/parsing/chunking/embedding/upserting）时拒绝变更 → HTTP 409。
+
+### 27.3 恢复历史版本
+
+```
+POST /api/documents/[id]/versions/[version]/restore
+→ { ok: true, restoredVersion, fromVersion, chunkCount, degradedChunks }
+```
+
+流程：校验（版本存在 / 非流水线中）→ 归档当前（当前内容不丢，恢复后可再恢复回来）→ 清空 chunks（行+磁盘+向量点 deleteByFilter）→ 按快照重建（行 + 磁盘全文）→ 状态 queued → 入队 embed（重新嵌入 + 向量库重写，chunk ID 确定性保持一致）。
+
+### 27.4 删除版本
+
+```
+DELETE /api/documents/[id]/versions/[version] → { ok: true }
+```
+
+仅删除快照文件 `v{n}.json`；`current` 无文件 → 400。
+
+### 27.5 三屏联动 chunk 变更响应
+
+`PATCH/DELETE /api/documents/[id]/chunk/[chunkId]` 响应新增 `version`（递增后的新版本号）；流水线中 → 409。
