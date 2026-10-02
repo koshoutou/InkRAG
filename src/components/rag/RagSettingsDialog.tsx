@@ -57,6 +57,7 @@ const DEFAULT_FORM: RagSettings = {
   rerankApiBase: '',
   rerankApiKey: '',
   rerankModel: '',
+  mineruProvider: 'selfhost',
   mineruApiUrl: '',
   mineruApiKey: '',
   mineruTier: 'standard',
@@ -77,6 +78,13 @@ const SWITCHES: { key: keyof RagSettings; label: string; desc: string }[] = [
 
 // —— 模块级子组件（勿放回 RagSettingsDialog 函数体内：内部定义会使组件身份随 setForm 重渲染而改变，
 // React 卸载重挂整个子树导致 SecretInput 内 <Input> 每输入一个字符就失焦）——
+
+/** MinerU 三接入方式展示文案 */
+const MINERU_PROVIDER_LABELS: Record<string, string> = {
+  selfhost: '自部署 V1',
+  cloud: '官方云·精准',
+  'cloud-agent': '官方云·Agent',
+}
 
 function TestButton({
   kind,
@@ -117,6 +125,9 @@ function TestButton({
       {testResults[kind] && !testResults[kind]!.ok && (
         <p className="w-full rounded-md border border-rose-500/40 bg-rose-500/5 px-3 py-1.5 text-[11px] text-rose-600 dark:text-rose-400">
           {testResults[kind]!.message}
+          {testResults[kind]!.detail && (
+            <span className="mt-1 block text-rose-500/80">{testResults[kind]!.detail}</span>
+          )}
         </p>
       )}
     </div>
@@ -218,11 +229,23 @@ export function RagSettingsDialog() {
         }
         r = await ragApi.testConnection('rerank', { url: form.rerankApiBase, apiKey: form.rerankApiKey, model: form.rerankModel })
       } else {
-        if (!form.mineruApiUrl) {
-          toast.error('请填写 MinerU API URL')
+        // MinerU：按接入方式探测（selfhost 需地址；cloud 需 Token；cloud-agent 免凭据）
+        const provider = form.mineruProvider || 'selfhost'
+        if (provider === 'selfhost' && !form.mineruApiUrl) {
+          toast.error('请填写 MinerU API 地址（自部署 V1 服务根地址）')
           return
         }
-        r = await ragApi.testConnection('mineru', { url: form.mineruApiUrl, apiKey: form.mineruApiKey, tier: form.mineruTier, ocrMode: form.mineruOcrMode })
+        if (provider === 'cloud' && !form.mineruApiKey) {
+          toast.error('请填写 MinerU API Token（官方云·精准需要 Token）')
+          return
+        }
+        r = await ragApi.testConnection('mineru', {
+          provider,
+          url: form.mineruApiUrl,
+          apiKey: form.mineruApiKey,
+          tier: form.mineruTier,
+          ocrMode: form.mineruOcrMode,
+        })
       }
       setTestResults((prev) => ({ ...prev, [kind]: r }))
       if (r.ok) toast.success(r.message)
@@ -335,48 +358,90 @@ export function RagSettingsDialog() {
 
             <TabsContent value="mineru" className="space-y-4 pb-2 pt-4">
               <div className="rounded-md border bg-muted/30 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
-                MinerU 解析服务（六步协议）。未配置时按平台开关回退到内置降级解析器：md/txt/html 直接转 markdown；pdf 提取文本 + 坐标生成布局。
+                MinerU 解析服务支持三种接入方式（协议互不兼容，按部署形态选择）。未配置时按平台开关回退到内置 Node 解析器：
+                md/txt/html/csv/docx 等直接转 markdown；pdf 提取文本 + 坐标；图片与旧版 Office（.ppt/.xls）仅 MinerU 支持。
               </div>
               <div>
-                <Label htmlFor="rag-mineru-url" className="text-xs text-muted-foreground">MinerU API URL</Label>
-                <Input id="rag-mineru-url" value={form.mineruApiUrl} onChange={(e) => update('mineruApiUrl', e.target.value)} placeholder="http://mineru-server:8080" className="mt-1.5 h-9 font-mono text-xs" />
+                <Label className="text-xs text-muted-foreground">接入方式（Provider）</Label>
+                <Select value={form.mineruProvider || 'selfhost'} onValueChange={(v) => update('mineruProvider', v)}>
+                  <SelectTrigger className="mt-1.5 h-9 text-xs">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="selfhost" className="text-xs">自部署 V1 — 本地/私有化（六步协议）</SelectItem>
+                    <SelectItem value="cloud" className="text-xs">官方云·精准（Token）— 高精度/批量/多格式</SelectItem>
+                    <SelectItem value="cloud-agent" className="text-xs">官方云·Agent 轻量（免Token）— IP 限频/单文件/≤10MB</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
-              <div>
-                <Label htmlFor="rag-mineru-key" className="text-xs text-muted-foreground">API Key（可空）</Label>
-                <div className="mt-1.5">
-                  <SecretInput id="rag-mineru-key" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder="（无鉴权留空）" k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
+              {(form.mineruProvider || 'selfhost') === 'selfhost' && (
+                <>
+                  <div>
+                    <Label htmlFor="rag-mineru-url" className="text-xs text-muted-foreground">MinerU API URL（V1 根地址）</Label>
+                    <Input id="rag-mineru-url" value={form.mineruApiUrl} onChange={(e) => update('mineruApiUrl', e.target.value)} placeholder="http://mineru-host:8000（api-server 端口，非 WebUI 面板）" className="mt-1.5 h-9 font-mono text-xs" />
+                  </div>
+                  <div>
+                    <Label htmlFor="rag-mineru-key" className="text-xs text-muted-foreground">API Key（可空，--api-key 启动参数未设则无鉴权）</Label>
+                    <div className="mt-1.5">
+                      <SecretInput id="rag-mineru-key" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder="（无鉴权留空）" k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <Label className="text-xs text-muted-foreground">解析档位（tier）</Label>
+                      <Select value={form.mineruTier || 'standard'} onValueChange={(v) => update('mineruTier', v)}>
+                        <SelectTrigger className="mt-1.5 h-9 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="flash" className="text-xs">flash — 极速（限 200 页/300MB）</SelectItem>
+                          <SelectItem value="basic" className="text-xs">basic — 基础</SelectItem>
+                          <SelectItem value="standard" className="text-xs">standard — 标准</SelectItem>
+                          <SelectItem value="advanced" className="text-xs">advanced — 高精度</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                    <div>
+                      <Label className="text-xs text-muted-foreground">OCR 模式</Label>
+                      <Select value={form.mineruOcrMode || 'auto'} onValueChange={(v) => update('mineruOcrMode', v)}>
+                        <SelectTrigger className="mt-1.5 h-9 text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="auto" className="text-xs">auto — 自动</SelectItem>
+                          <SelectItem value="txt" className="text-xs">txt — 优先文本层</SelectItem>
+                          <SelectItem value="ocr" className="text-xs">ocr — 强制 OCR</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+                </>
+              )}
+              {(form.mineruProvider || 'selfhost') === 'cloud' && (
+                <>
+                  <div>
+                    <Label htmlFor="rag-mineru-token" className="text-xs text-muted-foreground">API Token（必填）</Label>
+                    <div className="mt-1.5">
+                      <SecretInput id="rag-mineru-token" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder="在 mineru.net「API 管理」页面创建" k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
+                    </div>
+                    <p className="mt-1.5 text-[11px] text-muted-foreground">官方云·精准 API v4（Bearer Token）：支持 pdf/图片/doc/docx/ppt/pptx/xls/xlsx，单文件 ≤ 200MB / 200 页，每账号每天 1000 页最高优先级额度。</p>
+                  </div>
+                </>
+              )}
+              {(form.mineruProvider || 'selfhost') === 'cloud-agent' && (
+                <div className="rounded-md border border-dashed px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                  官方云·Agent 轻量接口无需任何凭据（按 IP 限频防滥用）。限制：单文件 ≤ 10MB / 20 页，仅输出 Markdown，支持
+                  PDF/图片/Docx/PPTx/Xlsx。无需配置——保存后即可在上传时选择 MinerU 引擎使用。
                 </div>
-              </div>
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <Label className="text-xs text-muted-foreground">解析档位（tier）</Label>
-                  <Select value={form.mineruTier || 'standard'} onValueChange={(v) => update('mineruTier', v)}>
-                    <SelectTrigger className="mt-1.5 h-9 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="flash" className="text-xs">flash — 极速（限 200 页/300MB）</SelectItem>
-                      <SelectItem value="basic" className="text-xs">basic — 基础</SelectItem>
-                      <SelectItem value="standard" className="text-xs">standard — 标准</SelectItem>
-                      <SelectItem value="advanced" className="text-xs">advanced — 高精度</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-                <div>
-                  <Label className="text-xs text-muted-foreground">OCR 模式</Label>
-                  <Select value={form.mineruOcrMode || 'auto'} onValueChange={(v) => update('mineruOcrMode', v)}>
-                    <SelectTrigger className="mt-1.5 h-9 text-xs">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="auto" className="text-xs">auto — 自动</SelectItem>
-                      <SelectItem value="txt" className="text-xs">txt — 优先文本层</SelectItem>
-                      <SelectItem value="ocr" className="text-xs">ocr — 强制 OCR</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
-              </div>
-              <TestButton kind="mineru" label="测试 MinerU" disabled={!form.mineruApiUrl} testing={testing} testResults={testResults} onTest={onTest} />
+              )}
+              <TestButton
+                kind="mineru"
+                label={`测试 MinerU（${MINERU_PROVIDER_LABELS[form.mineruProvider || 'selfhost'] ?? '自部署'}）`}
+                disabled={(form.mineruProvider || 'selfhost') === 'selfhost' ? !form.mineruApiUrl : (form.mineruProvider || 'selfhost') === 'cloud' ? !form.mineruApiKey : false}
+                testing={testing}
+                testResults={testResults}
+                onTest={onTest}
+              />
             </TabsContent>
 
             <TabsContent value="switches" className="space-y-3 pb-2 pt-4">

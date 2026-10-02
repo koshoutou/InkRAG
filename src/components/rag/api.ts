@@ -25,6 +25,7 @@ import type {
   JobsStats,
   KbSummary,
   LayoutData,
+  MetricsSummary,
   RagSettings,
   RestoreResult,
   SearchDebugBody,
@@ -74,11 +75,12 @@ export interface UploadTask {
   docId?: string
 }
 
-/** XHR 上传（fetch 无上传进度回调，这里用 xhr.upload.onprogress 获得真实进度） */
+/** XHR 上传（fetch 无上传进度回调，这里用 xhr.upload.onprogress 获得真实进度）；engine 可选（14-e 契约，缺省=跟随全局设置） */
 export function uploadDocument(
   kbId: string,
   file: File,
   onProgress?: (fraction: number) => void,
+  engine?: 'mineru' | 'node',
 ): Promise<{ doc: DocSummary; deduplicated: boolean }> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest()
@@ -103,6 +105,7 @@ export function uploadDocument(
     xhr.ontimeout = () => reject(new Error('上传超时'))
     const fd = new FormData()
     fd.append('file', file)
+    if (engine) fd.append('engine', engine)
     xhr.send(fd)
   })
 }
@@ -249,18 +252,21 @@ export const ragApi = {
     )
   },
 
-  // -- §26 URL 导入 ----------------------------------------------------------
-  /** 单 URL 一次调用；sitemap 响应返回 { sitemap:true, urls }，由客户端逐个调度 */
+  // -- §26 URL 导入（14-e：可选 engine；sitemap 展开已下线） ------------------
   async importUrl(
     kbId: string,
     url: string,
-    filename?: string,
-  ): Promise<{ doc?: DocSummary; deduplicated?: boolean; sitemap?: boolean; urls?: string[] }> {
+    opts?: { filename?: string; engine?: 'mineru' | 'node' },
+  ): Promise<{ doc?: DocSummary; deduplicated?: boolean }> {
     return asJson(
       await fetch(`/api/kb/${encodeURIComponent(kbId)}/import-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, ...(filename ? { filename } : {}) }),
+        body: JSON.stringify({
+          url,
+          ...(opts?.filename ? { filename: opts.filename } : {}),
+          ...(opts?.engine ? { engine: opts.engine } : {}),
+        }),
       }),
     )
   },

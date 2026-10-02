@@ -352,6 +352,8 @@ export interface RagSettings {
   rerankApiBase: string
   rerankApiKey: string
   rerankModel: string
+  /** MinerU 接入方式（Task 14-e）：selfhost | cloud | cloud-agent */
+  mineruProvider: string
   mineruApiUrl: string
   mineruApiKey: string
   mineruTier: string
@@ -368,6 +370,10 @@ export type TestKind = 'qdrant' | 'embed' | 'rerank' | 'mineru'
 export interface TestResult {
   ok: boolean
   message: string
+  /** mineru 探测时的接入方式（selfhost | cloud | cloud-agent） */
+  provider?: string
+  /** 探测细节（端点/原因，失败时辅助排查） */
+  detail?: string
   dim?: number
   version?: string
 }

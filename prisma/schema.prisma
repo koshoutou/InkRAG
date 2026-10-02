@@ -33,11 +33,15 @@ model QdrantSetting {
   rerankApiKey      String   @default("")
   rerankModel       String   @default("")
 
-  // ---- MinerU Local Parse Server（计划书 §5：六步协议）----
+  // ---- MinerU 解析服务（三 Provider：指南《MinerU_API_完整指南》）----
+  /// selfhost（自部署 V1，六步协议）| cloud（官方云·精准 v4，Token）| cloud-agent（官方云·Agent 轻量，免 Token）
+  mineruProvider   String   @default("selfhost") // selfhost | cloud | cloud-agent
+  /// selfhost：V1 API 根地址（如 http://host:8000）；cloud/cloud-agent 固定 mineru.net，此字段不参与
   mineruApiUrl      String   @default("")
+  /// selfhost：V1 可选鉴权；cloud：API Token（必填）；cloud-agent：不使用
   mineruApiKey      String   @default("")
-  mineruTier        String   @default("standard") // flash | basic | standard | advanced
-  mineruOcrMode     String   @default("auto")     // auto | txt | ocr
+  mineruTier        String   @default("standard") // flash | basic | standard | advanced（仅 selfhost）
+  mineruOcrMode     String   @default("auto")     // auto | txt | ocr（仅 selfhost）
 
   // ---- 平台行为开关 ----
   /// 未配置 Qdrant 时是否启用内置本地向量引擎（沙箱演示模式）

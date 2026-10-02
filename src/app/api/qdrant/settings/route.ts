@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { testConnection } from '@/lib/qdrant'
+import { MINERU_PROVIDERS, normalizeMinerUProvider } from '@/lib/rag/settings'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -16,6 +17,7 @@ function serializeSettings(row: {
   rerankApiBase: string
   rerankApiKey: string
   rerankModel: string
+  mineruProvider: string
   mineruApiUrl: string
   mineruApiKey: string
   mineruTier: string
@@ -37,6 +39,7 @@ function serializeSettings(row: {
     rerankApiBase: row.rerankApiBase,
     rerankApiKey: row.rerankApiKey,
     rerankModel: row.rerankModel,
+    mineruProvider: normalizeMinerUProvider(row.mineruProvider),
     mineruApiUrl: row.mineruApiUrl,
     mineruApiKey: row.mineruApiKey,
     mineruTier: row.mineruTier,
@@ -69,6 +72,8 @@ interface SettingsInput {
   rerankApiBase?: string
   rerankApiKey?: string
   rerankModel?: string
+  /** MinerU 接入方式：selfhost | cloud | cloud-agent（缺省保留现值；非法值 400） */
+  mineruProvider?: string
   mineruApiUrl?: string
   mineruApiKey?: string
   mineruTier?: string
@@ -84,6 +89,14 @@ interface SettingsInput {
 /** PUT /api/qdrant/settings — upsert 完整配置（支持全部新字段） */
 export async function PUT(req: NextRequest) {
   const body = (await req.json().catch(() => ({}))) as SettingsInput
+  if (body.mineruProvider !== undefined && !MINERU_PROVIDERS.includes(body.mineruProvider as never)) {
+    return NextResponse.json(
+      { error: `无效 mineruProvider: ${body.mineruProvider}（可选 ${MINERU_PROVIDERS.join(' / ')}）` },
+      { status: 400 },
+    )
+  }
+  // mineruProvider 缺省时保留现值（旧客户端/基座 SettingsDialog 不携带该字段，避免意外重置回 selfhost）
+  const existing = await db.qdrantSetting.findUnique({ where: { id: 'default' } })
   const data = {
     url: (body.url ?? '').trim(),
     apiKey: body.apiKey ?? '',
@@ -94,6 +107,10 @@ export async function PUT(req: NextRequest) {
     rerankApiBase: (body.rerankApiBase ?? '').trim(),
     rerankApiKey: body.rerankApiKey ?? '',
     rerankModel: (body.rerankModel ?? '').trim(),
+    mineruProvider:
+      body.mineruProvider !== undefined
+        ? normalizeMinerUProvider(body.mineruProvider)
+        : normalizeMinerUProvider(existing?.mineruProvider ?? 'selfhost'),
     mineruApiUrl: (body.mineruApiUrl ?? '').trim(),
     mineruApiKey: body.mineruApiKey ?? '',
     mineruTier: body.mineruTier ?? 'standard',

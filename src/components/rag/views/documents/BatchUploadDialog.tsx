@@ -3,9 +3,11 @@
 // 批量上传 / URL 导入对话框（契约 §26 UI 端）
 //
 // 容器持有全部任务状态（对话框关闭仅卸载 DOM，上传/流水线/事件在后台继续，重开可见进度）：
-//   - 本地文件：XHR 字节级上传进度（并发 2）→ socket 六状态机阶段进度 → ready/failed/dedup 终态
-//   - URL 导入：逐 URL 调 POST /import-url（并发 2）；sitemap 响应 → 展开子链接自动入队（会话 ≤30）
+//   - 本地文件：两段式（LocalFileTab 待上传队列确认后交入）→ XHR 字节级上传进度（并发 2）
+//     → socket 六状态机阶段进度 → ready/failed/dedup 终态；每文件携带 engine（mineru|node）
+//   - URL 导入：逐 URL 调 POST /import-url（并发 2，携带 engine）；sitemap 展开已下线（14-e 契约）
 // 事件源：socket.io kb:{kbId} 房间 document:status / document:progress / document:done
+// MinerU 探测：useMineruStatus（容器调一次，两 Tab 共享；失败静默降级不阻塞打开）
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
@@ -23,7 +25,7 @@ import { useRealtime } from '../../useRealtime'
 import type { DocumentDoneEvent, DocumentProgressEvent, DocumentStatusEvent, DocStatus } from '../../types'
 import { LocalFileTab } from './LocalFileTab'
 import { UrlImportTab, MAX_URLS } from './UrlImportTab'
-import type { FileTask, UrlTask } from './shared'
+import { useMineruStatus, type FileTask, type ParseEngine, type UrlTask } from './shared'
 
 const UPLOAD_CONCURRENCY = 2
 const URL_CONCURRENCY = 2
@@ -48,6 +50,7 @@ export function BatchUploadDialog({
 }) {
   const queryClient = useQueryClient()
   const { subscribeRooms, on } = useRealtime()
+  const mineru = useMineruStatus()
 
   const [tab, setTab] = useState<'local' | 'url'>('local')
   const [fileTasks, setFileTasks] = useState<FileTask[]>([])
@@ -122,7 +125,7 @@ export function BatchUploadDialog({
     try {
       const r = await uploadDocument(kb, task.file, (p) => {
         updateFileTask(id, { uploadPct: Math.round(p * 100) })
-      })
+      }, task.engine)
       if (r.deduplicated) {
         updateFileTask(id, { phase: 'dedup', uploadPct: 100, docId: r.doc?.id, endedAt: Date.now() })
         toast.info(`「${task.file.name}」秒传命中：同内容文档已存在`)
@@ -147,15 +150,16 @@ export function BatchUploadDialog({
     }
   }
 
-  const addFiles = useCallback((files: File[]) => {
+  const addFiles = useCallback((items: { file: File; engine: ParseEngine }[]) => {
     const kb = kbIdRef.current
     if (!kb) {
       toast.error('请先选择知识库')
       return
     }
-    const tasks: FileTask[] = files.map((file) => ({
+    const tasks: FileTask[] = items.map(({ file, engine }) => ({
       id: newId(),
       file,
+      engine,
       uploadPct: 0,
       phase: 'waiting',
       stageProgress: 0,
@@ -184,7 +188,7 @@ export function BatchUploadDialog({
   }, [])
 
   // -------------------------------------------------------------------------
-  // URL 导入：逐 URL 调度（并发 2）+ sitemap 展开。普通函数 + ref 读写
+  // URL 导入：逐 URL 调度（并发 2，携带引擎）。普通函数 + ref 读写
   // -------------------------------------------------------------------------
 
   async function pumpUrls(): Promise<void> {
@@ -207,29 +211,7 @@ export function BatchUploadDialog({
     }
     updateUrlTask(id, { phase: 'fetching', startedAt: Date.now(), error: undefined })
     try {
-      const r = await ragApi.importUrl(kb, task.url)
-      if (r.sitemap && Array.isArray(r.urls)) {
-        updateUrlTask(id, { phase: 'sitemap', expandedCount: r.urls.length, endedAt: Date.now() })
-        // 展开子链接入队（会话配额）
-        const budget = MAX_URLS - urlSessionCountRef.current
-        const children = r.urls.slice(0, Math.max(0, budget))
-        if (children.length > 0) {
-          const childTasks: UrlTask[] = children.map((url) => ({
-            id: newId(),
-            url,
-            phase: 'waiting',
-            stageProgress: 0,
-            startedAt: Date.now(),
-          }))
-          urlTasksRef.current = [...urlTasksRef.current, ...childTasks]
-          setUrlTasks(urlTasksRef.current)
-          urlSessionCountRef.current += children.length
-          urlQueueRef.current.push(...childTasks.map((t) => t.id))
-          toast.info(`站点地图展开 ${children.length} 个子链接，已入队导入`)
-          void pumpUrls()
-        }
-        return
-      }
+      const r = await ragApi.importUrl(kb, task.url, task.engine ? { engine: task.engine } : undefined)
       if (r.deduplicated) {
         updateUrlTask(id, { phase: 'dedup', docId: r.doc?.id, filename: r.doc?.filename, endedAt: Date.now() })
         toast.info('该页面内容已存在（秒传命中）')
@@ -250,7 +232,7 @@ export function BatchUploadDialog({
     }
   }
 
-  const startUrlImport = useCallback((urls: string[]) => {
+  const startUrlImport = useCallback((urls: string[], engine: ParseEngine) => {
     const kb = kbIdRef.current
     if (!kb) {
       toast.error('请先选择知识库')
@@ -268,6 +250,7 @@ export function BatchUploadDialog({
     const tasks: UrlTask[] = batch.map((url) => ({
       id: newId(),
       url,
+      engine,
       phase: 'waiting',
       stageProgress: 0,
       startedAt: Date.now(),
@@ -305,7 +288,7 @@ export function BatchUploadDialog({
       fileTasksRef.current = fileTasksRef.current.map((t) => {
         if (t.docId === docId) {
           touched = true
-          return fn(t)
+          return fn(t) as FileTask
         }
         return t
       })
@@ -314,7 +297,7 @@ export function BatchUploadDialog({
       urlTasksRef.current = urlTasksRef.current.map((t) => {
         if (t.docId === docId) {
           touchedUrl = true
-          return fn(t)
+          return fn(t) as UrlTask
         }
         return t
       })
@@ -388,7 +371,7 @@ export function BatchUploadDialog({
   const fileBusy =
     fileTasks.some((t) => t.phase === 'waiting' || t.phase === 'uploading' || t.phase === 'pipeline')
   const urlRunning = urlTasks.some((t) => t.phase === 'waiting' || t.phase === 'fetching' || t.phase === 'pipeline')
-  const urlScheduled = urlTasks.filter((t) => t.phase !== 'sitemap').length
+  const urlScheduled = urlTasks.length
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -404,7 +387,7 @@ export function BatchUploadDialog({
             )}
           </DialogTitle>
           <DialogDescription className="text-xs leading-relaxed">
-            多文件并发上传（2 路，字节级进度）与外部 URL 导入；解析进度经 socket 实时推送，关闭对话框后任务继续。
+            多文件并发上传（2 路，字节级进度）与外部 URL 导入；选择文件后需点击「开始上传」确认执行，解析进度经 socket 实时推送，关闭对话框后任务继续。
           </DialogDescription>
         </DialogHeader>
 
@@ -425,14 +408,16 @@ export function BatchUploadDialog({
           </TabsList>
 
           <div className="min-h-0 flex-1 overflow-y-auto pr-0.5 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25 [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/45 [&::-webkit-scrollbar-track]:bg-transparent">
-            <TabsContent value="local" className="mt-0">
-              <LocalFileTab tasks={fileTasks} busy={fileBusy} onAddFiles={addFiles} onRetry={retryFile} onClear={clearFileTasks} />
+            {/* forceMount：切 Tab 不卸载——待上传队列 / 引擎选择 / 开关状态跨 Tab 保留（Radix 对非激活项加 hidden） */}
+            <TabsContent value="local" forceMount className="mt-0 data-[state=inactive]:hidden">
+              <LocalFileTab tasks={fileTasks} busy={fileBusy} mineru={mineru} onAddFiles={addFiles} onRetry={retryFile} onClear={clearFileTasks} />
             </TabsContent>
-            <TabsContent value="url" className="mt-0">
+            <TabsContent value="url" forceMount className="mt-0 data-[state=inactive]:hidden">
               <UrlImportTab
                 tasks={urlTasks}
                 running={urlRunning}
                 pendingCount={urlScheduled}
+                mineru={mineru}
                 onStart={startUrlImport}
                 onClear={clearUrlTasks}
               />

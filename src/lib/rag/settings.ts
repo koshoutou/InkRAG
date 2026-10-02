@@ -4,12 +4,25 @@
  * 设置存于 Prisma QdrantSetting 单行（id='default'），首次读取时自动播种。
  * 双模式判定规则：
  *   - vectorMode: url 非空 → 'qdrant'（运行时不可达由 getVectorStore 自动降级 local 并告警），否则 'local'
- *   - parseMode:  mineruApiUrl 非空 → 'mineru'；否则 useFallbackParser → 'fallback'；否则 'none'（解析时抛错）
+ *   - parseMode（MinerU 三 Provider，指南《MinerU_API_完整指南》）：
+ *       provider='cloud-agent' → 'mineru'（免 Token 恒可用）
+ *       provider='cloud'       → mineruApiKey 非空 → 'mineru'
+ *       provider='selfhost'    → mineruApiUrl 非空 → 'mineru'
+ *       否则 useFallbackParser → 'fallback'；再否则 'none'（解析时抛错）
  *   - embedMode:  embedApiBase + embedModel 非空 → 'real'；否则 useMockEmbedding → 'mock'；否则 'none'
  *   - rerankMode: rerankApiBase + rerankModel 非空 → 'real'；否则 useMockRerank → 'mock'；否则 'none'
  */
 import { db } from '@/lib/db'
 import type { EmbedMode, ParseMode, RerankMode, VectorMode } from './types'
+
+/** MinerU 接入方式（三种官方接入方式的统一抽象） */
+export type MinerUProviderKind = 'selfhost' | 'cloud' | 'cloud-agent'
+
+export const MINERU_PROVIDERS: MinerUProviderKind[] = ['selfhost', 'cloud', 'cloud-agent']
+
+export function normalizeMinerUProvider(v: unknown): MinerUProviderKind {
+  return MINERU_PROVIDERS.includes(v as MinerUProviderKind) ? (v as MinerUProviderKind) : 'selfhost'
+}
 
 export interface RagSettings {
   /** 原始设置行 */
@@ -24,6 +37,7 @@ export interface RagSettings {
     rerankApiBase: string
     rerankApiKey: string
     rerankModel: string
+    mineruProvider: string
     mineruApiUrl: string
     mineruApiKey: string
     mineruTier: string
@@ -39,7 +53,7 @@ export interface RagSettings {
   embedMode: EmbedMode
   rerankMode: RerankMode
   qdrant: { url: string; apiKey: string }
-  mineru: { url: string; apiKey: string; tier: string; ocrMode: string }
+  mineru: { provider: MinerUProviderKind; url: string; apiKey: string; tier: string; ocrMode: string }
   embed: { apiBase: string; apiKey: string; model: string }
   rerank: { apiBase: string; apiKey: string; model: string }
 }
@@ -63,8 +77,12 @@ export async function getRagSettings(): Promise<RagSettings> {
 
   const vectorMode: VectorMode = row.url.trim() ? 'qdrant' : 'local'
 
+  const mineruProvider = normalizeMinerUProvider(row.mineruProvider)
   let parseMode: ParseMode
-  if (row.mineruApiUrl.trim()) {
+  const mineruConfigured =
+    mineruProvider === 'cloud-agent' ||
+    (mineruProvider === 'cloud' ? row.mineruApiKey.trim().length > 0 : row.mineruApiUrl.trim().length > 0)
+  if (mineruConfigured) {
     parseMode = 'mineru'
   } else if (row.useFallbackParser) {
     parseMode = 'fallback'
@@ -102,6 +120,7 @@ export async function getRagSettings(): Promise<RagSettings> {
       rerankApiBase: row.rerankApiBase,
       rerankApiKey: row.rerankApiKey,
       rerankModel: row.rerankModel,
+      mineruProvider,
       mineruApiUrl: row.mineruApiUrl,
       mineruApiKey: row.mineruApiKey,
       mineruTier: row.mineruTier,
@@ -118,6 +137,7 @@ export async function getRagSettings(): Promise<RagSettings> {
     rerankMode,
     qdrant: { url: row.url.trim(), apiKey: row.apiKey },
     mineru: {
+      provider: mineruProvider,
       url: row.mineruApiUrl.trim(),
       apiKey: row.mineruApiKey,
       tier: row.mineruTier || 'standard',

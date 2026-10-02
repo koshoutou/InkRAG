@@ -9,6 +9,7 @@ import { db } from '@/lib/db'
 import { ensureDocDir, sourcePath, ARTIFACTS_ROOT } from '@/lib/rag/artifacts'
 import { enqueueDocument } from '@/lib/rag/pipeline'
 import { parseChunkConfig, toDocSummary } from '@/lib/rag/serialize'
+import { ALL_ACCEPTED_EXTS, extToMime } from '@/lib/rag/parsers/formats'
 import type { Document } from '@prisma/client'
 
 export const dynamic = 'force-dynamic'
@@ -16,7 +17,8 @@ export const runtime = 'nodejs'
 
 type Ctx = { params: Promise<{ id: string }> }
 
-const SUPPORTED_EXTS = ['pdf', 'docx', 'md', 'markdown', 'txt', 'html', 'htm']
+/** 上传接受的全量类型（权威清单见 lib/rag/parsers/formats.ts） */
+const SUPPORTED_EXTS: string[] = [...ALL_ACCEPTED_EXTS]
 
 /** GET /api/kb/[id]/documents?status=&q=&limit=&offset= → { docs, total } */
 export async function GET(req: NextRequest, ctx: Ctx) {
@@ -89,6 +91,18 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       }
     }
 
+    // 解析引擎选择（Task 14-e）：可选 'mineru' | 'node'，缺省跟随全局设置；
+    // engine=mineru 即便全局 parseMode 非 mineru 也强制走 MinerU（engineChoice 优先级高于全局）
+    const engineRaw = form.get('engine')
+    let engineChoice: 'mineru' | 'node' | undefined
+    if (typeof engineRaw === 'string' && engineRaw.trim()) {
+      const v = engineRaw.trim()
+      if (v !== 'mineru' && v !== 'node') {
+        return NextResponse.json({ error: `无效 engine: ${v}（可选 mineru / node）` }, { status: 400 })
+      }
+      engineChoice = v
+    }
+
     // 流式 sha256 + 落盘临时文件
     await fs.mkdir(ARTIFACTS_ROOT, { recursive: true })
     const hash = createHash('sha256')
@@ -151,6 +165,7 @@ export async function POST(req: NextRequest, ctx: Ctx) {
           parseConfigV,
           chunkConfigSnap,
           storageKey: `${id}/${docId}/`,
+          ...(engineChoice ? { metaJson: JSON.stringify({ engineChoice }) } : {}),
         },
       })
     } catch (e: any) {
@@ -181,20 +196,5 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 }
 
 function guessMime(ext: string): string {
-  switch (ext) {
-    case 'pdf':
-      return 'application/pdf'
-    case 'docx':
-      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    case 'md':
-    case 'markdown':
-      return 'text/markdown'
-    case 'html':
-    case 'htm':
-      return 'text/html'
-    case 'txt':
-      return 'text/plain'
-    default:
-      return 'application/octet-stream'
-  }
+  return extToMime(ext)
 }

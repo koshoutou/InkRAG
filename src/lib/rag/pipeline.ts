@@ -389,6 +389,12 @@ async function execParse(job: JobRow, doc: DocRow): Promise<void> {
   const localPath = sourcePath(doc.kbId, doc.id, ext)
   const started = Date.now()
 
+  // per-doc 引擎选择（Task 14-e）：上传/URL 导入时写入 metaJson.engineChoice，优先级高于全局 parseMode
+  const metaBefore = safeParseJson(doc.metaJson)
+  const engineChoice = metaBefore.engineChoice
+  const engine: 'mineru' | 'node' | undefined =
+    engineChoice === 'mineru' || engineChoice === 'node' ? engineChoice : undefined
+
   const result = await parseDocument({
     docId: doc.id,
     kbId: doc.kbId,
@@ -396,6 +402,7 @@ async function execParse(job: JobRow, doc: DocRow): Promise<void> {
     localPath,
     mimeType: doc.mimeType,
     settings,
+    engine,
     onProgress: (e) => {
       void reportProgress(doc, 'parsing', Math.max(5, Math.min(99, e.progress)), e.message)
     },

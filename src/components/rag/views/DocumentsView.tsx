@@ -255,7 +255,7 @@ export function DocumentsView() {
             size="sm"
             className="h-7 gap-1.5 text-xs"
             onClick={() => setUploadOpen(true)}
-            title="多文件批量上传 / URL 导入（支持 pdf、docx、md、txt、html 与外部链接）"
+            title="多文件批量上传 / URL 导入（30 种类型 · Node / MinerU 双引擎，确认后执行）"
           >
             <UploadCloud className="h-3.5 w-3.5" />
             上传 / 导入
@@ -266,11 +266,11 @@ export function DocumentsView() {
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-xl border border-border/60 bg-muted/20 px-4 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
           <span className="flex items-center gap-1.5">
             <UploadCloud className="h-3.5 w-3.5 shrink-0 text-teal-500" />
-            批量上传 .pdf / .docx / .md / .markdown / .txt / .html，并发 2 路 + 流式进度，相同内容自动秒传
+            批量上传 PDF / Office / 图片 / Markdown / 网页 / CSV 等 30 种类型，选完点「开始上传」确认执行（并发 2 路 + 流式进度），相同内容自动秒传
           </span>
           <span className="flex items-center gap-1.5">
             <ExternalLink className="h-3.5 w-3.5 shrink-0 text-emerald-500" />
-            或输入外部 wiki / 文档站 URL，服务端抓取抽取正文导入（sitemap 自动展开）
+            或输入外部 URL 导入，可选 Node 抽取正文（快）或 MinerU 高精度解析（OCR）
           </span>
         </div>
       </div>

@@ -2,22 +2,31 @@
 
 // 批量上传 / URL 导入（契约 §26）· 共享 UI 原子件
 // StageStepper：六状态机阶段步进器（queued→parsing→chunking→embedding→upserting→ready|failed）
+// 引擎支持矩阵（14-e 契约）：ENGINE_MATRIX + EngineBadge + useMineruStatus（探测 POST /api/qdrant/test {kind:'mineru'}）
 
+import { useCallback, useEffect, useState } from 'react'
 import {
+  BookOpen,
   CheckCircle2,
   Clock,
+  Cpu,
   FileCode2,
+  FileImage,
   FileSearch,
+  FileSpreadsheet,
   FileText,
   FileType2,
   Globe,
+  Presentation,
   Scissors,
   Sparkles,
+  Table,
   UploadCloud,
   XCircle,
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { ragApi } from '../../api'
 import type { DocStatus } from '../../types'
 
 /** 流水线五个过程阶段（终态另算） */
@@ -104,16 +113,189 @@ export function StageStepper({
 }
 
 // ---------------------------------------------------------------------------
+// 解析引擎（14-e 契约：engine='mineru'|'node'，上传 FormData / URL body 可选字段）
+// ---------------------------------------------------------------------------
+
+export type ParseEngine = 'mineru' | 'node'
+
+export interface EngineSupport {
+  /** MinerU 引擎是否支持该类型 */
+  mineru: boolean
+  /** Node 本地引擎是否支持该类型 */
+  node: boolean
+  /** 推荐引擎（扫描件/复杂版式→MinerU 高精度；纯文本/网页/数据→Node 快） */
+  recommend: ParseEngine
+}
+
+/**
+ * 类型 × 引擎支持矩阵（权威，14-e 契约）：
+ * - MinerU 推荐：pdf（扫描件/复杂版式）、图片（png/jpg/jpeg/jp2/webp/gif/bmp）、doc、ppt/pptx、xls/xlsx
+ * - Node 推荐（快）：md/markdown、txt、html/htm/shtml、mhtml/mht、csv/tsv、rtf、docx、epub
+ * - 仅 MinerU：ppt、xls、全部图片类型、doc
+ * - 仅 Node：md、markdown、txt、rtf、csv、tsv、epub、ofd、odt、ods、odp、shtml、mhtml、mht
+ */
+export const ENGINE_MATRIX: Record<string, EngineSupport> = {
+  pdf: { mineru: true, node: true, recommend: 'mineru' },
+  doc: { mineru: true, node: false, recommend: 'mineru' },
+  docx: { mineru: true, node: true, recommend: 'node' },
+  ppt: { mineru: true, node: false, recommend: 'mineru' },
+  pptx: { mineru: true, node: true, recommend: 'mineru' },
+  xls: { mineru: true, node: false, recommend: 'mineru' },
+  xlsx: { mineru: true, node: true, recommend: 'mineru' },
+  png: { mineru: true, node: false, recommend: 'mineru' },
+  jpg: { mineru: true, node: false, recommend: 'mineru' },
+  jpeg: { mineru: true, node: false, recommend: 'mineru' },
+  jp2: { mineru: true, node: false, recommend: 'mineru' },
+  webp: { mineru: true, node: false, recommend: 'mineru' },
+  gif: { mineru: true, node: false, recommend: 'mineru' },
+  bmp: { mineru: true, node: false, recommend: 'mineru' },
+  md: { mineru: false, node: true, recommend: 'node' },
+  markdown: { mineru: false, node: true, recommend: 'node' },
+  txt: { mineru: false, node: true, recommend: 'node' },
+  html: { mineru: false, node: true, recommend: 'node' },
+  htm: { mineru: false, node: true, recommend: 'node' },
+  shtml: { mineru: false, node: true, recommend: 'node' },
+  mhtml: { mineru: false, node: true, recommend: 'node' },
+  mht: { mineru: false, node: true, recommend: 'node' },
+  csv: { mineru: false, node: true, recommend: 'node' },
+  tsv: { mineru: false, node: true, recommend: 'node' },
+  rtf: { mineru: false, node: true, recommend: 'node' },
+  epub: { mineru: false, node: true, recommend: 'node' },
+  ofd: { mineru: false, node: true, recommend: 'node' },
+  odt: { mineru: false, node: true, recommend: 'node' },
+  ods: { mineru: false, node: true, recommend: 'node' },
+  odp: { mineru: false, node: true, recommend: 'node' },
+}
+
+const ENGINE_FALLBACK: EngineSupport = { mineru: false, node: true, recommend: 'node' }
+
+/** 按扩展名（无点小写）查引擎支持；未知类型按「仅 Node」兜底 */
+export function engineOf(ext: string): EngineSupport {
+  return ENGINE_MATRIX[ext.toLowerCase()] ?? ENGINE_FALLBACK
+}
+
+/** 文件扩展名（小写，无点）——engineOf 的配套小工具 */
+export function extOf(name: string): string {
+  return fileExt(name)
+}
+
+/** 引擎小徽标（violet=MinerU / teal=Node） */
+export function EngineBadge({ engine, className }: { engine: ParseEngine; className?: string }) {
+  if (engine === 'mineru') {
+    return (
+      <span
+        className={cn(
+          'inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-violet-500/40 bg-violet-500/10 px-1.5 text-[10px] font-medium text-violet-600 dark:text-violet-300',
+          className,
+        )}
+      >
+        <Sparkles className="h-3 w-3" />
+        MinerU
+      </span>
+    )
+  }
+  return (
+    <span
+      className={cn(
+        'inline-flex h-5 shrink-0 items-center gap-1 rounded-full border border-teal-500/40 bg-teal-500/10 px-1.5 text-[10px] font-medium text-teal-600 dark:text-teal-300',
+        className,
+      )}
+    >
+      <Cpu className="h-3 w-3" />
+      Node
+    </span>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// MinerU 状态探测（容器调用一次，两个 Tab 共享；失败静默降级不阻塞 UI）
+// ---------------------------------------------------------------------------
+
+export interface MineruStatus {
+  /** 探测进行中（初始 true，开关禁用） */
+  probing: boolean
+  /** 探测通过：MinerU 服务可用 */
+  available: boolean
+  /** 探测详情（成功说明 / 失败原因），探测中为 null */
+  message: string | null
+  /** 重新检测 */
+  reprobe: () => void
+}
+
+export function useMineruStatus(): MineruStatus {
+  const [probing, setProbing] = useState(true)
+  const [available, setAvailable] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+  const [nonce, setNonce] = useState(0)
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        // 1) 读全局设置拿 mineru 地址/Key（14-e 契约：{kind:'mineru'} 不带 url 时后端读全局设置，
+        //    过渡期旧实现需显式 url——带上设置值两头兼容；读失败按未配置处理）
+        let url = ''
+        let apiKey = ''
+        try {
+          const s = await ragApi.getSettings()
+          url = (s.mineruApiUrl || '').trim()
+          apiKey = s.mineruApiKey || ''
+        } catch {
+          /* 设置读取失败不阻塞探测 */
+        }
+        // 2) POST /api/qdrant/test {kind:'mineru'}（客户端 10s 超时）
+        const res = await fetch('/api/qdrant/test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'mineru', ...(url ? { url, apiKey } : {}) }),
+          signal: AbortSignal.timeout(10_000),
+          cache: 'no-store',
+        })
+        const j: { ok?: boolean; message?: string } = await res.json().catch(() => ({}))
+        if (cancelled) return
+        const ok = res.ok && j.ok === true
+        setAvailable(ok)
+        setMessage(ok ? `探测成功${j.message ? `：${j.message}` : ''}` : `探测失败${j.message ? `：${j.message}` : `（HTTP ${res.status}）`}`)
+      } catch (e) {
+        if (cancelled) return
+        setAvailable(false)
+        setMessage(`探测失败：${(e as Error).message}`)
+      } finally {
+        if (!cancelled) setProbing(false)
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [nonce])
+
+  const reprobe = useCallback(() => {
+    setProbing(true)
+    setNonce((n) => n + 1)
+  }, [])
+
+  return { probing, available, message, reprobe }
+}
+
+// ---------------------------------------------------------------------------
 // 文件类型徽标
 // ---------------------------------------------------------------------------
 
 const TYPE_STYLE: { match: RegExp; icon: LucideIcon; cls: string }[] = [
   { match: /\.pdf$/i, icon: FileText, cls: 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-300' },
-  { match: /\.docx$/i, icon: FileText, cls: 'border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-300' },
+  { match: /\.(doc|docx)$/i, icon: FileText, cls: 'border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-300' },
+  { match: /\.(ppt|pptx)$/i, icon: Presentation, cls: 'border-orange-500/40 bg-orange-500/10 text-orange-600 dark:text-orange-300' },
+  { match: /\.(xls|xlsx)$/i, icon: FileSpreadsheet, cls: 'border-green-500/40 bg-green-500/10 text-green-600 dark:text-green-300' },
+  { match: /\.(csv|tsv)$/i, icon: Table, cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' },
+  { match: /\.(png|jpe?g|jp2|webp|gif|bmp)$/i, icon: FileImage, cls: 'border-purple-500/40 bg-purple-500/10 text-purple-600 dark:text-purple-300' },
   { match: /\.(md|markdown)$/i, icon: FileCode2, cls: 'border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-300' },
-  { match: /\.(html|htm)$/i, icon: FileType2, cls: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300' },
+  { match: /\.(html|htm|shtml|mhtml|mht)$/i, icon: FileType2, cls: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300' },
+  { match: /\.epub$/i, icon: BookOpen, cls: 'border-stone-500/40 bg-stone-500/10 text-stone-600 dark:text-stone-300' },
+  { match: /\.(rtf|ofd|odt|ods|odp)$/i, icon: FileType2, cls: 'border-stone-500/40 bg-stone-500/10 text-stone-600 dark:text-stone-300' },
   { match: /\.txt$/i, icon: FileText, cls: 'border-teal-500/40 bg-teal-500/10 text-teal-600 dark:text-teal-300' },
 ]
+
+const FALLBACK_STYLE = { icon: FileText, cls: 'border-border bg-muted/40 text-muted-foreground' }
 
 /** URL 导入徽标（emerald Globe） */
 const URL_STYLE = { icon: Globe, cls: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' }
@@ -135,7 +317,7 @@ export function FileTypeIcon({
       </span>
     )
   }
-  const hit = TYPE_STYLE.find((t) => t.match.test(filename)) ?? TYPE_STYLE[4]
+  const hit = TYPE_STYLE.find((t) => t.match.test(filename)) ?? FALLBACK_STYLE
   const Icon = hit.icon
   return (
     <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-md border', hit.cls, className)}>
@@ -150,8 +332,13 @@ export function fileExt(name: string): string {
   return m ? m[1].toLowerCase() : '?'
 }
 
-/** 支持的本地文件类型（契约 §26：pdf/docx/md/markdown/txt/html/htm） */
-export const ACCEPT_EXTS = ['.pdf', '.docx', '.md', '.markdown', '.txt', '.html', '.htm']
+/** 支持的本地文件类型（14-e 契约全集：30 种扩展名） */
+export const ACCEPT_EXTS = [
+  '.pdf', '.doc', '.docx', '.ppt', '.pptx', '.xls', '.xlsx',
+  '.rtf', '.odt', '.ods', '.odp', '.csv', '.tsv', '.epub', '.ofd',
+  '.html', '.htm', '.shtml', '.mhtml', '.mht', '.md', '.markdown', '.txt',
+  '.png', '.jpg', '.jpeg', '.jp2', '.webp', '.gif', '.bmp',
+]
 export const ACCEPT_ATTR = ACCEPT_EXTS.join(',')
 
 export function isSupportedFile(name: string): boolean {
@@ -174,6 +361,8 @@ export type FilePhase = 'waiting' | 'uploading' | 'pipeline' | 'ready' | 'failed
 export interface FileTask {
   id: string
   file: File
+  /** 解析引擎（两段式确认时由待上传队列带入；重试沿用） */
+  engine?: ParseEngine
   uploadPct: number
   phase: FilePhase
   status?: DocStatus
@@ -187,14 +376,15 @@ export interface FileTask {
   endedAt?: number
 }
 
-export type UrlPhase = 'waiting' | 'fetching' | 'pipeline' | 'ready' | 'failed' | 'dedup' | 'sitemap'
+export type UrlPhase = 'waiting' | 'fetching' | 'pipeline' | 'ready' | 'failed' | 'dedup'
 
 export interface UrlTask {
   id: string
   url: string
+  /** 解析引擎（提交批次时带入） */
+  engine?: ParseEngine
   phase: UrlPhase
   note?: string
-  expandedCount?: number
   filename?: string
   docId?: string
   status?: DocStatus
@@ -211,5 +401,5 @@ export function isFileTerminal(t: FileTask): boolean {
 }
 
 export function isUrlTerminal(t: UrlTask): boolean {
-  return t.phase === 'ready' || t.phase === 'failed' || t.phase === 'dedup' || t.phase === 'sitemap'
+  return t.phase === 'ready' || t.phase === 'failed' || t.phase === 'dedup'
 }

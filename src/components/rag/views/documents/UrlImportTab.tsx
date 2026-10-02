@@ -1,7 +1,8 @@
 'use client'
 
 // 批量上传 ·「URL 导入」Tab：URL 输入 + chip 管理 + 逐 URL 导入进度卡
-// sitemap 响应 → 展开子链接入队继续导入（会话总数 ≤30）
+// 14-e 契约：可选解析引擎（Node 网页正文抽取 / MinerU 高精度，MinerU 不可用时禁用）；
+//           sitemap 展开递归已下线（后端不再支持 sitemapindex/urlset 导入）
 // 状态与编排在 BatchUploadDialog 容器（本组件纯展示 + 输入交互）
 
 import { useCallback, useState } from 'react'
@@ -9,10 +10,12 @@ import { AnimatePresence, motion } from 'framer-motion'
 import {
   BadgeCheck,
   CheckCircle2,
+  Cpu,
   Globe,
-  ListTree,
   Loader2,
   Plus,
+  Sparkles,
+  TriangleAlert,
   Timer,
   X,
   XCircle,
@@ -20,7 +23,7 @@ import {
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { cn } from '@/lib/utils'
-import { FileTypeIcon, StageStepper, humanDuration, type UrlTask } from './shared'
+import { EngineBadge, FileTypeIcon, StageStepper, humanDuration, type MineruStatus, type ParseEngine, type UrlTask } from './shared'
 
 export const MAX_URLS = 30
 
@@ -44,23 +47,109 @@ export function parseUrlInput(raw: string): { urls: string[]; invalid: number } 
   return { urls, invalid }
 }
 
+// ---------------------------------------------------------------------------
+// 引擎选择卡（两枚卡片式 radio；MinerU 探测不可用时禁用 + 提示）
+// ---------------------------------------------------------------------------
+
+function UrlEnginePicker({
+  engine,
+  mineru,
+  onChange,
+}: {
+  engine: ParseEngine
+  mineru: MineruStatus
+  onChange: (e: ParseEngine) => void
+}) {
+  const mineruDisabled = !mineru.available
+  return (
+    <div role="radiogroup" aria-label="URL 解析引擎" className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+      <button
+        type="button"
+        role="radio"
+        aria-checked={engine === 'node'}
+        onClick={() => onChange('node')}
+        className={cn(
+          'rounded-lg border p-2.5 text-left transition-colors',
+          engine === 'node'
+            ? 'border-teal-500/60 bg-teal-500/10'
+            : 'border-border/60 bg-card hover:border-teal-500/40 hover:bg-muted/40',
+        )}
+      >
+        <span className="flex items-center gap-1.5 text-xs font-medium">
+          <Cpu className="h-3.5 w-3.5 shrink-0 text-teal-500" />
+          Node 解析
+          <span className="ml-auto rounded-full border border-border/60 bg-muted/60 px-1.5 py-px text-[9px] font-normal text-muted-foreground">
+            默认
+          </span>
+        </span>
+        <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+          本地网页正文抽取，速度快；适合 wiki / 文档站页面链接
+        </span>
+      </button>
+      <button
+        type="button"
+        role="radio"
+        aria-checked={engine === 'mineru'}
+        aria-disabled={mineruDisabled}
+        disabled={mineruDisabled}
+        onClick={() => onChange('mineru')}
+        title={mineruDisabled ? `MinerU 不可用，可在「设置 → MinerU」中配置${mineru.message ? `（${mineru.message}）` : ''}` : undefined}
+        className={cn(
+          'rounded-lg border p-2.5 text-left transition-colors',
+          engine === 'mineru' && !mineruDisabled
+            ? 'border-violet-500/60 bg-violet-500/10'
+            : 'border-border/60 bg-card hover:border-violet-500/40 hover:bg-muted/40',
+          mineruDisabled && 'cursor-not-allowed opacity-60 hover:border-border/60 hover:bg-card',
+        )}
+      >
+        <span className="flex items-center gap-1.5 text-xs font-medium">
+          <Sparkles className={cn('h-3.5 w-3.5 shrink-0', mineruDisabled ? 'text-muted-foreground' : 'text-violet-500')} />
+          MinerU 解析
+          {mineru.probing ? (
+            <Loader2 className="ml-auto h-3 w-3 animate-spin text-muted-foreground" aria-label="检测中" />
+          ) : mineruDisabled ? (
+            <span className="ml-auto inline-flex items-center gap-0.5 text-[9px] font-normal text-amber-600 dark:text-amber-300">
+              <TriangleAlert className="h-2.5 w-2.5" />
+              不可用
+            </span>
+          ) : null}
+        </span>
+        <span className="mt-1 block text-[11px] leading-relaxed text-muted-foreground">
+          PDF / 图片 / Office 直链高精度解析（OCR）；需 MinerU 服务可用
+        </span>
+      </button>
+    </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// 主组件
+// ---------------------------------------------------------------------------
+
 export function UrlImportTab({
   tasks,
   running,
   pendingCount,
+  mineru,
   onStart,
   onClear,
 }: {
   tasks: UrlTask[]
   running: boolean
-  /** 会话已入队总数（含 sitemap 展开） */
+  /** 会话已入队总数 */
   pendingCount: number
-  onStart: (urls: string[]) => void
+  /** MinerU 探测状态（容器注入，与本地文件 Tab 共享） */
+  mineru: MineruStatus
+  onStart: (urls: string[], engine: ParseEngine) => void
   onClear: () => void
 }) {
   const [input, setInput] = useState('')
   const [chips, setChips] = useState<string[]>([])
   const [invalidHint, setInvalidHint] = useState<string | null>(null)
+  const [engine, setEngine] = useState<ParseEngine>('node')
+
+  // MinerU 不可用（或仍在探测）时提交一律按 Node（卡片禁用兜底）
+  const effectiveEngine: ParseEngine = engine === 'mineru' && mineru.available ? 'mineru' : 'node'
 
   const addFromInput = useCallback(
     (raw?: string) => {
@@ -94,6 +183,9 @@ export function UrlImportTab({
 
   return (
     <div className="space-y-3">
+      {/* 解析引擎选择（14-e 契约） */}
+      <UrlEnginePicker engine={engine} mineru={mineru} onChange={setEngine} />
+
       {/* 输入区 */}
       <div className="space-y-2">
         <Textarea
@@ -105,7 +197,7 @@ export function UrlImportTab({
               addFromInput()
             }
           }}
-          placeholder={'粘贴 URL（支持一次粘贴多行，回车或点击「添加」入列）\n例：https://example.com/wiki/page'}
+          placeholder={'粘贴 URL（支持一次粘贴多行，回车或点击「添加」入列）\n例：https://example.com/docs/page 或 https://example.com/files/report.pdf'}
           className="min-h-[72px] resize-y text-xs"
           aria-label="URL 输入"
         />
@@ -171,7 +263,7 @@ export function UrlImportTab({
             onClick={() => {
               const batch = chips
               setChips([])
-              onStart(batch)
+              onStart(batch, effectiveEngine)
             }}
             disabled={!canStart}
           >
@@ -232,12 +324,13 @@ export function UrlImportTab({
                 transition={{ duration: 0.15 }}
                 className="rounded-lg border border-border/60 bg-card p-3"
               >
-                {/* 行 1：URL */}
-                <div className="flex items-center gap-2">
+                {/* 行 1：URL + 引擎 */}
+                <div className="flex flex-wrap items-center gap-2">
                   <FileTypeIcon filename="imported.md" isUrl />
                   <span className="min-w-0 flex-1 truncate text-xs font-medium" title={t.url}>
                     {t.url}
                   </span>
+                  {t.engine && <EngineBadge engine={t.engine} className="order-last sm:order-none" />}
                   {t.filename && (
                     <span className="max-w-[120px] shrink-0 truncate text-[10px] text-muted-foreground" title={t.filename}>
                       {t.filename}
@@ -255,7 +348,7 @@ export function UrlImportTab({
                 {t.phase === 'fetching' && (
                   <div className="mt-2 flex items-center gap-2 text-[11px] text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin text-teal-500" />
-                    抓取页面并抽取正文…
+                    {t.engine === 'mineru' ? '提交 MinerU 解析并抓取内容…' : '抓取页面并抽取正文…'}
                   </div>
                 )}
 
@@ -263,17 +356,6 @@ export function UrlImportTab({
                 {t.phase === 'pipeline' && (
                   <div className="mt-2.5">
                     <StageStepper status={t.status} stageProgress={t.stageProgress} />
-                  </div>
-                )}
-
-                {/* sitemap 展开 */}
-                {t.phase === 'sitemap' && (
-                  <div className="mt-2 flex items-start gap-1.5 text-[11px] text-teal-600 dark:text-teal-300">
-                    <ListTree className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                    <span>
-                      站点地图展开 {t.expandedCount ?? 0} 个子链接
-                      {t.note ? `（${t.note}）` : ''}，已自动入队导入
-                    </span>
                   </div>
                 )}
 
@@ -306,8 +388,7 @@ export function UrlImportTab({
         </div>
       ) : (
         <p className="px-1 py-2 text-center text-[11px] leading-relaxed text-muted-foreground">
-          输入外部 wiki / 文档站链接，服务端抓取页面并抽取主内容为 Markdown 入库；
-          sitemap.xml 链接会自动展开子页面（单次会话最多 {MAX_URLS} 个）。
+          输入外部 wiki / 文档站链接，服务端抓取页面并抽取主内容为 Markdown 入库（单次会话最多 {MAX_URLS} 个）；PDF / 图片 / Office 直链可选 MinerU 解析。
         </p>
       )}
     </div>
