@@ -1,0 +1,11 @@
+{
+  "name": "pipeline-events",
+  "version": "1.0.0",
+  "description": "RAG 平台流水线实时事件推送服务（socket.io）",
+  "scripts": {
+    "dev": "bun --hot index.ts"
+  },
+  "dependencies": {
+    "socket.io": "^4.8.4"
+  }
+}
