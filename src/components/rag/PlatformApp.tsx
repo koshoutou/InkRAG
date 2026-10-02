@@ -37,6 +37,7 @@ const ApiKeysView = dynamic(() => import('./views/ApiKeysView').then((m) => m.Ap
 const OpsView = dynamic(() => import('./views/OpsView').then((m) => m.OpsView), { loading: ViewLoading })
 const DocCompareView = dynamic(() => import('./views/DocCompareView').then((m) => m.DocCompareView), { loading: ViewLoading })
 const WorkbenchView = dynamic(() => import('./views/WorkbenchView').then((m) => m.WorkbenchView), { loading: ViewLoading })
+const TaskCenterView = dynamic(() => import('./views/TaskCenterView').then((m) => m.TaskCenterView), { loading: ViewLoading })
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -110,6 +111,7 @@ function Inner() {
         {activeView === 'ops' && <OpsView key="ops" />}
         {activeView === 'compare' && <DocCompareView key="compare" />}
         {activeView === 'workbench' && <WorkbenchView key="workbench" />}
+        {activeView === 'activity' && <TaskCenterView key="activity" />}
       </PlatformShell>
       <RagSettingsDialog />
     </>

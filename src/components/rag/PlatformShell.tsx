@@ -46,6 +46,7 @@ export const NAV_ITEMS: { id: ViewId; label: string; icon: React.ComponentType<{
   { id: 'apikeys', label: 'Agent API', icon: Plug, hint: '对外检索 API 与 Key' },
   { id: 'ops', label: '系统运维', icon: Activity, hint: '健康矩阵与流水线' },
   { id: 'compare', label: '文档版本管理', icon: GitCompareArrows, hint: '版本快照 / 对比 / 恢复 / 删除' },
+  { id: 'activity', label: '实时活动', icon: Radio, hint: '任务中心：解析 / 向量化进度与失败重试' },
   { id: 'workbench', label: '向量库浏览', icon: Database, hint: '基座工作台（集合/点/召回）' },
 ]
 

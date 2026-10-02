@@ -21,13 +21,15 @@
  * headers Content-Type + api-key；AbortSignal.timeout(30s)（下载流放宽至 120s）；
  * 错误解析 json.error / json.message / json.status.error；400/404 视为 NonRetryable。
  */
+import { promises as fsPromises } from 'node:fs'
 import { getRagSettings } from './settings'
 
 /** local 模式统一友好提示（契约 §23；前端据此展示引导空态，勿改文案） */
 export const LOCAL_MODE_SNAPSHOT_MESSAGE = 'local 模式无 Qdrant 快照，请先在设置中切换 qdrant 模式'
 
 const SNAPSHOT_TIMEOUT_MS = 30_000
-const DOWNLOAD_TIMEOUT_MS = 120_000
+/** 下载流超时：慢速外网链路实测 ~107KB/s，15MB 快照 ≈143s → 放宽至 10 分钟 */
+const DOWNLOAD_TIMEOUT_MS = 600_000
 /** 分页快照列表安全上限（next_page_offset 循环防失控） */
 const MAX_SNAPSHOT_PAGES = 50
 
@@ -332,6 +334,127 @@ export async function restoreQdrantSnapshot(collection: string, name: string): P
     ok: true,
     message: `集合 ${collection} 已从快照恢复（快照内容已覆盖现有数据，集合不存在时已重建）`,
   }
+}
+
+// ---------------------------------------------------------------------------
+// 快照文件恢复（契约 §29：备份一体化 · 上传/备份内嵌 .snapshot 文件 → 恢复到指定集合）
+// ---------------------------------------------------------------------------
+
+/** 大文件恢复（上传/回拉）超时：67MB 级快照实测可达数十秒 */
+const RECOVER_TIMEOUT_MS = 180_000
+
+/**
+ * 用本地 .snapshot 文件恢复（覆盖/重建）指定 qdrant 集合（契约 §29.5）。
+ *
+ * 实现分层（版本兼容，2026-10-02 实测远端 1.19.1 与本沙箱 1.9.7 路由面差异）：
+ * ① 标准路径：PUT /collections/{c}/snapshots/upload/recover?priority=snapshot&wait=true，
+ *    body = 快照文件字节流（Content-Type: application/octet-stream）；
+ * ② 路由缺失回退（404/405）：PUT /collections/{c}/snapshots/recover?priority=snapshot&wait=true，
+ *    body { location }——qdrant 自行回拉 location URL 指向的快照文件（1.9.7 / 1.19.1 实测该
+ *    路由存在；location 须为 qdrant 可达的平台文件服务地址，由调用方传入）；
+ *    PUT 也路由缺失时再试 POST /collections/{c}/snapshots/recover（同一 body）。
+ * local 模式 → 400（与 §23 语义一致）。
+ */
+export async function recoverQdrantWithSnapshotFile(
+  filePath: string,
+  collection: string,
+  opts: { locationUrl?: string } = {},
+): Promise<{ ok: true; message: string }> {
+  if (!collection?.trim()) throw new QdrantSnapshotError('collection 参数必填', 400)
+  const { conn } = await requireQdrant()
+  const bytes = await fsPromises.readFile(filePath)
+  const enc = encodeURIComponent
+  const headers: Record<string, string> = { 'Content-Type': 'application/octet-stream' }
+  if (conn.apiKey) headers['api-key'] = conn.apiKey
+
+  // ① 标准上传恢复（文件流直传）
+  let routeMissed = false
+  let uploadError = ''
+  try {
+    const res = await fetch(
+      `${conn.base}/collections/${enc(collection)}/snapshots/upload/recover?priority=snapshot&wait=true`,
+      {
+        method: 'PUT',
+        headers,
+        body: new Uint8Array(bytes),
+        cache: 'no-store',
+        signal: AbortSignal.timeout(RECOVER_TIMEOUT_MS),
+      },
+    )
+    if (res.ok) {
+      return { ok: true, message: `集合 ${collection} 已从快照文件恢复（覆盖现有数据，集合不存在时重建）` }
+    }
+    const text = await res.text().catch(() => '')
+    if (res.status === 404 || res.status === 405) {
+      routeMissed = true // 路由未注册（actix 404 空响应体特征）→ 走 location 回退
+    } else {
+      throw new QdrantSnapshotError(
+        `Qdrant 上传恢复失败 (${res.status}): ${text.slice(0, 300)}`,
+        res.status === 400 ? 400 : 502,
+      )
+    }
+  } catch (e) {
+    if (e instanceof QdrantSnapshotError) throw e
+    throw new QdrantSnapshotError(`Qdrant 不可达: ${(e as Error).message}`, 502)
+  }
+
+  // ② location 回退（1.9.x / 1.19.1 实测路由面）：PUT 优先，路由缺失再试 POST
+  if (routeMissed && !opts.locationUrl) {
+    throw new QdrantSnapshotError(
+      '当前 Qdrant 不支持 upload/recover 直传，且未提供可回拉的快照文件 URL（location）',
+      502,
+    )
+  }
+  const locationBody = JSON.stringify({ location: opts.locationUrl })
+  const recoverHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (conn.apiKey) recoverHeaders['api-key'] = conn.apiKey
+  const tryRecover = async (method: 'PUT' | 'POST'): Promise<{ ok: boolean; err: string; miss: boolean }> => {
+    let res: Response
+    try {
+      res = await fetch(
+        `${conn.base}/collections/${enc(collection)}/snapshots/recover?priority=snapshot&wait=true`,
+        {
+          method,
+          headers: recoverHeaders,
+          body: locationBody,
+          cache: 'no-store',
+          signal: AbortSignal.timeout(RECOVER_TIMEOUT_MS),
+        },
+      )
+    } catch (e) {
+      return { ok: false, err: `Qdrant 不可达: ${(e as Error).message}`, miss: false }
+    }
+    if (res.ok) return { ok: true, err: '', miss: false }
+    const text = await res.text().catch(() => '')
+    const miss = (res.status === 404 || res.status === 405) && !text
+    let msg = `HTTP ${res.status}`
+    if (text) {
+      try {
+        const json = JSON.parse(text)
+        msg = String(json?.status?.error ?? json?.error ?? json?.message ?? msg)
+      } catch {
+        msg = text.slice(0, 300)
+      }
+    }
+    return { ok: false, err: msg, miss }
+  }
+
+  const putResult = await tryRecover('PUT')
+  if (putResult.ok) {
+    return { ok: true, message: `集合 ${collection} 已从快照文件恢复（location 回拉，覆盖现有数据）` }
+  }
+  uploadError = putResult.err
+  if (putResult.miss) {
+    const postResult = await tryRecover('POST')
+    if (postResult.ok) {
+      return { ok: true, message: `集合 ${collection} 已从快照文件恢复（location 回拉，覆盖现有数据）` }
+    }
+    uploadError = postResult.err
+  }
+  throw new QdrantSnapshotError(
+    `Qdrant 快照文件恢复失败（集合 ${collection}）: upload/recover 路由缺失，location 回退亦失败 —— ${uploadError.slice(0, 300)}`,
+    502,
+  )
 }
 
 /**

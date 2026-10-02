@@ -17,6 +17,7 @@ export type ViewId =
   | 'ops'
   | 'compare'
   | 'workbench'
+  | 'activity'
 
 export type ConnectionState = 'unknown' | 'ok' | 'fail' | 'loading'
 

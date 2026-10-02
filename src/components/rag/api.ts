@@ -4,6 +4,7 @@ import type {
   ApiKeyItem,
   BackupItem,
   BackupSchedule,
+  BackupUploadResult,
   ChunkBatchResult,
   ChunkConfig,
   ChunkFull,
@@ -12,7 +13,10 @@ import type {
   DashboardData,
   DashboardTrends,
   DocVersionInfo,
+  ActivityResponse,
+  ResourceUsage,
   RestoreVersionResult,
+  UploadedQdrantSnapshot,
   VersionCompareResult,
   DocDetail,
   DocSummary,
@@ -308,6 +312,10 @@ export const ragApi = {
   async getPrometheusText(): Promise<string> {
     return await (await fetch('/api/metrics', { cache: 'no-store' })).text()
   },
+  /** §29-A 平台资源占用（进程 / 系统 / 磁盘，OpsView 资源卡 5s 轮询） */
+  async getResources(): Promise<ResourceUsage> {
+    return asJson(await fetch('/api/system/resources', { cache: 'no-store' }))
+  },
   async listJobs(
     opts: { status?: string; type?: string; limit?: number } = {},
   ): Promise<{ jobs: JobItem[]; stats: JobsStats }> {
@@ -330,7 +338,10 @@ export const ragApi = {
   async listBackups(): Promise<{ backups: BackupItem[] }> {
     return asJson(await fetch('/api/system/backups', { cache: 'no-store' }))
   },
-  async createBackup(opts: { includeArtifacts?: boolean } = {}): Promise<{ backup: BackupItem }> {
+  /** §29：includeQdrantSnapshot 缺省 true（qdrant 模式连同 Qdrant 快照；local 模式自动跳过） */
+  async createBackup(
+    opts: { includeArtifacts?: boolean; includeQdrantSnapshot?: boolean } = {},
+  ): Promise<{ backup: BackupItem }> {
     return asJson(
       await fetch('/api/system/backups', {
         method: 'POST',
@@ -342,12 +353,20 @@ export const ragApi = {
   async deleteBackup(id: string): Promise<{ ok: true }> {
     return asJson(await fetch(`/api/system/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
-  async restoreBackup(id: string): Promise<{ result: RestoreResult }> {
+  /** §29：includeQdrant 缺省 true（备份含快照时面板数据恢复后逐个上传恢复 Qdrant 集合） */
+  async restoreBackup(
+    id: string,
+    opts: { includeQdrant?: boolean } = {},
+  ): Promise<{ result: RestoreResult }> {
     return asJson(
-      await fetch(`/api/system/backups/${encodeURIComponent(id)}/restore`, { method: 'POST' }),
+      await fetch(`/api/system/backups/${encodeURIComponent(id)}/restore`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(opts),
+      }),
     )
   },
-  /** 备份下载直链（浏览器 window.open / <a download>） */
+  /** 备份下载直链（浏览器 window.open / <a download>；tar 含面板数据 + Qdrant 快照） */
   backupDownloadUrl(id: string): string {
     return `/api/system/backups/${encodeURIComponent(id)}/download`
   },
@@ -362,6 +381,36 @@ export const ragApi = {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+      }),
+    )
+  },
+
+  // -- §29 备份一体化：上传 / 已上传快照恢复 --------------------------------
+  /** 上传完整备份包（.tar.gz/.tgz → 导入备份列表）或 Qdrant 快照（.snapshot → 单独恢复） */
+  async uploadBackupArchive(file: File): Promise<BackupUploadResult> {
+    const fd = new FormData()
+    fd.append('file', file)
+    return asJson(await fetch('/api/system/backups/upload', { method: 'POST', body: fd }))
+  },
+  /** 已上传 Qdrant 快照清单（含从文件名推断的目标集合） */
+  async listUploadedQdrantSnapshots(): Promise<{ uploads: UploadedQdrantSnapshot[] }> {
+    return asJson(await fetch('/api/system/backups/upload', { cache: 'no-store' }))
+  },
+  async deleteUploadedQdrantSnapshot(fileName: string): Promise<{ ok: true }> {
+    return asJson(
+      await fetch(`/api/system/backups/upload${qs({ fileName })}`, { method: 'DELETE' }),
+    )
+  },
+  /** 上传的 .snapshot → 恢复到指定集合（collection 缺省由服务端从文件名推断） */
+  async restoreQdrantSnapshotUpload(
+    fileName: string,
+    collection?: string,
+  ): Promise<{ ok: boolean; message: string; collection: string }> {
+    return asJson(
+      await fetch('/api/system/backups/qdrant-restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName, ...(collection ? { collection } : {}) }),
       }),
     )
   },
@@ -455,6 +504,10 @@ export const ragApi = {
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------
   async listDocVersions(docId: string): Promise<{ versions: DocVersionInfo[] }> {
     return asJson(await fetch(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))
+  },
+  /** §28 任务中心：进行中 + 失败文档（完成任务不返回） */
+  async getActivity(): Promise<ActivityResponse> {
+    return asJson(await fetch('/api/activity', { cache: 'no-store' }))
   },
   /** §27 恢复历史版本（归档当前 → 版本号+1 → 重建 chunks → 入队重嵌入） */
   async restoreDocVersion(docId: string, version: string): Promise<RestoreVersionResult> {

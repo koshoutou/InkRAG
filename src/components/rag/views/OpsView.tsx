@@ -10,12 +10,16 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  Cpu,
   DatabaseBackup,
   Download,
   Eraser,
   Gauge,
+  HardDrive,
+  Info,
   ListChecks,
   Loader2,
+  MemoryStick,
   Pause,
   Play,
   Plus,
@@ -25,6 +29,7 @@ import {
   Server,
   Timer,
   Trash2,
+  Upload,
   XCircle,
 } from 'lucide-react'
 import { toast } from 'sonner'
@@ -104,6 +109,14 @@ export function OpsView() {
   const [includeArtifacts, setIncludeArtifacts] = useState(true)
   const [restoreTarget, setRestoreTarget] = useState<BackupItem | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<BackupItem | null>(null)
+  /** §29：恢复弹窗「同时恢复 Qdrant 向量快照」开关（默认开；打开弹窗时重置） */
+  const [restoreIncludeQdrant, setRestoreIncludeQdrant] = useState(true)
+
+  // ---- §29 上传恢复（备份包 / Qdrant 快照） ----
+  const [collectionInputs, setCollectionInputs] = useState<Record<string, string>>({})
+  const [dragOver, setDragOver] = useState(false)
+  const uploadInputRef = useRef<HTMLInputElement>(null)
+  const qdrantSectionRef = useRef<HTMLDivElement>(null)
 
   // ---- Qdrant 快照（契约 §23，备份卡内 Divider 区块）----
   const [snapRestoreTarget, setSnapRestoreTarget] = useState<QdrantSnapshotItem | null>(null)
@@ -146,6 +159,21 @@ export function OpsView() {
     queryFn: () => ragApi.listBackups(),
     staleTime: 10_000,
   })
+
+  // §29-A 平台资源占用（进程 / 系统 / 磁盘；5s 轮询看 CPU% 变化）
+  const resourcesQuery = useQuery({
+    queryKey: ['system-resources'],
+    queryFn: () => ragApi.getResources(),
+    refetchInterval: 5_000,
+  })
+
+  // §29 已上传 Qdrant 快照清单（.snapshot 上传后单独恢复用）
+  const uploadsQuery = useQuery({
+    queryKey: ['backup-uploads'],
+    queryFn: () => ragApi.listUploadedQdrantSnapshots(),
+    staleTime: 10_000,
+  })
+  const uploadedSnapshots = useMemo(() => uploadsQuery.data?.uploads ?? [], [uploadsQuery.data])
 
   // ---- 定时自动备份（契约 §15）----
   const scheduleQuery = useQuery({
@@ -217,22 +245,34 @@ export function OpsView() {
   })
 
   const createBackupMutation = useMutation({
-    mutationFn: () => ragApi.createBackup({ includeArtifacts }),
+    mutationFn: (opts: { includeArtifacts: boolean; includeQdrantSnapshot: boolean }) =>
+      ragApi.createBackup(opts),
     onSuccess: (r) => {
+      const b = r.backup
       toast.success(
-        `备份已创建：${r.backup.counts.kbs} 库 · ${r.backup.counts.docs} 文档 · ${r.backup.counts.points} 点 · ${formatBytes(r.backup.sizes.total)}`,
+        `备份已创建：${b.counts.kbs} 库 · ${b.counts.docs} 文档 · ${b.counts.points} 点 · ${formatBytes(b.sizes.total)}`,
+        {
+          description: b.includesQdrantSnapshots
+            ? `含 Qdrant 快照 ×${b.qdrantSnapshots?.length ?? 0}（${(b.qdrantSnapshots ?? []).map((s) => s.collection).join('、')}），下载 tar 包含两者`
+            : b.vectorMode === 'local'
+              ? 'local 模式：向量数据已随面板数据一并备份（VectorPoint 随库走）'
+              : '仅面板数据（未包含 Qdrant 快照）',
+        },
       )
+      if (b.warnings && b.warnings.length > 0) {
+        toast.warning(`备份含 ${b.warnings.length} 条警告`, { description: b.warnings.join('\n') })
+      }
       queryClient.invalidateQueries({ queryKey: ['backups'] })
     },
     onError: (e: Error) => toast.error('创建备份失败：' + e.message),
   })
 
   // 命令面板快捷动作（契约 §19）：rag:quick-backup → 复用创建按钮 handler 自动触发备份
-  // （创建中则忽略；跨视图派发时由 useQuickAction 桥回放）
+  // （创建中则忽略；跨视图派发时由 useQuickAction 桥回放；§29 默认连同 Qdrant 快照）
   useQuickAction('rag:quick-backup', () => {
     if (createBackupMutation.isPending) return
     toast.info('已通过命令面板触发备份')
-    createBackupMutation.mutate()
+    createBackupMutation.mutate({ includeArtifacts, includeQdrantSnapshot: true })
   })
 
   const saveScheduleMutation = useMutation({
@@ -264,22 +304,91 @@ export function OpsView() {
   })
 
   const restoreBackupMutation = useMutation({
-    mutationFn: (id: string) => ragApi.restoreBackup(id),
+    mutationFn: (v: { id: string; includeQdrant: boolean }) =>
+      ragApi.restoreBackup(v.id, { includeQdrant: v.includeQdrant }),
     onSuccess: (r) => {
       const { restored } = r.result
       toast.success(
-        `恢复完成：${restored.kbs} 库 / ${restored.docs} 文档 / ${restored.chunks} chunk / ${restored.points} 点 · ${formatDuration(r.result.tookMs)}，3 秒后自动刷新页面`,
+        `恢复完成：${restored.kbs} 库 / ${restored.docs} 文档 / ${restored.chunks} chunk / ${restored.points} 点${restored.qdrantRestored > 0 ? ` / Qdrant 集合 ×${restored.qdrantRestored}` : ''} · ${formatDuration(r.result.tookMs)}，3 秒后自动刷新页面`,
       )
+      if (r.result.warnings && r.result.warnings.length > 0) {
+        toast.warning(`恢复含 ${r.result.warnings.length} 条警告（面板数据已恢复成功）`, {
+          description: r.result.warnings.join('\n'),
+        })
+      }
       setRestoreTarget(null)
       // 恢复覆盖全局数据：失效全部相关缓存，并延时整页刷新让全局状态重初始化
       //（含备份调度配置：QdrantSetting 已被备份行覆盖，GET 惰性同步会让调度器停下/重启）
-      for (const key of ['dashboard', 'kbs', 'health', 'jobs', 'keys', 'metrics', 'metrics-summary', 'backups', 'backup-schedule']) {
+      for (const key of ['dashboard', 'kbs', 'health', 'jobs', 'keys', 'metrics', 'metrics-summary', 'backups', 'backup-schedule', 'backup-uploads', 'system-resources']) {
         queryClient.invalidateQueries({ queryKey: [key] })
       }
       setTimeout(() => window.location.reload(), 3000)
     },
     onError: (e: Error) => toast.error('恢复失败：' + e.message),
   })
+
+  // ---- §29 上传恢复：备份包导入 / 快照上传 / 快照单独恢复 ----
+  const uploadMutation = useMutation({
+    mutationFn: (file: File) => ragApi.uploadBackupArchive(file),
+    onSuccess: (r) => {
+      if (r.kind === 'backup') {
+        toast.success(`备份包已导入：${r.backup.id}`, {
+          description: `${r.backup.counts.kbs} 库 / ${r.backup.counts.docs} 文档 / ${formatBytes(r.backup.sizes.total)}，已出现在上方备份列表，可整体恢复（含 Qdrant 快照）`,
+        })
+        queryClient.invalidateQueries({ queryKey: ['backups'] })
+      } else {
+        toast.success(`Qdrant 快照已上传：${r.fileName}`, {
+          description: `${formatBytes(r.sizeBytes)}，在下方「已上传 Qdrant 快照」选择目标集合恢复`,
+        })
+        queryClient.invalidateQueries({ queryKey: ['backup-uploads'] })
+      }
+    },
+    onError: (e: Error) => toast.error('上传失败：' + e.message),
+  })
+
+  const uploadRestoreMutation = useMutation({
+    mutationFn: (v: { fileName: string; collection: string }) =>
+      ragApi.restoreQdrantSnapshotUpload(v.fileName, v.collection),
+    onSuccess: (r) => {
+      toast.success(r.message || `快照已恢复到集合 ${r.collection}`, {
+        description: `目标集合 ${r.collection}（快照内容已覆盖现有数据，建议重新验证检索效果）`,
+      })
+      queryClient.invalidateQueries({ queryKey: ['qdrant-snapshots'] })
+      queryClient.invalidateQueries({ queryKey: ['qdrant-collections'] })
+      queryClient.invalidateQueries({ queryKey: ['health'] })
+    },
+    onError: (e: Error) => toast.error('快照恢复失败：' + e.message),
+  })
+
+  const uploadDeleteMutation = useMutation({
+    mutationFn: (fileName: string) => ragApi.deleteUploadedQdrantSnapshot(fileName),
+    onSuccess: () => {
+      toast.success('已删除上传的快照文件')
+      queryClient.invalidateQueries({ queryKey: ['backup-uploads'] })
+    },
+    onError: (e: Error) => toast.error('删除失败：' + e.message),
+  })
+
+  /** 逐个上传选中的文件（备份包 .tar.gz/.tgz → 导入列表；.snapshot → 已上传快照区） */
+  const handleBackupFiles = async (files: FileList | File[] | null) => {
+    if (!files) return
+    const list = Array.from(files)
+    if (list.length === 0) return
+    for (const f of list) {
+      const lower = f.name.toLowerCase()
+      if (!lower.endsWith('.tar.gz') && !lower.endsWith('.tgz') && !lower.endsWith('.snapshot')) {
+        toast.error(`不支持的文件类型：${f.name}`, {
+          description: '仅支持 .tar.gz / .tgz 完整备份包与 .snapshot Qdrant 快照',
+        })
+        continue
+      }
+      try {
+        await uploadMutation.mutateAsync(f)
+      } catch {
+        // 单文件失败不阻断后续（mutation onError 已 toast）
+      }
+    }
+  }
 
   // ---- Qdrant 快照：查询 + 变更（契约 §23）----
   const snapCreateMutation = useMutation({
@@ -388,7 +497,6 @@ export function OpsView() {
 
   const backups = (backupsQuery.data?.backups ?? []) as BackupRow[]
   const backupsTotalBytes = useMemo(() => backups.reduce((a, b) => a + (b.sizes.total ?? 0), 0), [backups])
-  const hasQdrantBackup = useMemo(() => backups.some((b) => b.vectorMode === 'qdrant'), [backups])
   const autoBackupCount = useMemo(() => backups.filter((b) => b.auto === true).length, [backups])
 
   // ---- 定时备份表单校验 / clamp（与后端同边界：间隔 2-168、保留 2-50） ----
@@ -616,14 +724,155 @@ export function OpsView() {
           </Card>
         )}
 
-        {/* 备份与恢复 */}
+        {/* §29-A 平台资源占用（进程 / 系统 / 磁盘；5s 轮询） */}
+        {resourcesQuery.isLoading ? (
+          <Skeleton className="h-44 rounded-xl" />
+        ) : resourcesQuery.error ? (
+          <ErrorCard
+            title="资源占用加载失败"
+            message={resourcesQuery.error instanceof Error ? resourcesQuery.error.message : String(resourcesQuery.error)}
+            onRetry={() => resourcesQuery.refetch()}
+          />
+        ) : resourcesQuery.data ? (
+          <Card>
+            <CardHeader className="pb-3">
+              <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
+                <Activity className="h-4 w-4 text-primary" />
+                平台资源占用
+                <Badge variant="outline" className="font-mono text-[10px]">pid {resourcesQuery.data.process.pid}</Badge>
+                <span className="ml-auto text-[10px] text-muted-foreground">5s 轮询</span>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {(() => {
+                const p = resourcesQuery.data.process
+                const s = resourcesQuery.data.system
+                const d = resourcesQuery.data.disk
+                const rssPct = s.totalMemBytes > 0 ? Math.min(100, (p.rssBytes / s.totalMemBytes) * 100) : 0
+                const heapPct = p.heapTotalBytes > 0 ? Math.min(100, (p.heapUsedBytes / p.heapTotalBytes) * 100) : 0
+                const memWarn = s.usedMemPercent > 85
+                const bar = (pct: number, cls: string) => (
+                  <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                    <div className={cn('h-full rounded-full transition-all', cls)} style={{ width: `${Math.max(2, Math.min(100, pct))}%` }} />
+                  </div>
+                )
+                return (
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                    {/* 进程 */}
+                    <section className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                      <p className="flex items-center gap-1.5 text-[11px] font-medium"><Cpu className="h-3 w-3" />进程</p>
+                      <div className="mt-2 space-y-2.5">
+                        <div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-[10px] text-muted-foreground">内存 RSS</span>
+                            <span className="font-mono text-xs tabular-nums">{formatBytes(p.rssBytes)}</span>
+                          </div>
+                          {bar(rssPct, 'bg-teal-500')}
+                          <p className="mt-0.5 text-[9px] text-muted-foreground">占系统内存 {rssPct.toFixed(1)}%</p>
+                        </div>
+                        <div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-[10px] text-muted-foreground">堆 used / total</span>
+                            <span className="font-mono text-xs tabular-nums">{formatBytes(p.heapUsedBytes)} / {formatBytes(p.heapTotalBytes)}</span>
+                          </div>
+                          {bar(heapPct, 'bg-emerald-500')}
+                        </div>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] text-muted-foreground">进程 CPU</span>
+                          <span className={cn('font-mono text-xs tabular-nums', p.cpuPercent > 80 && 'text-rose-600 dark:text-rose-400')}>
+                            {p.cpuPercent > 0 ? p.cpuPercent.toFixed(1) : '0.0'}%
+                          </span>
+                        </div>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] text-muted-foreground">运行时长</span>
+                          <span className="font-mono text-xs tabular-nums">{formatUptime(p.uptimeSec)}</span>
+                        </div>
+                      </div>
+                    </section>
+                    {/* 系统 */}
+                    <section className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                      <p className="flex items-center gap-1.5 text-[11px] font-medium"><MemoryStick className="h-3 w-3" />系统</p>
+                      <div className="mt-2 space-y-2.5">
+                        <div>
+                          <div className="flex items-baseline justify-between gap-2">
+                            <span className="text-[10px] text-muted-foreground">内存占用</span>
+                            <span className={cn('font-mono text-xs tabular-nums', memWarn && 'text-rose-600 dark:text-rose-400')}>
+                              {s.usedMemPercent.toFixed(1)}%{memWarn ? '（偏高）' : ''}
+                            </span>
+                          </div>
+                          {bar(s.usedMemPercent, memWarn ? 'bg-rose-500' : 'bg-teal-500')}
+                          <p className="mt-0.5 text-[9px] text-muted-foreground">{formatBytes(s.totalMemBytes - s.freeMemBytes)} / {formatBytes(s.totalMemBytes)} · 可用 {formatBytes(s.freeMemBytes)}</p>
+                        </div>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] text-muted-foreground">负载 loadavg 1/5/15</span>
+                          <span className="font-mono text-xs tabular-nums">
+                            {s.loadavg.map((v) => v.toFixed(2)).join(' / ')}
+                          </span>
+                        </div>
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-[10px] text-muted-foreground">CPU 核心</span>
+                          <span className="font-mono text-xs tabular-nums">{s.cpuCount}</span>
+                        </div>
+                        <div className="flex items-baseline justify-between gap-2" title={`${s.platform} · ${s.nodeVersion} · ${s.hostname}`}>
+                          <span className="text-[10px] text-muted-foreground">平台</span>
+                          <span className="font-mono text-xs">{s.platform} · {s.nodeVersion}</span>
+                        </div>
+                      </div>
+                    </section>
+                    {/* 磁盘 */}
+                    <section className="rounded-lg border border-border/60 bg-muted/20 p-3">
+                      <p className="flex items-center gap-1.5 text-[11px] font-medium"><HardDrive className="h-3 w-3" />磁盘占用</p>
+                      <div className="mt-2 space-y-2.5">
+                        {[
+                          { label: '数据库（db/，不含备份）', value: d.dbBytes, cls: 'bg-teal-500' },
+                          { label: '产物目录（artifacts）', value: d.artifactsBytes, cls: 'bg-emerald-500' },
+                          { label: '备份目录（db/backups）', value: d.backupsBytes, cls: 'bg-amber-500' },
+                        ].map((row) => (
+                          <div key={row.label}>
+                            <div className="flex items-baseline justify-between gap-2">
+                              <span className="text-[10px] text-muted-foreground">{row.label}</span>
+                              <span className="font-mono text-xs tabular-nums">{formatBytes(row.value)}</span>
+                            </div>
+                            <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                              <div
+                                className={cn('h-full rounded-full transition-all', row.cls)}
+                                style={{ width: `${Math.max(2, Math.min(100, (row.value / Math.max(1, Math.max(d.dbBytes, d.artifactsBytes, d.backupsBytes))) * 100))}%` }}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                        <p className="text-[9px] leading-relaxed text-muted-foreground">db/ 含 SQLite 主库与 dev 库；备份目录含面板数据与内嵌 Qdrant 快照。大小缓存 30s。</p>
+                      </div>
+                    </section>
+                  </div>
+                )
+              })()}
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {/* 备份与恢复（§29 一体化：面板数据 + Qdrant 快照一同创建 / 下载 / 恢复 + 上传恢复） */}
         <Card>
           <CardHeader className="flex-row flex-wrap items-center gap-2 space-y-0 pb-3">
             <CardTitle className="flex items-center gap-2 text-sm">
               <DatabaseBackup className="h-4 w-4 text-primary" />
               备份与恢复
             </CardTitle>
-            <div className="ml-auto flex flex-wrap items-center gap-2">
+            <span className="ml-auto hidden text-[10px] text-muted-foreground sm:inline">面板数据 + Qdrant 快照 一同创建 / 下载 / 恢复</span>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {/* §29 说明块：两种数据的边界 */}
+            <div className="flex items-start gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-[11px] leading-relaxed text-muted-foreground">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+              <p>
+                <span className="font-medium text-foreground">面板数据</span> = SQLite 库快照 + 文档产物（full.md / middle.json / chunks）；
+                <span className="font-medium text-foreground"> Qdrant snap</span> = 向量集合快照（仅 Qdrant 模式；local 模式向量数据已随面板数据一并备份）。
+                『一同下载』的 tar 包含两者。
+              </p>
+            </div>
+
+            {/* 创建区：主按钮（面板 + Qdrant）+ 分开创建次按钮 */}
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
               <label
                 className="flex cursor-pointer select-none items-center gap-1.5 text-[11px] text-muted-foreground"
                 title="备份时包含 artifacts 产物目录（原始文件 / full.md / middle.json / chunk 全文），恢复时一并还原"
@@ -636,18 +885,39 @@ export function OpsView() {
                 />
                 包含产物文件
               </label>
-              <Button
-                size="sm"
-                className="h-7 gap-1 text-xs"
-                disabled={createBackupMutation.isPending}
-                onClick={() => createBackupMutation.mutate()}
-              >
-                {createBackupMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                {createBackupMutation.isPending ? '创建中…' : '创建备份'}
-              </Button>
+              <div className="ml-auto flex flex-wrap items-center gap-1.5">
+                <Button
+                  size="sm"
+                  className="h-7 gap-1 text-xs"
+                  disabled={createBackupMutation.isPending}
+                  onClick={() => createBackupMutation.mutate({ includeArtifacts, includeQdrantSnapshot: true })}
+                >
+                  {createBackupMutation.isPending ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+                  {createBackupMutation.isPending ? '创建中…' : '创建备份（面板 + Qdrant）'}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 text-xs"
+                  disabled={createBackupMutation.isPending}
+                  title="仅备份 SQLite + 产物（不含 Qdrant 快照）"
+                  onClick={() => createBackupMutation.mutate({ includeArtifacts, includeQdrantSnapshot: false })}
+                >
+                  仅面板数据
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 gap-1 text-xs"
+                  disabled={createBackupMutation.isPending || snapshotsLocalMode}
+                  title={snapshotsLocalMode ? '当前 local 模式：向量数据已随面板数据备份，无需单独快照' : '跳转到下方 Qdrant 快照区，按集合创建快照'}
+                  onClick={() => qdrantSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
+                >
+                  <Camera className="h-3 w-3" />
+                  仅 Qdrant 快照
+                </Button>
+              </div>
             </div>
-          </CardHeader>
-          <CardContent className="space-y-3">
             {/* 定时自动备份配置（契约 §15：进程内调度器 + 保留轮转） */}
             <div className="space-y-2.5 rounded-lg bg-muted/30 p-3">
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -663,7 +933,7 @@ export function OpsView() {
                   <div className="min-w-0">
                     <p className="text-xs font-medium">定时自动备份</p>
                     <p className="text-[10px] leading-relaxed text-muted-foreground">
-                      每 {schedInterval || '—'} 小时自动创建完整备份，保留最近 {schedKeep || '—'} 份自动备份（手动备份不受影响）
+                      每 {schedInterval || '—'} 小时自动创建完整备份，保留最近 {schedKeep || '—'} 份自动备份（手动备份不受影响）。自动备份将同时创建面板数据与 Qdrant 快照（Qdrant 模式）。
                     </p>
                   </div>
                 </div>
@@ -752,14 +1022,8 @@ export function OpsView() {
                 </Badge>
               )}
               <Badge variant="secondary" className="text-[10px]">磁盘占用 {backupsTotalBytes > 0 ? formatBytes(backupsTotalBytes) : '—'}</Badge>
-              <span className="text-[10px] text-muted-foreground">SQLite 一致性快照（VACUUM INTO）+ 可选 artifacts 产物</span>
+              <span className="text-[10px] text-muted-foreground">SQLite 一致性快照（VACUUM INTO）+ 可选 artifacts 产物 + Qdrant 快照（qdrant 模式）</span>
             </div>
-            {hasQdrantBackup && (
-              <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-300">
-                <AlertTriangle className="mt-0.5 h-3 w-3 shrink-0" />
-                Qdrant 模式下向量数据需单独执行 Qdrant snapshot，此处仅备份元数据与 DB
-              </p>
-            )}
             {restoreBackupMutation.isPending && (
               <p className="flex items-center gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-2.5 py-1.5 text-[11px] text-amber-600 dark:text-amber-300">
                 <Loader2 className="h-3 w-3 animate-spin" />
@@ -782,7 +1046,7 @@ export function OpsView() {
               <EmptyHint
                 icon={<DatabaseBackup className="h-6 w-6" />}
                 title="暂无备份"
-                description="点击右上角「创建备份」生成第一份完整快照：SQLite 一致性在线备份 + artifacts 产物目录，可随时恢复到备份时点。"
+                description="点击上方「创建备份（面板 + Qdrant）」生成第一份完整快照：SQLite 一致性在线备份 + artifacts 产物目录 + Qdrant 快照（qdrant 模式），可随时恢复到备份时点。"
               />
             ) : (
               <div className={cn('max-h-96 overflow-y-auto', ragScrollbar)}>
@@ -792,7 +1056,7 @@ export function OpsView() {
                       <TableHead className="h-8 text-[11px]">备份时间</TableHead>
                       <TableHead className="h-8 text-[11px]">内容</TableHead>
                       <TableHead className="h-8 text-[11px]">体积</TableHead>
-                      <TableHead className="h-8 text-[11px]">模式</TableHead>
+                      <TableHead className="h-8 text-[11px]">模式 / 构成</TableHead>
                       <TableHead className="h-8 text-[11px] text-center">产物</TableHead>
                       <TableHead className="h-8 text-[11px] text-right">操作</TableHead>
                     </TableRow>
@@ -802,8 +1066,13 @@ export function OpsView() {
                       <TableRow key={b.id}>
                         <TableCell className="py-2">
                           <p className="whitespace-nowrap text-xs">{formatDateTime(b.createdAt)}</p>
-                          <p className="font-mono text-[10px] text-muted-foreground" title={b.id}>
+                          <p className="flex items-center gap-1 font-mono text-[10px] text-muted-foreground" title={b.id}>
                             v{b.version} · {b.id}
+                            {b.warnings && b.warnings.length > 0 && (
+                              <span title={b.warnings.join('\n')} className="inline-flex">
+                                <AlertTriangle className="h-3 w-3 shrink-0 text-amber-500" aria-label={`${b.warnings.length} 条警告`} />
+                              </span>
+                            )}
                           </p>
                         </TableCell>
                         <TableCell className="whitespace-nowrap py-2 text-[11px] text-muted-foreground">
@@ -816,16 +1085,36 @@ export function OpsView() {
                           </span>
                         </TableCell>
                         <TableCell className="py-2">
-                          <div className="flex items-center gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
                             {b.vectorMode === 'qdrant' ? (
-                              <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300" title="Qdrant 模式：向量需单独 snapshot">qdrant</Badge>
+                              <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300" title="备份时平台处于 Qdrant 模式">qdrant</Badge>
                             ) : (
-                              <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="本地向量引擎：向量数据随 DB 备份">local</Badge>
+                              <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="备份时平台处于 local 模式">local</Badge>
                             )}
                             {b.auto === true && (
                               <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="定时任务自动创建（受保留轮转管理，手动备份不受影响）">
                                 自动
                               </Badge>
+                            )}
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1">
+                            <Badge
+                              variant="outline"
+                              className="border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-600 dark:text-teal-300"
+                              title="SQLite 库快照 + 文档产物（full.md / middle.json / chunks）"
+                            >
+                              面板数据
+                            </Badge>
+                            {b.includesQdrantSnapshots ? (
+                              <Badge
+                                variant="outline"
+                                className="border-violet-500/40 bg-violet-500/10 text-[10px] text-violet-600 dark:text-violet-300"
+                                title={`内嵌 Qdrant 快照：${(b.qdrantSnapshots ?? []).map((s) => `${s.collection}（${formatBytes(s.sizeBytes)}）`).join('、')}`}
+                              >
+                                Qdrant snap ×{b.qdrantSnapshots?.length ?? 0}
+                              </Badge>
+                            ) : (
+                              <span className="text-[10px] text-muted-foreground" title="本备份不含 Qdrant 快照文件（仅面板数据）">仅面板</span>
                             )}
                           </div>
                         </TableCell>
@@ -842,7 +1131,7 @@ export function OpsView() {
                               variant="ghost"
                               size="icon"
                               className="h-6 w-6"
-                              title="下载 tar.gz 归档"
+                              title="下载 tar.gz 归档（含面板数据 + Qdrant 快照）"
                               onClick={() => window.open(ragApi.backupDownloadUrl(b.id), '_blank')}
                             >
                               <Download className="h-3.5 w-3.5" />
@@ -853,7 +1142,10 @@ export function OpsView() {
                               className="h-6 w-6"
                               title="恢复此备份（覆盖当前全部数据）"
                               disabled={restoreBackupMutation.isPending || deleteBackupMutation.isPending}
-                              onClick={() => setRestoreTarget(b)}
+                              onClick={() => {
+                                setRestoreIncludeQdrant(true)
+                                setRestoreTarget(b)
+                              }}
                             >
                               {restoreBackupMutation.isPending && restoreTarget?.id === b.id ? (
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -884,8 +1176,134 @@ export function OpsView() {
               </div>
             )}
 
-            {/* Qdrant 快照（契约 §23）：qdrant 模式向量数据的独立备份通道（local 模式引导空态） */}
+            {/* §29 上传恢复区：备份包导入 / Qdrant 快照上传单独恢复 */}
             <div className="space-y-2.5 border-t border-border/60 pt-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <h3 className="flex items-center gap-1.5 text-xs font-semibold">
+                  <Upload className="h-3.5 w-3.5 text-primary" />
+                  上传恢复
+                </h3>
+                <span className="text-[10px] text-muted-foreground">.tar.gz 完整备份包 · .snapshot Qdrant 快照 · 单文件 ≤ 500MB</span>
+              </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                支持三种上传：① 完整备份包（.tar.gz，含面板数据与 Qdrant 快照，上传后出现在备份列表可一并恢复）；
+                ② 仅 Qdrant 快照（.snapshot 文件，上传后选择目标集合恢复）；
+                ③ 两文件分开发也行——先传 .tar.gz 恢复面板，再传 .snapshot 恢复向量。
+              </p>
+              <div
+                role="button"
+                tabIndex={0}
+                aria-label="上传备份包或 Qdrant 快照文件（点击选择或拖拽）"
+                className={cn(
+                  'flex cursor-pointer flex-col items-center justify-center gap-1 rounded-lg border border-dashed px-4 py-4 text-center outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring',
+                  dragOver ? 'border-primary bg-primary/5' : 'border-border bg-muted/20 hover:border-primary/50 hover:bg-muted/40',
+                  (uploadMutation.isPending || uploadRestoreMutation.isPending) && 'pointer-events-none opacity-60',
+                )}
+                onClick={() => uploadInputRef.current?.click()}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    uploadInputRef.current?.click()
+                  }
+                }}
+                onDragOver={(e) => {
+                  e.preventDefault()
+                  setDragOver(true)
+                }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={(e) => {
+                  e.preventDefault()
+                  setDragOver(false)
+                  void handleBackupFiles(e.dataTransfer.files)
+                }}
+              >
+                {uploadMutation.isPending ? (
+                  <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                ) : (
+                  <Upload className="h-4 w-4 text-muted-foreground" />
+                )}
+                <p className="text-xs font-medium">{uploadMutation.isPending ? '上传中…' : '点击选择或拖拽文件到此处'}</p>
+                <p className="text-[10px] text-muted-foreground">可多选；.tar.gz / .tgz 导入备份列表，.snapshot 进入下方待恢复清单</p>
+              </div>
+              <input
+                ref={uploadInputRef}
+                type="file"
+                className="hidden"
+                multiple
+                accept=".tar.gz,.tgz,.snapshot"
+                aria-label="选择备份包或快照文件"
+                onChange={(e) => {
+                  void handleBackupFiles(e.target.files)
+                  e.target.value = ''
+                }}
+              />
+
+              {/* 已上传 Qdrant 快照：逐个选择目标集合恢复 */}
+              {uploadedSnapshots.length > 0 && (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-medium">已上传 Qdrant 快照（{uploadedSnapshots.length}）</p>
+                  <div className="space-y-1.5">
+                    {uploadedSnapshots.map((u) => {
+                      const collectionValue = collectionInputs[u.fileName] ?? u.inferredCollection
+                      const restoring = uploadRestoreMutation.isPending && uploadRestoreMutation.variables?.fileName === u.fileName
+                      return (
+                        <div key={u.fileName} className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-lg border border-border/60 bg-muted/20 px-2.5 py-1.5">
+                          <div className="min-w-0 flex-1 basis-48">
+                            <p className="truncate font-mono text-[11px]" title={u.fileName}>{u.fileName}</p>
+                            <p className="text-[10px] text-muted-foreground" title={formatDateTime(u.createdAt)}>
+                              {formatBytes(u.sizeBytes)} · 上传于 {timeAgo(u.createdAt)} · 推断集合 <span className="font-mono">{u.inferredCollection || '—'}</span>
+                            </p>
+                          </div>
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <label className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                              目标集合
+                              <Input
+                                value={collectionValue}
+                                onChange={(e) => setCollectionInputs((m) => ({ ...m, [u.fileName]: e.target.value }))}
+                                disabled={uploadRestoreMutation.isPending}
+                                className="h-7 w-40 font-mono text-[11px]"
+                                aria-label={`恢复 ${u.fileName} 到的目标集合`}
+                                placeholder="集合名"
+                              />
+                            </label>
+                            <Button
+                              size="sm"
+                              className="h-7 gap-1 text-[10px]"
+                              disabled={uploadRestoreMutation.isPending || !collectionValue.trim()}
+                              onClick={() => uploadRestoreMutation.mutate({ fileName: u.fileName, collection: collectionValue.trim() })}
+                            >
+                              {restoring ? <Loader2 className="h-3 w-3 animate-spin" /> : <RotateCcw className="h-3 w-3" />}
+                              恢复到集合
+                            </Button>
+                            <Button
+                              variant="outline"
+                              size="icon"
+                              className="h-7 w-7 text-rose-600 hover:text-rose-600 dark:text-rose-400 dark:hover:text-rose-400"
+                              title="删除已上传的快照文件"
+                              aria-label={`删除 ${u.fileName}`}
+                              disabled={uploadDeleteMutation.isPending}
+                              onClick={() => uploadDeleteMutation.mutate(u.fileName)}
+                            >
+                              {uploadDeleteMutation.isPending && uploadDeleteMutation.variables === u.fileName ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Trash2 className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                  <p className="text-[10px] leading-relaxed text-muted-foreground">
+                    恢复语义：快照内容覆盖目标集合现有向量数据（集合不存在时重建）；仅 Qdrant 模式可用。
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {/* Qdrant 快照（契约 §23）：qdrant 模式向量数据的独立备份通道（local 模式引导空态） */}
+            <div ref={qdrantSectionRef} className="space-y-2.5 scroll-mt-20 border-t border-border/60 pt-3">
               <div className="flex flex-wrap items-center gap-2">
                 <h3 className="flex items-center gap-1.5 text-xs font-semibold">
                   <Camera className="h-3.5 w-3.5 text-primary" />
@@ -1076,6 +1494,22 @@ export function OpsView() {
                     {restoreTarget.id} · {restoreTarget.counts.kbs} 库 / {restoreTarget.counts.docs} 文档 / {restoreTarget.counts.points} 点 · {formatBytes(restoreTarget.sizes.total)}
                   </span>
                 )}
+                {restoreTarget?.includesQdrantSnapshots && (
+                  <span className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/30 px-3 py-2 text-foreground">
+                    <span className="text-xs">
+                      同时恢复 Qdrant 向量快照
+                      <span className="ml-1 text-[10px] text-muted-foreground">
+                        （{restoreTarget.qdrantSnapshots?.length ?? 0} 个集合：{(restoreTarget.qdrantSnapshots ?? []).map((s) => s.collection).join('、')}，恢复后覆盖对应集合）
+                      </span>
+                    </span>
+                    <Switch
+                      checked={restoreIncludeQdrant}
+                      onCheckedChange={(v) => setRestoreIncludeQdrant(v === true)}
+                      disabled={restoreBackupMutation.isPending}
+                      aria-label="同时恢复 Qdrant 向量快照"
+                    />
+                  </span>
+                )}
               </AlertDialogDescription>
             </AlertDialogHeader>
             <AlertDialogFooter>
@@ -1085,7 +1519,7 @@ export function OpsView() {
                 disabled={restoreBackupMutation.isPending}
                 onClick={(e) => {
                   e.preventDefault() // 恢复期间保持弹窗展示进度，由 onSuccess 关闭
-                  if (restoreTarget) restoreBackupMutation.mutate(restoreTarget.id)
+                  if (restoreTarget) restoreBackupMutation.mutate({ id: restoreTarget.id, includeQdrant: restoreIncludeQdrant })
                 }}
               >
                 {restoreBackupMutation.isPending ? (

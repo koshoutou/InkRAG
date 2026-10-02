@@ -12,7 +12,7 @@
  *   自动备份 manifest.auto=true，轮转清理只删自动备份（手动不受影响）。
  */
 import { execFile } from 'node:child_process'
-import { promises as fs, existsSync } from 'node:fs'
+import { promises as fs, existsSync, type Dirent } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { promisify } from 'node:util'
@@ -20,6 +20,11 @@ import { PrismaClient } from '@prisma/client'
 import { db } from '@/lib/db'
 import { ARTIFACTS_ROOT } from './artifacts'
 import { pipelineActivity } from './events'
+import {
+  createQdrantSnapshot,
+  downloadSnapshotStream,
+  recoverQdrantWithSnapshotFile,
+} from './qdrant-snapshots'
 import { getRagSettings } from './settings'
 
 const execFileAsync = promisify(execFile)
@@ -29,6 +34,19 @@ export const BACKUPS_ROOT = path.resolve(process.cwd(), 'db', 'backups')
 
 /** 备份 id 格式：yyyyMMdd-HHmmss-xxxx（4 位随机后缀防同秒冲突） */
 const BACKUP_ID_RE = /^[0-9a-zA-Z-]+$/
+
+/** 快照文件 / 集合名安全模式（防路径穿越与注入） */
+const SAFE_FILE_SEG_RE = /^[0-9a-zA-Z._-]+$/
+const COLLECTION_RE = /^[0-9a-zA-Z_-]+$/
+
+export interface BackupQdrantSnapshot {
+  /** 目标集合名 */
+  collection: string
+  /** 备份目录内相对路径（qdrant-snapshots/{name}.snapshot） */
+  file: string
+  /** 字节 */
+  sizeBytes: number
+}
 
 export interface BackupItem {
   id: string
@@ -43,6 +61,12 @@ export interface BackupItem {
   includesArtifacts: boolean
   /** 是否定时任务自动创建（手动备份缺省/false；轮转清理只删 auto===true，契约 §15） */
   auto?: boolean
+  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true；local 模式恒 false） */
+  includesQdrantSnapshots: boolean
+  /** §29 内嵌快照清单（备份目录 qdrant-snapshots/ 下） */
+  qdrantSnapshots?: BackupQdrantSnapshot[]
+  /** §29 创建/恢复过程中的非致命警告（单集合快照失败等；备份本身成功） */
+  warnings?: string[]
 }
 
 export interface RestoreResult {
@@ -56,9 +80,13 @@ export interface RestoreResult {
     jobs: number
     settings: boolean
     artifactsFiles: number
+    /** §29 成功恢复的 Qdrant 集合数（未恢复/不含快照时 0） */
+    qdrantRestored: number
   }
   backupId: string
   tookMs: number
+  /** §29 非致命警告（单集合恢复失败等；面板数据已恢复成功） */
+  warnings?: string[]
 }
 
 /** manifest.json 结构（磁盘持久化格式，与 BackupItem 同构） */
@@ -138,11 +166,22 @@ export function getBackupDir(id: string): string | null {
 // 创建备份
 // ---------------------------------------------------------------------------
 
+/** qdrant 快照文件名净化（qdrant 名字形如 {collection}-{seq}-{ts}.snapshot，本身安全，防御性处理） */
+function sanitizeSnapshotFileName(name: string): string {
+  const cleaned = String(name ?? '')
+    .split(/[/\\]/)
+    .pop()!
+    .replace(/[^0-9a-zA-Z._-]/g, '_')
+  return cleaned.endsWith('.snapshot') ? cleaned : `${cleaned}.snapshot`
+}
+
 export async function createBackup(
-  opts: { includeArtifacts?: boolean; auto?: boolean } = {}
+  opts: { includeArtifacts?: boolean; auto?: boolean; includeQdrantSnapshot?: boolean } = {}
 ): Promise<BackupItem> {
   const includeArtifacts = opts.includeArtifacts !== false
   const auto = opts.auto === true
+  // §29 一体化：默认连同 Qdrant 快照（local 模式自动跳过——VectorPoint 已随库备份）
+  const includeQdrantSnapshot = opts.includeQdrantSnapshot !== false
 
   await fs.mkdir(BACKUPS_ROOT, { recursive: true })
 
@@ -170,25 +209,61 @@ export async function createBackup(
       artifactsCopied = true
     }
 
+    // 2.5) §29 Qdrant 快照（qdrant 模式且未显式关闭时）：全部 KB collection
+    //      （+ defaultCollection 若非空且不同）逐个串行创建 + 下载至备份目录；
+    //      单集合失败仅记 warnings 不阻塞整体备份；local 模式跳过（VectorPoint 随库走）
+    const settings = await getRagSettings()
+    const warnings: string[] = []
+    const qdrantSnapshots: BackupQdrantSnapshot[] = []
+    let includesQdrantSnapshots = false
+    if (includeQdrantSnapshot && settings.vectorMode === 'qdrant') {
+      const kbRows = await db.knowledgeBase.findMany({ select: { collection: true } })
+      const collections = Array.from(
+        new Set(
+          [...kbRows.map((k) => k.collection), settings.row.defaultCollection].map((c) =>
+            String(c ?? '').trim(),
+          ),
+        ),
+      ).filter(Boolean)
+      if (collections.length > 0) {
+        const snapDir = path.join(dir, 'qdrant-snapshots')
+        await fs.mkdir(snapDir, { recursive: true })
+        for (const collection of collections) {
+          try {
+            const snap = await createQdrantSnapshot(collection)
+            const res = await downloadSnapshotStream(collection, snap.name)
+            const buf = Buffer.from(await res.arrayBuffer())
+            const fileName = sanitizeSnapshotFileName(snap.name || `${collection}-${Date.now()}.snapshot`)
+            await fs.writeFile(path.join(snapDir, fileName), buf)
+            qdrantSnapshots.push({ collection, file: `qdrant-snapshots/${fileName}`, sizeBytes: buf.length })
+            includesQdrantSnapshots = true
+          } catch (e) {
+            const msg = (e instanceof Error ? e.message : String(e)).slice(0, 200)
+            warnings.push(`Qdrant 快照失败（${collection}）: ${msg}`)
+          }
+        }
+      }
+    }
+
     // 3) manifest：DB 计数 + 文件体积 + 模式 + 设置摘要（非敏感字段）
-    const [kbs, docs, chunks, points, keys, jobs, settings] = await Promise.all([
+    const [kbs, docs, chunks, points, keys, jobs] = await Promise.all([
       db.knowledgeBase.count(),
       db.document.count(),
       db.chunk.count(),
       db.vectorPoint.count(),
       db.apiKey.count(),
       db.pipelineJob.count(),
-      getRagSettings(),
     ])
     const dbSize = (await fs.stat(dbPath)).size
     const artifactsSize = artifactsCopied ? await dirSize(path.join(dir, 'artifacts')) : 0
+    const qdrantBytes = qdrantSnapshots.reduce((a, s) => a + (s.sizeBytes || 0), 0)
 
     const manifest: BackupManifest = {
       id,
       createdAt: new Date().toISOString(),
       version: '1.0',
       counts: { kbs, docs, chunks, points, keys, jobs },
-      sizes: { db: dbSize, artifacts: artifactsSize, total: dbSize + artifactsSize },
+      sizes: { db: dbSize, artifacts: artifactsSize, total: dbSize + artifactsSize + qdrantBytes },
       vectorMode: settings.vectorMode,
       settingsSummary: {
         url: settings.row.url,
@@ -208,6 +283,9 @@ export async function createBackup(
       },
       includesArtifacts: artifactsCopied,
       auto,
+      includesQdrantSnapshots,
+      ...(qdrantSnapshots.length > 0 ? { qdrantSnapshots } : {}),
+      ...(warnings.length > 0 ? { warnings } : {}),
     }
     await fs.writeFile(path.join(dir, 'manifest.json'), JSON.stringify(manifest, null, 2), 'utf-8')
 
@@ -261,6 +339,20 @@ export async function listBackups(): Promise<BackupItem[]> {
         includesArtifacts: !!m.includesArtifacts,
         // 旧版 manifest 无 auto 字段 → 视为手动备份（false）
         auto: m.auto === true,
+        // §29：旧 manifest 无快照字段 → false / undefined（兼容读取）
+        includesQdrantSnapshots: Array.isArray(m.qdrantSnapshots) && m.qdrantSnapshots.length > 0,
+        ...(Array.isArray(m.qdrantSnapshots) && m.qdrantSnapshots.length > 0
+          ? {
+              qdrantSnapshots: (m.qdrantSnapshots as BackupQdrantSnapshot[])
+                .filter((s) => s && typeof s.collection === 'string' && typeof s.file === 'string')
+                .map((s) => ({
+                  collection: s.collection,
+                  file: s.file,
+                  sizeBytes: Number(s.sizeBytes) || 0,
+                })),
+            }
+          : {}),
+        ...(Array.isArray(m.warnings) && m.warnings.length > 0 ? { warnings: m.warnings.map(String) } : {}),
       })
     } catch {
       // 损坏 / 缺失 manifest 的目录跳过
@@ -279,10 +371,19 @@ export async function deleteBackup(id: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// 恢复（破坏性：覆盖主库全部表 + artifacts 目录整体替换）
+// 恢复（破坏性：覆盖主库全部表 + artifacts 目录整体替换；
+// §29 一体化：备份含 qdrant-snapshots 且 includeQdrant≠false 时逐个上传恢复到 qdrant）
 // ---------------------------------------------------------------------------
 
-export async function restoreBackup(id: string): Promise<RestoreResult> {
+/** 默认平台文件服务基址（location 回退时 qdrant 自行回拉；同机 qdrant 可达） */
+function defaultOrigin(): string {
+  return `http://127.0.0.1:${process.env.PORT ?? '3000'}`
+}
+
+export async function restoreBackup(
+  id: string,
+  opts: { includeQdrant?: boolean; origin?: string } = {},
+): Promise<RestoreResult> {
   const started = Date.now()
   const dir = getBackupDir(id)
   if (!dir) throw new Error(`备份不存在: ${id}`)
@@ -304,6 +405,7 @@ export async function restoreBackup(id: string): Promise<RestoreResult> {
     jobs: 0,
     settings: false,
     artifactsFiles: 0,
+    qdrantRestored: 0,
   }
 
   try {
@@ -358,6 +460,7 @@ export async function restoreBackup(id: string): Promise<RestoreResult> {
       jobs: jobs.length,
       settings: settingsRows.length > 0,
       artifactsFiles: 0,
+      qdrantRestored: 0,
     }
   } finally {
     await backupClient.$disconnect().catch(() => {})
@@ -375,14 +478,63 @@ export async function restoreBackup(id: string): Promise<RestoreResult> {
     counts.artifactsFiles = await countFiles(ARTIFACTS_ROOT)
   }
 
+  // §29 Qdrant 快照恢复：备份含 qdrant-snapshots 且未显式关闭时，逐个上传恢复
+  //（设置已随面板数据恢复为备份时配置，连接信息与备份一致；单集合失败记 warnings 不回滚）
+  const warnings: string[] = []
+  let snapList: { collection?: unknown; file?: unknown }[] = []
+  try {
+    const m = JSON.parse(await fs.readFile(path.join(dir, 'manifest.json'), 'utf-8'))
+    if (Array.isArray(m?.qdrantSnapshots)) snapList = m.qdrantSnapshots
+  } catch {
+    // manifest 缺失/损坏时尝试直接扫描目录
+  }
+  if (snapList.length === 0 && existsSync(path.join(dir, 'qdrant-snapshots'))) {
+    try {
+      const files = await fs.readdir(path.join(dir, 'qdrant-snapshots'))
+      snapList = files
+        .filter((f) => f.endsWith('.snapshot'))
+        .map((f) => ({ collection: f.replace(/\.snapshot$/, '').split('-')[0], file: `qdrant-snapshots/${f}` }))
+    } catch {
+      // 目录扫描失败忽略
+    }
+  }
+  if (opts.includeQdrant !== false && snapList.length > 0) {
+    const origin = opts.origin ?? defaultOrigin()
+    for (const s of snapList) {
+      const collection = String(s.collection ?? '').trim()
+      const relFile = String(s.file ?? '').trim()
+      if (!collection || !relFile) continue
+      const filePath = path.join(dir, relFile)
+      if (!existsSync(filePath)) {
+        warnings.push(`Qdrant 快照文件缺失（${collection}）: ${relFile}`)
+        continue
+      }
+      try {
+        await recoverQdrantWithSnapshotFile(filePath, collection, {
+          locationUrl: `${origin}/api/system/backups/snapshot-file?file=${encodeURIComponent(`${id}/${relFile}`)}`,
+        })
+        counts.qdrantRestored++
+      } catch (e) {
+        const msg = (e instanceof Error ? e.message : String(e)).slice(0, 200)
+        warnings.push(`Qdrant 快照恢复失败（${collection}）: ${msg}`)
+      }
+    }
+  }
+
   const tookMs = Date.now() - started
   await pipelineActivity({
     at: Date.now(),
-    level: 'info',
-    message: `备份恢复完成 ${id} · ${counts.kbs} 库 / ${counts.docs} 文档 / ${counts.chunks} chunk / ${counts.points} 点 / ${counts.keys} Key${counts.artifactsFiles ? ` / ${counts.artifactsFiles} 产物文件` : ''}（${tookMs}ms）`,
+    level: warnings.length > 0 ? 'warn' : 'info',
+    message: `备份恢复完成 ${id} · ${counts.kbs} 库 / ${counts.docs} 文档 / ${counts.chunks} chunk / ${counts.points} 点 / ${counts.keys} Key${counts.artifactsFiles ? ` / ${counts.artifactsFiles} 产物文件` : ''}${counts.qdrantRestored > 0 ? ` / Qdrant 集合 ×${counts.qdrantRestored}` : ''}（${tookMs}ms）${warnings.length > 0 ? ` · 警告 ${warnings.length} 条` : ''}`,
   })
 
-  return { ok: true, restored: counts, backupId: id, tookMs }
+  return {
+    ok: true,
+    restored: counts,
+    backupId: id,
+    tookMs,
+    ...(warnings.length > 0 ? { warnings } : {}),
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -407,6 +559,190 @@ export async function tarBackup(id: string, tarPath: string): Promise<string> {
 /** 生成临时 tar 路径（os.tmpdir，唯一化） */
 export function tempTarPath(id: string): string {
   return path.join(os.tmpdir(), `rag-backup-${id}-${Date.now()}.tar.gz`)
+}
+
+// ---------------------------------------------------------------------------
+// §29 上传导入（备份包 tar.gz / Qdrant 快照 .snapshot）
+// ---------------------------------------------------------------------------
+
+/**
+ * 导入备份归档（契约 §29.4）：解包 tar.gz → 校验（顶层目录名 ^[0-9a-zA-Z-]+$、
+ * manifest.json + db.sqlite 存在、无路径穿越）→ 移入 BACKUPS_ROOT/{原备份 id 或新 id}。
+ */
+export async function importBackupArchive(tarPath: string): Promise<BackupItem> {
+  const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rag-import-'))
+  try {
+    // 1) 解包前预检清单：拒绝绝对路径与 .. 穿越
+    const { stdout } = await execFileAsync('tar', ['-tzf', tarPath], {
+      timeout: 60_000,
+      maxBuffer: 16 * 1024 * 1024,
+    })
+    for (const line of stdout.split('\n')) {
+      const entry = line.trim()
+      if (!entry) continue
+      if (entry.startsWith('/') || entry.split('/').includes('..')) {
+        throw new Error(`归档含不安全路径: ${entry}`)
+      }
+    }
+
+    // 2) 解包到临时目录
+    await execFileAsync('tar', ['-xzf', tarPath, '-C', tmpDir], { timeout: 120_000 })
+
+    // 3) 顶层应为单一合法备份目录
+    const top = await fs.readdir(tmpDir, { withFileTypes: true })
+    const topDirs = top.filter((d) => d.isDirectory()).map((d) => d.name)
+    if (topDirs.length !== 1) {
+      throw new Error(`归档顶层应为单一备份目录（实际 ${topDirs.length} 个目录）`)
+    }
+    const srcName = topDirs[0]
+    if (!BACKUP_ID_RE.test(srcName)) {
+      throw new Error(`备份目录名不合法（须匹配 ^[0-9a-zA-Z-]+$）: ${srcName}`)
+    }
+    const srcDir = path.join(tmpDir, srcName)
+
+    // 4) 结构校验：manifest.json + db.sqlite
+    const manifestPath = path.join(srcDir, 'manifest.json')
+    const dbFile = path.join(srcDir, 'db.sqlite')
+    if (!existsSync(manifestPath) || !existsSync(dbFile)) {
+      throw new Error('归档缺少 manifest.json 或 db.sqlite（非平台备份包）')
+    }
+    const raw = JSON.parse(await fs.readFile(manifestPath, 'utf-8')) as Record<string, unknown>
+    if (!raw?.id || !raw.counts || !raw.sizes) {
+      throw new Error('manifest.json 损坏（缺少 id / counts / sizes）')
+    }
+
+    // 5) 目标 id：优先原备份 id；冲突时生成新 id 并回写 manifest
+    let targetId = typeof raw.id === 'string' && BACKUP_ID_RE.test(raw.id) ? raw.id : srcName
+    await fs.mkdir(BACKUPS_ROOT, { recursive: true })
+    if (existsSync(path.join(BACKUPS_ROOT, targetId))) {
+      targetId = newBackupId()
+    }
+    await fs.cp(srcDir, path.join(BACKUPS_ROOT, targetId), { recursive: true })
+    if (raw.id !== targetId) {
+      raw.id = targetId
+      await fs.writeFile(
+        path.join(BACKUPS_ROOT, targetId, 'manifest.json'),
+        JSON.stringify(raw, null, 2),
+        'utf-8',
+      )
+    }
+
+    const item = (await listBackups()).find((b) => b.id === targetId)
+    if (!item) throw new Error('导入成功但读取备份列表失败（manifest 异常）')
+    return item
+  } finally {
+    await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {})
+  }
+}
+
+/** 已上传 Qdrant 快照行（GET /api/system/backups/upload 载荷） */
+export interface UploadedQdrantSnapshot {
+  fileName: string
+  sizeBytes: number
+  createdAt: string
+  /** 从文件名推断的目标集合（现有集合最长前缀匹配，否则首段） */
+  inferredCollection: string
+}
+
+/** 从文件名推断目标集合：剥离 uploaded-{ts}- 前缀 → 现有集合最长前缀匹配 → 首段（§29.4/§29.5 同规则，路由与清单共用） */
+export function inferCollectionFromFileName(fileName: string, known: string[]): string {
+  let base = fileName.replace(/\.snapshot$/i, '')
+  base = base.replace(/^uploaded-\d{4,14}-/, '')
+  const sorted = Array.from(new Set(known.filter(Boolean))).sort((a, b) => b.length - a.length)
+  for (const c of sorted) {
+    if (base === c || base.startsWith(`${c}-`)) return c
+  }
+  return base.split('-')[0] ?? ''
+}
+
+/** 读取已知集合清单（KB collection + defaultCollection；§29.5 路由推断共用） */
+export async function knownCollections(): Promise<string[]> {
+  const [kbRows, settings] = await Promise.all([
+    db.knowledgeBase.findMany({ select: { collection: true } }),
+    getRagSettings(),
+  ])
+  const names = [
+    ...kbRows.map((k) => k.collection),
+    settings.row.defaultCollection,
+  ].map((c) => String(c ?? '').trim())
+  return Array.from(new Set(names)).filter(Boolean)
+}
+
+/** 已上传 .snapshot 清单（BACKUPS_ROOT 顶层 uploaded-*.snapshot 文件，mtime 倒序） */
+export async function listUploadedQdrantSnapshots(): Promise<UploadedQdrantSnapshot[]> {
+  let entries: Dirent[]
+  try {
+    entries = await fs.readdir(BACKUPS_ROOT, { withFileTypes: true })
+  } catch {
+    return []
+  }
+  const known = await knownCollections()
+  const out: UploadedQdrantSnapshot[] = []
+  for (const e of entries) {
+    if (!e.isFile() || !e.name.startsWith('uploaded-') || !e.name.endsWith('.snapshot')) continue
+    try {
+      const st = await fs.stat(path.join(BACKUPS_ROOT, e.name))
+      out.push({
+        fileName: e.name,
+        sizeBytes: st.size,
+        createdAt: st.mtime.toISOString(),
+        inferredCollection: inferCollectionFromFileName(e.name, known),
+      })
+    } catch {
+      // 并发删除忽略
+    }
+  }
+  out.sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+  return out
+}
+
+/** 删除已上传快照文件（仅允许 BACKUPS_ROOT 顶层 uploaded-*.snapshot，防路径穿越） */
+export async function deleteUploadedQdrantSnapshot(fileName: string): Promise<void> {
+  if (
+    !fileName ||
+    fileName.includes('/') ||
+    fileName.includes('\\') ||
+    fileName.includes('..') ||
+    !fileName.startsWith('uploaded-') ||
+    !fileName.endsWith('.snapshot')
+  ) {
+    throw new Error('仅允许删除 uploaded-*.snapshot 上传文件')
+  }
+  const p = path.join(BACKUPS_ROOT, fileName)
+  if (!p.startsWith(BACKUPS_ROOT + path.sep) || !existsSync(p)) {
+    throw new Error(`文件不存在: ${fileName}`)
+  }
+  await fs.rm(p, { force: true })
+}
+
+/** 校验快照文件引用（snapshot-file 文件服务 / qdrant-restore 共用）：返回绝对路径或 null
+ *  合法形态：uploaded-xxx.snapshot（顶层）或 {backupId}/qdrant-snapshots/xxx.snapshot（≤3 段） */
+export function resolveSnapshotFileRef(ref: string): string | null {
+  if (!ref || typeof ref !== 'string') return null
+  const segs = ref.split('/')
+  if (segs.length < 1 || segs.length > 3) return null
+  if (segs.some((s) => !s || !SAFE_FILE_SEG_RE.test(s))) return null
+  if (!ref.endsWith('.snapshot')) return null
+  const abs = path.resolve(BACKUPS_ROOT, ...segs)
+  if (!abs.startsWith(BACKUPS_ROOT + path.sep)) return null
+  return existsSync(abs) ? abs : null
+}
+
+/**
+ * 上传的 .snapshot 文件 → 恢复到指定集合（契约 §29.5；恢复语义同 restoreBackup 的
+ * qdrant 快照段：upload/recover 直传优先，location 回退）。
+ */
+export async function importQdrantSnapshot(
+  filePath: string,
+  targetCollection: string,
+  opts: { locationUrl?: string } = {},
+): Promise<{ ok: true; message: string; collection: string }> {
+  const collection = String(targetCollection ?? '').trim()
+  if (!collection || !COLLECTION_RE.test(collection)) {
+    throw new Error(`目标集合名不合法（仅允许 [0-9a-zA-Z_-]）: ${targetCollection}`)
+  }
+  const r = await recoverQdrantWithSnapshotFile(filePath, collection, opts)
+  return { ...r, collection }
 }
 
 // ---------------------------------------------------------------------------
@@ -579,15 +915,16 @@ async function schedulerTick(
     state.running = true
     let succeeded = false
     try {
-      const backup = await createBackup({ includeArtifacts: true, auto: true })
+      // §29 一体化：自动备份同时创建面板数据与 Qdrant 快照（qdrant 模式）
+      const backup = await createBackup({ includeArtifacts: true, auto: true, includeQdrantSnapshot: true })
       state.lastRunAt = new Date()
       state.lastBackupId = backup.id
       state.runCount++
       succeeded = true
       await pipelineActivity({
         at: Date.now(),
-        level: 'info',
-        message: `自动备份完成 ${backup.id} · ${backup.counts.kbs} 库 / ${backup.counts.docs} 文档 / ${backup.counts.chunks} chunk / ${backup.counts.points} 点 · ${fmtBytes(backup.sizes.total)}`,
+        level: backup.warnings && backup.warnings.length > 0 ? 'warn' : 'info',
+        message: `自动备份完成 ${backup.id} · ${backup.counts.kbs} 库 / ${backup.counts.docs} 文档 / ${backup.counts.chunks} chunk / ${backup.counts.points} 点${backup.includesQdrantSnapshots ? ` / Qdrant 快照 ×${backup.qdrantSnapshots?.length ?? 0}` : ''} · ${fmtBytes(backup.sizes.total)}${backup.warnings && backup.warnings.length > 0 ? ` · 警告 ${backup.warnings.length} 条` : ''}`,
       })
     } catch (e) {
       state.failCount++

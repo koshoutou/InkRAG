@@ -523,3 +523,89 @@ DELETE /api/documents/[id]/versions/[version] → { ok: true }
 ### 27.5 三屏联动 chunk 变更响应
 
 `PATCH/DELETE /api/documents/[id]/chunk/[chunkId]` 响应新增 `version`（递增后的新版本号）；流水线中 → 409。
+
+## §28 实时活动流 / 任务中心（/api/activity，v1.4）
+
+用户需求：每个文档的解析进度、解析结果、写入向量库的进度全程可见；失败记录可重试、报错可展开；完成的任务不显示；失败记录可删除。
+
+### 28.1 查询
+
+```
+GET /api/activity?limit=100
+→ { running: ActivityDoc[], failed: ActivityDoc[], stats: { runningCount, failedCount } }
+```
+
+- `running`：status ∈ queued/parsing/chunking/embedding/upserting 的文档（updatedAt 升序，先入先出）
+- `failed`：status=failed 的文档（updatedAt 倒序），含 `errorCode` / `errorMessage` / `metaJson.failedStage`
+- 完成文档不返回；`ActivityDoc` = DocSummary 字段 + `kbName` 装饰
+
+### 28.2 实时更新
+
+复用 §9 socket 事件（global 房间，默认订阅）：`document:status`（状态迁移）、`document:progress`（阶段内进度 %，节流 400ms）、`document:done`（完成 → 前端从 running 移除并提示）。前端另以 10s 轮询兜底。
+
+### 28.3 动作（复用既有路由）
+
+- 重试：`POST /api/documents/[id]/action {action:'retry'}`（从失败阶段续跑，§3）
+- 删除失败记录：`DELETE /api/documents/[id]`（连带 chunks / 向量 / 产物，§2）
+- 报错展开：`errorCode` + `errorMessage` + `metaJson.failedStage` 前端 details 展开
+
+## §29 备份一体化：面板数据 + Qdrant 快照（v1.5）
+
+用户需求：自动/手动备份连同 Qdrant 快照一同创建、一同下载、一同恢复；也可分开单独创建；支持上传（备份包单独传、两个文件分别传亦可）。
+
+### 29.1 BackupItem / RestoreResult 扩展字段（additive，旧 manifest 缺省视为 false / undefined）
+
+```ts
+BackupItem = {
+  ...（§11 既有字段）
+  includesQdrantSnapshots: boolean   // 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true；local 模式恒 false——向量数据在 VectorPoint 表随库走）
+  qdrantSnapshots?: { collection: string; file: string; sizeBytes: number }[]  // 内嵌快照清单（file 为备份目录内相对路径 qdrant-snapshots/{name}）
+  warnings?: string[]                // 创建/恢复过程中的非致命警告（单集合快照失败等；备份本身成功）
+}
+RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, backupId, tookMs, warnings?: string[] }
+```
+
+### 29.2 创建（含自动备份）
+
+- `POST /api/system/backups` body `{ includeArtifacts? = true, includeQdrantSnapshot? = true }` → 201 `{ backup }`
+- `includeQdrantSnapshot=true` 且 vectorMode=qdrant：遍历全部 KB collection（+ defaultCollection 若非空且不同），**逐个串行**创建 qdrant 快照并下载到备份目录 `qdrant-snapshots/`（qdrant 快照是重操作，不并发）；单集合失败记 `warnings` 不阻塞整体备份
+- local 模式跳过 qdrant 快照（`includesQdrantSnapshots=false`，合理——VectorPoint 随库备份）
+- 自动备份（§15 调度器）固定 `includeArtifacts=true + includeQdrantSnapshot=true`
+- 下载 tar（GET `[id]/download`）打包整个备份目录，天然含 `qdrant-snapshots/` 子目录 ✓
+
+### 29.3 恢复
+
+- `POST /api/system/backups/[id]/restore` body `{ includeQdrant? = true }` → `{ result: RestoreResult }`
+- 语义：先恢复面板数据（§11 全表替换 + artifacts），备份含 qdrant-snapshots 且 `includeQdrant≠false` 时，再**逐个串行**将快照文件上传恢复到 qdrant（覆盖同名集合，不存在则重建）；单集合失败记 `warnings`（面板数据不回滚）
+- 上传恢复实现（qdrant 版本兼容，1.19.1 / 1.9.7 实测路由面）：
+  ① `PUT /collections/{c}/snapshots/upload/recover?priority=snapshot&wait=true`，body = 快照文件字节流（octet-stream）
+  ② 404/405 路由缺失时回退 `PUT /collections/{c}/snapshots/recover?priority=snapshot&wait=true`，body `{ location }`——qdrant 自行回拉 location（平台 `GET /api/system/backups/snapshot-file` 文件服务 URL，origin 取请求方）；PUT 亦缺失再试 POST 同路径
+- 恢复使用备份 manifest 中的设置（面板数据恢复后 QdrantSetting 已被备份行覆盖，连接信息与备份时一致）
+
+### 29.4 上传（multipart，单文件 ≤ 500MB）
+
+- `POST /api/system/backups/upload`（字段 `file`）
+  - `.tar.gz` / `.tgz` → `importBackupArchive`：解包前 `tar -tzf` 预检（拒绝绝对路径与 `..` 穿越）→ 校验顶层目录名 `^[0-9a-zA-Z-]+$` + `manifest.json` + `db.sqlite` 存在 → 移入 `BACKUPS_ROOT/{原备份 id（冲突则新 id）}` → 201 `{ kind:'backup', backup: BackupItem }`
+  - `.snapshot` → 存为 `BACKUPS_ROOT/uploaded-{ts}-{safeName}.snapshot` → 201 `{ kind:'qdrant-snapshot', fileName, sizeBytes }`
+  - 其他类型 → 400 `{ error }`；超限 → 413
+- `GET /api/system/backups/upload` → `{ uploads: [{ fileName, sizeBytes, createdAt, inferredCollection }] }`（已上传快照清单；inferredCollection 从文件名推断：剥离 `uploaded-{ts}-` 前缀 → 现有集合最长前缀匹配 → 首段）
+- `DELETE /api/system/backups/upload?fileName=` → `{ ok: true }`（仅允许删除 `uploaded-*.snapshot`）
+
+### 29.5 上传快照恢复 / 快照文件服务
+
+- `POST /api/system/backups/qdrant-restore` body `{ fileName, collection? }`（collection 缺省服务端按 29.4 同规则从文件名推断）→ `{ ok, message, collection }`
+- `GET /api/system/backups/snapshot-file?file={ref}` → .snapshot 文件字节流（供 qdrant recover location 回拉）
+  - 合法 ref：`uploaded-xxx.snapshot`（顶层上传文件）或 `{backupId}/qdrant-snapshots/xxx.snapshot`（备份内嵌快照）；仅 `.snapshot` 后缀 + 安全路径段（`[0-9a-zA-Z._-]`，≤3 段），防路径穿越
+- 错误码：local 模式 400 / 文件不存在 404 / 集合名非法 400 / qdrant 不可达或恢复失败 502；统一 `{ error }` 载荷
+
+### 29.6 平台资源占用（同批交付，OpsView「平台资源占用」卡）
+
+- `GET /api/system/resources` →
+```ts
+{
+  process: { rssBytes, heapUsedBytes, heapTotalBytes, cpuPercent, uptimeSec, pid }
+  system:  { totalMemBytes, freeMemBytes, usedMemPercent, loadavg: [n,n,n], cpuCount, platform, nodeVersion, hostname }
+  disk:    { dbBytes, artifactsBytes, backupsBytes }   // db/ 目录（不含 backups 子目录，单独统计）；磁盘三项 30s 服务端缓存
+}
+```
+- `cpuPercent`：两次 `process.cpuUsage()` 差分 ÷ 墙钟时间（globalThis 缓存上次采样，首次请求返回 0）；字节数原始值返回，前端格式化

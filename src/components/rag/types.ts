@@ -441,14 +441,22 @@ export interface BackupItem {
     keys: number
     jobs: number
   }
-  /** 文件体积（字节） */
+  /** 文件体积（字节；total 含 Qdrant 快照） */
   sizes: { db: number; artifacts: number; total: number }
-  /** 恢复模式说明（local 向量引擎数据随库走；qdrant 模式需单独 snapshot） */
+  /** 恢复模式说明（local 向量引擎数据随库走；qdrant 模式内嵌快照见 includesQdrantSnapshots） */
   vectorMode: string
   /** 备份时平台设置摘要 */
   settingsSummary: Record<string, unknown>
   /** 是否含 artifacts 产物目录 */
   includesArtifacts: boolean
+  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true；local 模式恒 false） */
+  includesQdrantSnapshots: boolean
+  /** §29 内嵌快照清单（备份目录 qdrant-snapshots/ 下） */
+  qdrantSnapshots?: { collection: string; file: string; sizeBytes: number }[]
+  /** §29 创建/恢复过程中的非致命警告（单集合快照失败等；备份本身成功） */
+  warnings?: string[]
+  /** 是否定时任务自动创建（本地扩展契约字段） */
+  auto?: boolean
 }
 
 export interface RestoreResult {
@@ -462,9 +470,13 @@ export interface RestoreResult {
     jobs: number
     settings: boolean
     artifactsFiles: number
+    /** §29 成功恢复的 Qdrant 集合数（未恢复/不含快照时 0） */
+    qdrantRestored: number
   }
   backupId: string
   tookMs: number
+  /** §29 非致命警告（单集合恢复失败等；面板数据已恢复成功） */
+  warnings?: string[]
 }
 
 // ---------------------------------------------------------------------------
@@ -760,5 +772,87 @@ export interface TestRunHistoryItem {
     hitRateAvg: number
     mrrAvg: number
     tookMsTotal: number
+  }
+}
+
+// ---------------------------------------------------------------------------
+// §28 实时活动流 / 任务中心（/api/activity，契约 §28）
+// ---------------------------------------------------------------------------
+
+/** 活动流文档行（DocSummary + kbName 装饰） */
+export interface ActivityDoc {
+  id: string
+  kbId: string
+  kbName: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+  status: DocStatus
+  stageProgress: number
+  parseConfigV: number
+  parseEngine: string
+  errorCode: string | null
+  errorMessage: string | null
+  layoutBlocks: number
+  chunkCount: number
+  sourceUrl: string
+  metaJson: Record<string, unknown>
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ActivityResponse {
+  running: ActivityDoc[]
+  failed: ActivityDoc[]
+  stats: { runningCount: number; failedCount: number }
+}
+
+// ---------------------------------------------------------------------------
+// §29 备份一体化（面板 + Qdrant 快照：一同创建 / 下载 / 恢复 + 上传恢复）
+// ---------------------------------------------------------------------------
+
+/** 已上传 Qdrant 快照行（GET /api/system/backups/upload） */
+export interface UploadedQdrantSnapshot {
+  fileName: string
+  sizeBytes: number
+  createdAt: string
+  /** 从文件名推断的目标集合（现有集合最长前缀匹配，否则首段） */
+  inferredCollection: string
+}
+
+/** 上传响应：完整备份包（导入备份列表）或单独 Qdrant 快照 */
+export type BackupUploadResult =
+  | { kind: 'backup'; backup: BackupItem }
+  | { kind: 'qdrant-snapshot'; fileName: string; sizeBytes: number }
+
+// ---------------------------------------------------------------------------
+// §29-A 平台资源占用（GET /api/system/resources）
+// ---------------------------------------------------------------------------
+
+export interface ResourceUsage {
+  process: {
+    rssBytes: number
+    heapUsedBytes: number
+    heapTotalBytes: number
+    /** 进程 CPU 占用 %（两次采样差分，首次请求 0） */
+    cpuPercent: number
+    uptimeSec: number
+    pid: number
+  }
+  system: {
+    totalMemBytes: number
+    freeMemBytes: number
+    usedMemPercent: number
+    loadavg: [number, number, number]
+    cpuCount: number
+    platform: string
+    nodeVersion: string
+    hostname: string
+  }
+  disk: {
+    /** {cwd}/db 目录（不含 backups 子目录） */
+    dbBytes: number
+    artifactsBytes: number
+    backupsBytes: number
   }
 }
