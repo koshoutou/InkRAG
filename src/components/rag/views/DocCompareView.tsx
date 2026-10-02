@@ -478,7 +478,7 @@ export function DocCompareView() {
             <ContentSkeleton />
           ) : compareQuery.error ? (
             <ErrorCard
-              title="文档版本管理加载失败"
+              title="版本管理加载失败"
               message={compareQuery.error instanceof Error ? compareQuery.error.message : String(compareQuery.error)}
               onRetry={() => compareQuery.refetch()}
             />

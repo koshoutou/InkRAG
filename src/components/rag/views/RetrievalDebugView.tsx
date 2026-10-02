@@ -490,8 +490,8 @@ export function RetrievalDebugView() {
 
   if (kbsQuery.isLoading) {
     return (
-      <div className="h-full overflow-y-auto p-6">
-        <Skeleton className="h-full w-full rounded-xl" />
+      <div className="p-6">
+        <Skeleton className="min-h-[40vh] w-full rounded-xl" />
       </div>
     )
   }
@@ -504,7 +504,7 @@ export function RetrievalDebugView() {
   }
   if (kbs.length === 0) {
     return (
-      <div className="h-full overflow-y-auto p-6">
+      <div className="p-6">
         <EmptyHint
           icon={<Crosshair className="h-6 w-6" />}
           title="检索调试台需要已有知识库"
@@ -520,8 +520,8 @@ export function RetrievalDebugView() {
     : 0
 
   return (
-    <div className="flex h-full">
-      <div className="min-w-0 flex-1 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
+    <div className="flex flex-col xl:flex-row">
+      <div className="min-w-0 flex-1 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
         <div className="mx-auto max-w-4xl space-y-4 p-4 sm:p-6">
           {/* 查询区 */}
           <Card>
@@ -1141,7 +1141,7 @@ export function RetrievalDebugView() {
       </div>
 
       {/* 历史侧栏（dateFilter 非空时仅显示下钻日期的记录） */}
-      <aside className="hidden w-72 shrink-0 flex-col border-l border-border/60 bg-muted/20 xl:flex">
+      <aside className="hidden w-72 shrink-0 flex-col border-l border-border/60 bg-muted/20 xl:sticky xl:top-0 xl:flex xl:max-h-[calc(100dvh-7rem)] xl:self-start">
         <div className="flex items-center justify-between border-b border-border/60 px-3 py-2.5">
           <span className="flex items-center gap-1.5 text-xs font-medium">
             <History className="h-3.5 w-3.5 text-muted-foreground" />
@@ -1163,7 +1163,7 @@ export function RetrievalDebugView() {
             )}
           </div>
         </div>
-        <div className="flex-1 overflow-y-auto p-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
+        <div className="min-h-0 flex-1 overflow-y-auto p-2 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
           {visibleHistory.length === 0 ? (
             dateFilter ? (
               <p className="px-2 py-8 text-center text-[11px] leading-relaxed text-muted-foreground">

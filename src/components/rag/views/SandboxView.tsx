@@ -154,8 +154,8 @@ export function SandboxView() {
 
   if (kbsQuery.isLoading) {
     return (
-      <div className="h-full overflow-y-auto p-6">
-        <Skeleton className="h-full w-full rounded-xl" />
+      <div className="p-6">
+        <Skeleton className="min-h-[40vh] w-full rounded-xl" />
       </div>
     )
   }
@@ -168,7 +168,7 @@ export function SandboxView() {
   }
   if (kbs.length === 0) {
     return (
-      <div className="h-full overflow-y-auto p-6">
+      <div className="p-6">
         <EmptyHint
           icon={<FlaskConical className="h-6 w-6" />}
           title="切分沙盒需要已有知识库与文档"
@@ -179,7 +179,7 @@ export function SandboxView() {
   }
 
   return (
-    <div className="flex h-full flex-col overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
+    <div className="flex flex-col [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
       {/* 顶部工具栏 */}
       <div className="sticky top-0 z-10 flex flex-wrap items-center gap-2 border-b border-border/60 bg-background/95 px-4 py-2.5 backdrop-blur">
         <FlaskConical className="h-4 w-4 shrink-0 text-primary" />

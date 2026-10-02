@@ -8,7 +8,6 @@ import {
 } from '@/components/ui/dialog'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Skeleton } from '@/components/ui/skeleton'
 import { toast } from 'sonner'
@@ -93,7 +92,7 @@ export function PointDetailDialog({ collection, point, onClose }: Props) {
 
           {/* Each TabsContent is its own scroll region, sized to fill remaining height */}
           <TabsContent value="payload" className="mt-3 min-h-0 flex-1 data-[state=inactive]:hidden">
-            <ScrollArea className="h-[min(52vh,42rem)] min-h-[280px] rounded-md border bg-muted/20 p-3">
+            <div className="h-[min(52vh,42rem)] min-h-[280px] overflow-y-auto rounded-md border bg-muted/20 p-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
               {isLoading ? (
                 <Skeleton className="h-40 w-full" />
               ) : (
@@ -101,11 +100,11 @@ export function PointDetailDialog({ collection, point, onClose }: Props) {
 {JSON.stringify(fullPoint.payload ?? {}, null, 2)}
                 </pre>
               )}
-            </ScrollArea>
+            </div>
           </TabsContent>
 
           <TabsContent value="content" className="mt-3 min-h-0 flex-1 data-[state=inactive]:hidden">
-            <ScrollArea className="h-[min(52vh,42rem)] min-h-[280px] rounded-md border bg-muted/20 p-3">
+            <div className="h-[min(52vh,42rem)] min-h-[280px] overflow-y-auto rounded-md border bg-muted/20 p-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
               {isLoading ? (
                 <Skeleton className="h-40 w-full" />
               ) : (
@@ -113,7 +112,7 @@ export function PointDetailDialog({ collection, point, onClose }: Props) {
                   {content || '(此分块的 payload 中没有找到 content/text/_node_content.text 字段)'}
                 </p>
               )}
-            </ScrollArea>
+            </div>
           </TabsContent>
 
           <TabsContent value="vector" className="mt-3 min-h-0 flex-1 data-[state=inactive]:hidden">
@@ -121,7 +120,7 @@ export function PointDetailDialog({ collection, point, onClose }: Props) {
               <Braces className="h-3.5 w-3.5" />
               <span>{vectorInfo.label}</span>
             </div>
-            <ScrollArea className="h-[calc(min(52vh,42rem)-2rem)] min-h-[260px] rounded-md border bg-muted/20 p-3">
+            <div className="h-[calc(min(52vh,42rem)-2rem)] min-h-[260px] overflow-y-auto rounded-md border bg-muted/20 p-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
               {isLoading ? (
                 <Skeleton className="h-40 w-full" />
               ) : vectorInfo.sections.length === 0 ? (
@@ -144,7 +143,7 @@ export function PointDetailDialog({ collection, point, onClose }: Props) {
                   ))}
                 </div>
               )}
-            </ScrollArea>
+            </div>
           </TabsContent>
         </Tabs>
 

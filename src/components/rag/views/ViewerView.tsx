@@ -189,7 +189,7 @@ export function ViewerView() {
   // --- 加载与空态 ----------------------------------------------------------
   if (kbsQuery.isLoading) {
     return (
-      <div className="flex h-full items-center justify-center p-6">
+      <div className="flex h-[calc(100dvh-6rem)] items-center justify-center p-6">
         <Skeleton className="h-full w-full rounded-xl" />
       </div>
     )
@@ -274,7 +274,7 @@ export function ViewerView() {
 
   if (!docId) {
     return (
-      <div className="flex h-full flex-col">
+      <div className="flex h-[calc(100dvh-6rem)] flex-col">
         {header}
         <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center text-muted-foreground">
           <FileText className="h-8 w-8 opacity-60" />
@@ -344,7 +344,7 @@ export function ViewerView() {
   )
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-[calc(100dvh-6rem)] flex-col">
       {header}
       {docQuery.error ? (
         <div className="p-4">

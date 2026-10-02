@@ -14,7 +14,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import {
@@ -210,7 +209,7 @@ function CallLogsBody({ embedded = false }: { embedded?: boolean }) {
         </div>
       </div>
 
-      <ScrollArea className={`w-full min-w-0 overflow-hidden ${embedded ? '' : 'max-h-[70vh] flex-1'}`}>
+      <div className={`w-full min-w-0 ${embedded ? '' : 'max-h-[70vh] flex-1'} overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25`}>
         {items.length === 0 ? (
           <div className="flex flex-col items-center gap-2 py-10 text-center text-muted-foreground">
             <Inbox className="h-6 w-6 opacity-60" />
@@ -345,7 +344,7 @@ function CallLogsBody({ embedded = false }: { embedded?: boolean }) {
             })}
           </ul>
         )}
-      </ScrollArea>
+      </div>
 
       {/* Pagination — 与「分块」一致的换页逻辑 */}
       <div className="flex flex-wrap items-center justify-between gap-2 border-t px-3 py-2 text-xs">
@@ -527,7 +526,7 @@ function CompareDialog({ items, onClose }: { items: [CallLogItem, CallLogItem]; 
           <Button size="icon" variant="ghost" className="h-7 w-7" onClick={onClose}><X className="h-3.5 w-3.5" /></Button>
         </div>
 
-        <ScrollArea className="flex-1">
+        <div className="min-h-0 flex-1 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
           <div className="p-5">
             <div className="mb-3 grid grid-cols-2 gap-3">
               {[a, b].map((item, idx) => (
@@ -598,7 +597,7 @@ function CompareDialog({ items, onClose }: { items: [CallLogItem, CallLogItem]; 
               ))}
             </div>
           </div>
-        </ScrollArea>
+        </div>
       </motion.div>
     </motion.div>
   )

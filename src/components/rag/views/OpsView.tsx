@@ -438,7 +438,7 @@ export function OpsView() {
         : 'text-muted-foreground'
 
   return (
-    <div className={cn('h-full overflow-y-auto', ragScrollbar)}>
+    <div>
       <div className="mx-auto w-full max-w-[1600px] space-y-4 p-4 sm:p-6">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div>

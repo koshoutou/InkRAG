@@ -18,7 +18,7 @@ import { useRealtime } from './useRealtime'
 
 function ViewLoading() {
   return (
-    <div className="flex h-full items-center justify-center gap-2 text-muted-foreground" role="status" aria-label="视图加载中">
+    <div className="flex min-h-[50vh] items-center justify-center gap-2 text-muted-foreground" role="status" aria-label="视图加载中">
       <Loader2 className="h-4 w-4 animate-spin" />
       <span className="text-xs">视图加载中…</span>
     </div>

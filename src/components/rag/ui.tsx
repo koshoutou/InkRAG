@@ -23,13 +23,11 @@ export { DOC_STATUSES, PROCESSING_STATUSES } from './types'
 export const ragScrollbar =
   '[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25 [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/45 [&::-webkit-scrollbar-track]:bg-transparent'
 
-/** 普通视图页容器：内部滚动 + 居中内容列 */
+/** 普通视图页容器：自然流（滚动统一收敛到 PlatformShell 的 main）+ 居中内容列 */
 export function ViewPage({ children, className, wide }: { children: ReactNode; className?: string; wide?: boolean }) {
   return (
-    <div className={cn('h-full overflow-y-auto', ragScrollbar)}>
-      <div className={cn('mx-auto w-full space-y-4 p-4 sm:p-6', wide ? 'max-w-[1600px]' : 'max-w-6xl', className)}>
-        {children}
-      </div>
+    <div className={cn('mx-auto w-full space-y-4 p-4 sm:p-6', wide ? 'max-w-[1600px]' : 'max-w-6xl', className)}>
+      {children}
     </div>
   )
 }

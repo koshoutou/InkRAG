@@ -7,7 +7,6 @@ import { Badge } from '@/components/ui/badge'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { api } from './api'
 import { useQdrantStore } from './store'
 import { formatNumber } from './format'
@@ -130,7 +129,7 @@ export function CollectionOverview() {
                   </div>
                   <PayloadTypeBar stats={payloadTypeStats} total={totalPayloadFields} />
                 </div>
-                <ScrollArea className="max-h-56">
+                <div className="max-h-56 overflow-y-auto [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
                   <div className="space-y-1.5 pr-2">
                     {data.payload_fields.map((f) => (
                       <div key={f.field} className="flex items-center justify-between rounded-md border bg-muted/20 px-2.5 py-1.5">
@@ -147,7 +146,7 @@ export function CollectionOverview() {
                       </div>
                     ))}
                   </div>
-                </ScrollArea>
+                </div>
               </>
             )}
           </CardContent>

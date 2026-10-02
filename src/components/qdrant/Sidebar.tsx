@@ -6,7 +6,6 @@ import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Input } from '@/components/ui/input'
 import { api } from './api'
@@ -57,7 +56,7 @@ export function Sidebar() {
         </div>
       </div>
 
-      <ScrollArea className="flex-1 px-2 pb-3">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25">
         {loading ? (
           <div className="space-y-2 px-1 pt-1">
             {Array.from({ length: 5 }).map((_, i) => (
@@ -136,7 +135,7 @@ export function Sidebar() {
             ))}
           </ul>
         )}
-      </ScrollArea>
+      </div>
     </aside>
   )
 }
