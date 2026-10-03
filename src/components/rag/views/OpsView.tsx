@@ -814,6 +814,7 @@ export function OpsView() {
                           { label: '数据库（db/，不含备份）', value: d.dbBytes, cls: 'bg-teal-500' },
                           { label: '产物目录（artifacts）', value: d.artifactsBytes, cls: 'bg-emerald-500' },
                           { label: '备份目录（db/backups）', value: d.backupsBytes, cls: 'bg-amber-500' },
+                          { label: `程序日志（${formatNumber(d.oplog?.count ?? 0)} 条 · 估算）`, value: d.oplog?.estBytes ?? 0, cls: 'bg-rose-500' },
                         ].map((row) => (
                           <div key={row.label}>
                             <div className="flex items-baseline justify-between gap-2">
@@ -823,12 +824,12 @@ export function OpsView() {
                             <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
                               <div
                                 className={cn('h-full rounded-full transition-all', row.cls)}
-                                style={{ width: `${Math.max(2, Math.min(100, (row.value / Math.max(1, Math.max(d.dbBytes, d.artifactsBytes, d.backupsBytes))) * 100))}%` }}
+                                style={{ width: `${Math.max(2, Math.min(100, (row.value / Math.max(1, Math.max(d.dbBytes, d.artifactsBytes, d.backupsBytes, d.oplog?.estBytes ?? 0))) * 100))}%` }}
                               />
                             </div>
                           </div>
                         ))}
-                        <p className="text-[9px] leading-relaxed text-muted-foreground">db/ 含 SQLite 主库与 dev 库；备份目录含面板数据与内嵌 Qdrant 快照。大小缓存 30s。</p>
+                        <p className="text-[9px] leading-relaxed text-muted-foreground">db/ 含 SQLite 主库与 dev 库；备份目录含面板数据与内嵌 Qdrant 快照；程序日志为 ProgramLog 表估算占用（字段字节和 + 每行固定开销，含在 db/ 内，供单独观测）。大小缓存 30s。</p>
                       </div>
                     </section>
                   </div>

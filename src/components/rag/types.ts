@@ -736,5 +736,10 @@ export interface ResourceUsage {
     dbBytes: number
     artifactsBytes: number
     backupsBytes: number
+    /** 程序日志（ProgramLog 表）：行数与估算占用（字段字节和 + 每行固定开销近似） */
+    oplog: {
+      count: number
+      estBytes: number
+    }
   }
 }

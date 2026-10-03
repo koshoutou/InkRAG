@@ -2,6 +2,7 @@ import { promises as fs, type Dirent } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import { NextResponse } from 'next/server'
+import { db } from '@/lib/db'
 import { ARTIFACTS_ROOT } from '@/lib/rag/artifacts'
 import { BACKUPS_ROOT } from '@/lib/rag/backup'
 
@@ -15,6 +16,8 @@ export const runtime = 'nodejs'
  *   首次请求无采样点返回 0，第二次起为真实值；多核可 >100%，按核数上限 clamp）
  * - disk 三项目录字节数：globalThis 缓存 30s，防止每次请求全盘 walk
  *   （dbBytes = {cwd}/db 目录且不含 backups 子目录，backups 单独统计）
+ * - oplog：程序日志行数与估算占用（SQLite 无逐表体积，按字段字节数求和 + 每行固定开销近似；
+ *   与 disk 同缓存 30s）
  */
 
 /** globalThis 采样缓存（dev 热重载后跨模块实例保留） */
@@ -26,6 +29,8 @@ interface DiskCache {
   dbBytes: number
   artifactsBytes: number
   backupsBytes: number
+  oplogCount: number
+  oplogEstBytes: number
 }
 const sampleG = globalThis as unknown as { __ragResourceSample?: ResourceSample }
 const diskG = globalThis as unknown as { __ragResourceDiskCache?: DiskCache }
@@ -75,11 +80,27 @@ function sampleProcessCpuPercent(): number {
 async function diskSizes(): Promise<DiskCache> {
   const cached = diskG.__ragResourceDiskCache
   if (cached && Date.now() - cached.at < DISK_CACHE_TTL_MS) return cached
+  // 程序日志体积估算：字段字节数求和 + 每行 ~120B 固定开销（id/时间戳/索引分摊）
+  let oplogCount = 0
+  let oplogEstBytes = 0
+  try {
+    const rows = (await db.$queryRaw`SELECT COUNT(*) AS cnt,
+      COALESCE(SUM(LENGTH(message)), 0) + COALESCE(SUM(LENGTH(COALESCE(detailJson, ''))), 0)
+      + COALESCE(SUM(LENGTH(action)), 0) AS payload
+      FROM ProgramLog`) as Array<{ cnt: number | bigint; payload: number | bigint }>
+    const r = rows[0]
+    oplogCount = Number(r?.cnt ?? 0)
+    oplogEstBytes = Number(r?.payload ?? 0) + oplogCount * 120
+  } catch {
+    // 表不存在（首次未 db push）等场景忽略
+  }
   const fresh: DiskCache = {
     at: Date.now(),
     dbBytes: await dirSize(DB_DIR, 'backups'),
     artifactsBytes: await dirSize(ARTIFACTS_ROOT),
     backupsBytes: await dirSize(BACKUPS_ROOT),
+    oplogCount,
+    oplogEstBytes,
   }
   diskG.__ragResourceDiskCache = fresh
   return fresh
@@ -116,6 +137,10 @@ export async function GET() {
         dbBytes: disk.dbBytes,
         artifactsBytes: disk.artifactsBytes,
         backupsBytes: disk.backupsBytes,
+        oplog: {
+          count: disk.oplogCount,
+          estBytes: disk.oplogEstBytes,
+        },
       },
     })
   } catch (e: any) {

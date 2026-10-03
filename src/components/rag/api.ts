@@ -521,7 +521,7 @@ export const ragApi = {
   },
 
   // -- §35 程序日志（/api/system/oplogs） ------------------------------------
-  async listOpLogs(params: { level?: string; category?: string; hours?: string | number; q?: string; limit?: number; offset?: number }): Promise<{ logs: import('./views/OpLogsCard').OpLogItem[]; total: number }> {
+  async listOpLogs(params: { level?: string; category?: string; hours?: string | number; q?: string; limit?: number; offset?: number }): Promise<{ logs: import('./views/OpLogsCard').OpLogItem[]; total: number; stats?: { totalAll: number; estBytes: number } }> {
     return asJson(
       await req(`/api/system/oplogs${qs({
         level: params.level && params.level !== 'all' ? params.level : undefined,

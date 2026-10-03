@@ -85,6 +85,14 @@ const HOURS_OPTIONS = [
 
 const PAGE_SIZE = 60
 
+/** 字节格式化（日志大小展示） */
+function fmtBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  if (n < 1024) return `${n} B`
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
+  return `${(n / 1024 / 1024).toFixed(2)} MB`
+}
+
 export function OpLogsCard() {
   const queryClient = useQueryClient()
   const [level, setLevel] = useState('all')
@@ -107,6 +115,8 @@ export function OpLogsCard() {
   const logs: OpLogItem[] = logsQuery.data?.logs ?? []
   const total = logsQuery.data?.total ?? 0
   const shown = logs.length
+  // 全量统计（忽略过滤条件）：总条数 + 估算占用（后端 stats 字段）
+  const stats = logsQuery.data?.stats
 
   // 关键词 300ms 防抖
   useMemo(() => {
@@ -157,6 +167,11 @@ export function OpLogsCard() {
             <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-amber-500" />{levelCounts.warn}</span>
             <span className="inline-flex items-center gap-1"><span className="h-1.5 w-1.5 rounded-full bg-rose-500" />{levelCounts.error}</span>
             （当前页）
+            {stats && (
+              <Badge variant="outline" className="ml-1 border-border/60 font-mono text-[9.5px] font-normal text-muted-foreground">
+                全量 {stats.totalAll} 条 · 约 {fmtBytes(stats.estBytes)}
+              </Badge>
+            )}
           </span>
         </CardTitle>
       </CardHeader>

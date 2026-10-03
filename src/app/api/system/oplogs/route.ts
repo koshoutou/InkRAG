@@ -36,9 +36,14 @@ export async function GET(req: NextRequest) {
       where.ts = { gte: new Date(Date.now() - hours * 3600_000) }
     }
 
-    const [rows, total] = await Promise.all([
+    const [rows, total, statsRows] = await Promise.all([
       db.programLog.findMany({ where, orderBy: { ts: 'desc' }, take: limit, skip: offset }),
       db.programLog.count({ where }),
+      // 全量统计（忽略过滤条件）：总条数 + 估算占用（字段字节和 + 每行 ~120B 固定开销）
+      db.$queryRaw`SELECT COUNT(*) AS cnt,
+        COALESCE(SUM(LENGTH(message)), 0) + COALESCE(SUM(LENGTH(COALESCE(detailJson, ''))), 0)
+        + COALESCE(SUM(LENGTH(action)), 0) AS payload
+        FROM ProgramLog`.catch(() => [] as Array<{ cnt: number | bigint; payload: number | bigint }>),
     ])
     const logs = rows.map((r) => ({
       id: r.id,
@@ -59,7 +64,12 @@ export async function GET(req: NextRequest) {
       kbId: r.kbId,
       docId: r.docId,
     }))
-    return NextResponse.json({ logs, total })
+    const st = (statsRows as Array<{ cnt: number | bigint; payload: number | bigint }>)[0]
+    const stats = {
+      totalAll: Number(st?.cnt ?? 0),
+      estBytes: Number(st?.payload ?? 0) + Number(st?.cnt ?? 0) * 120,
+    }
+    return NextResponse.json({ logs, total, stats })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
   }
