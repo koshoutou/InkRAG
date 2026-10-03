@@ -13,21 +13,38 @@ next-env.d.ts
 !.env.example
 
 # database & runtime data（SQLite 与产物不入库，首次运行自动生成）
-db/
-artifacts/
-backups/
+# 注意：必须根锚定（/db/），否则会误忽略 src/app/api/system/backups 等业务目录
+/db/
+/artifacts/
+/backups/
 *.sqlite
 *.db
 
 # logs
 *.log
 dev.log
+dev.out.log
+server.log
 
 # misc
 .DS_Store
 .claude
 .z-ai-config
 .zscripts
+local-*
+prompt
 qa-screenshots/
-download/
-upload/
+/download/
+/upload/
+workspace/
+tool-results/
+agent-ctx/
+/release/
+Caddyfile
+/examples/
+/tests/
+worklog.md
+scripts/sync-release.sh
+
+# Skills directory
+/skills/
