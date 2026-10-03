@@ -875,7 +875,8 @@ async function execParse(job: JobRow, doc: DocRow, ctx: JobRunCtx): Promise<void
   const choice: 'mineru' | 'node' | undefined =
     engineChoice === 'mineru' || engineChoice === 'node' ? engineChoice : undefined
 
-  const engineKind = resolveDocEngine(settings, choice)
+  // 16-c：全局模式按扩展名智能路由（仅 Node 类型走本地解析，省 MinerU 额度）
+  const engineKind = resolveDocEngine(settings, choice, ext)
 
   if (engineKind === 'node') {
     // ---- Node 引擎：原同步链路（含全部内置解析器与进度） ----

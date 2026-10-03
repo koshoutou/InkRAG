@@ -61,7 +61,7 @@ import { delimitedToMarkdown } from './parsers/tabular'
 import { epubToMarkdown } from './parsers/epub'
 import { ofdToMarkdown } from './parsers/ofd'
 import { mhtmlToMarkdown } from './parsers/mhtml'
-import { isImageExt, isMineruExt } from './parsers/formats'
+import { isImageExt, isMineruExt, isNodeExt } from './parsers/formats'
 import { ensureDocDir, markdownPath, middleJsonPath, docDir } from './artifacts'
 import {
   MINERU_PART_LIMITS,
@@ -110,16 +110,10 @@ export async function parseDocument(input: ParseDocumentInput): Promise<ParseArt
     // 显式 MinerU 引擎：强制走 MinerU（未配置 → parseWithMineru 内给出明确报错）
     return parseWithMineru(input)
   }
-  if (input.settings.parseMode === 'mineru') {
-    return parseWithMineru(input)
-  }
-  if (input.settings.parseMode === 'fallback') {
-    return parseWithFallback(input)
-  }
-  throw nonRetryable(
-    'PARSE_NOT_CONFIGURED',
-    '未配置 MinerU API 且未启用降级解析器，无法解析文档（请在设置中配置 MinerU 或开启 useFallbackParser）'
-  )
+  // 全局模式：按扩展名智能路由（16-c），与 resolveDocEngine 同口径
+  const ext = path.extname(input.filename).toLowerCase().replace('.', '')
+  const engine = resolveDocEngine(input.settings, undefined, ext)
+  return engine === 'mineru' ? parseWithMineru(input) : parseWithFallback(input)
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,14 +1045,32 @@ export type MinerUProbeResult =
   /** 瞬时错误（网络/5xx/429）→ 轮询器下轮再查，不计失败 */
   | { state: 'error'; error: StoreError }
 
-/** 判定文档将使用的解析引擎（per-doc engineChoice > 全局 parseMode；均未配置 → 硬失败） */
+/**
+ * 判定文档将使用的解析引擎。
+ * 优先级：per-doc engineChoice > 全局 parseMode（按扩展名智能路由，16-c）。
+ *
+ * 【16-c 扩展名路由】全局 mineru 模式下不再「二选一」一刀切：
+ *   - 仅 MinerU 支持的类型（图片 / .ppt / .xls）→ mineru
+ *   - 仅 Node 支持的类型（md / txt / csv / epub / ofd / odt / …）→ node
+ *     （此前会整包提交给 MinerU 然后被远端以不支持类型拒绝，既浪费额度又必失败）
+ *   - 双引擎类型（pdf / doc / docx / pptx / xlsx）→ mineru（全局选 MinerU 的用户意图是高保真解析）
+ * 全局 fallback 模式：一律 node（仅 MinerU 类型在 parseWithFallback 内给出明确报错与配置指引）。
+ */
 export function resolveDocEngine(
   settings: RagSettings,
-  engineChoice?: 'mineru' | 'node'
+  engineChoice?: 'mineru' | 'node',
+  ext?: string
 ): 'mineru' | 'node' {
   if (engineChoice === 'node') return 'node'
   if (engineChoice === 'mineru') return 'mineru'
-  if (settings.parseMode === 'mineru') return 'mineru'
+  if (settings.parseMode === 'mineru') {
+    const e = (ext ?? '').toLowerCase().replace('.', '')
+    if (!e) return 'mineru'
+    const nodeOk = isNodeExt(e)
+    const mineruOk = isMineruExt(e, settings.mineru.provider)
+    if (nodeOk && !mineruOk) return 'node' // 仅 Node 类型：本地直解（省额度、快）
+    return 'mineru' // 仅 MinerU / 双引擎类型：高保真解析
+  }
   if (settings.parseMode === 'fallback') return 'node'
   throw nonRetryable(
     'PARSE_NOT_CONFIGURED',
