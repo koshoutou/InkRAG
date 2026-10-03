@@ -12,12 +12,15 @@
 - **两段式上传**：选文件进待传队列 → 可继续添加 → 点「开始上传」确认执行；并发 2 + 字节级进度 + 六阶段实时步进器；SHA256 秒传
 - **URL 导入**：粘贴 URL 抓取导入，可选 MinerU / Node 引擎
 
-### 检索与调试
-- **混合检索**：Dense（bge-m3）+ 稀疏双路召回（provider 原生稀疏输出，多字段自动探测；无稀疏输出时建库锁定 dense 单路）+ RRF/DBSF 融合 + Rerank（bge-reranker-v2-m3），dense/sparse/hybrid 三模式
+### 切分与质量
 - **三屏联动**：原文（PDF 坐标高亮）/ Markdown / chunk 列表双向联动；chunk 可编辑、启停、删除——变更即重嵌入、同步向量库、自动递增文档版本号
 - **切分沙盒**：无损参数试验（size/overlap/parentSize/strategy/保护块），300ms 防抖预览，「入库此切分结果」一键落库
-- **检索调试台**：白盒四阶段耗时、命中卡片、调用日志回放、趋势图下钻
-- **测试集回归**：金标准用例 + 命中率/MRR 评估 + 异步运行历史
+- **测试集回归**：金标准用例 + 命中率/MRR 评估 + 异步运行历史（切分/入库质量回归属知识库管理域；对外检索 API 已移除——见更新日志 v1.8）
+
+### 对外接口（供 AI 调用）
+- **入库 API `/api/input`**：Bearer Key 鉴权（401/403 读写角色分离）；建库（含 retrievalMode 检索模式元数据）/ 多文件并发上传 / 文本直接入库 / 跨库文档查询 / 失败重试 / 级联删除；sha256 秒传、单文件 200MB；超详细文档（应用内一键查看 + `docs/input-api.md`）
+- **Dify 兼容数据集 API `/v1/datasets`**：MinerU 面板「导出到 Dify」直接对接本平台——填本平台根地址与平台 API Key 即可（检查链接/导出位置/高级配置全兼容）；状态映射到 Dify indexing_status、process_rule.max_tokens→chunk size；对接文档 `docs/dify-compat.md`
+- **MCP Server（`mcp/`）**：Claude Desktop / Cursor 等通过 Model Context Protocol 直接入库——10 工具与 /api/input 一一对应，stdio transport，中英双语 README
 
 ### 版本管理
 - **自动快照**：重解析 / 重切分 / chunk 编辑 / 启停 / 删除 / 恢复前自动归档当前版本（含全文）
@@ -28,8 +31,9 @@
 ### 可观测与运维
 - **实时活动·任务中心**：每篇文档的解析 → 切分 → 向量化 → 写入向量库全程进度实时推送（socket.io）；失败可重试、报错可展开、完成自动隐藏、失败记录可删除
 - **系统运维**：健康矩阵（Qdrant/向量引擎/嵌入/MinerU/Rerank/流水线）、平台资源占用（进程内存/CPU、系统负载、磁盘明细）、Prometheus 指标
+- **程序日志**：面板操作 / 运行信息 / 报错的统一记录（info/warn/error × 八分类）——关键词/级别/分类/时间窗筛选、行内详情展开、导出 JSON、按时长清理；共享层一处埋点三条链路（UI / 入库 API / Dify 兼容）全覆盖 + 未捕获请求错误全局兜底
 - **备份一体化**：面板数据（SQLite + 产物）与 Qdrant 快照一同创建 / 一同下载 / 一同恢复，也可分开单独操作；支持上传备份包（tar.gz）与 Qdrant 快照（.snapshot）恢复；定时自动备份含轮转清理
-- **Agent API**：Bearer Key 鉴权对外检索 API（v1），读写角色分离
+- **Agent API 视图**：API Key 管理（三角色）+ 入库 API / Dify 兼容层 / MCP 文档一键查看
 
 ## 技术栈
 
@@ -66,9 +70,35 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 文档
 
-- [API 契约（29 节）](./docs/api-contract.md)
+- [API 契约（35 节）](./docs/api-contract.md)
+- [入库 API 超详细文档（/api/input）](./docs/input-api.md)
+- [Dify 兼容数据集 API 对接指南（/v1/datasets · MinerU 面板导出）](./docs/dify-compat.md)
+- [MCP Server（Claude Desktop / Cursor 接入）](./mcp/README.md)
 
 ## 更新日志
+
+### v1.8（2026-10 · 平台定位收敛：知识库管理 + 入库接口生态）
+
+> 本轮按「平台只做知识库管理」重新划定边界：**对外检索 API 与检索日志整体移除**（检索调用与审计由独立平台承担）；
+> 对外能力转向**入库接口生态**——/api/input（AI 调用）、/v1/datasets（Dify 兼容，MinerU 面板直连）、MCP Server（Claude/Cursor）。
+
+**功能新增**
+- `/api/input` 入库 API（11 端点）：建库（retrievalMode 元数据）/ 多文件并发上传 / 文本入库 / 状态轮询 / 重试 / 删除；401/403 读写角色分离；应用内一键查看 513 行超详细文档
+- `/v1/datasets` Dify 兼容层（13 端点）：MinerU 面板「导出到 Dify」填本平台地址+Key 直连；process_rule（段落分隔符+每段最大 token）→ chunk size 映射；Dify indexing_status 状态机映射
+- MCP Server `mcp/`（inkrag-mcp）：10 工具 stdio，Claude Desktop / Cursor 配置示例（中英双语）
+- 运维程序日志：ProgramLog 表 + 全链路埋点（共享层/流水线失败/设置/Key/备份）+ instrumentation 全局兜底；OpsView 程序日志卡（筛选/详情展开/导出/清理）
+- 共享入库层抽取：kbcreate / ingest / 删除重试三 core——UI、/api/input、/v1/datasets 三链路同一实现；KnowledgeBase 新增 retrievalMode 字段（KbSummary 暴露）
+
+**功能移除（§32，破坏性）**
+- `POST /api/v1/knowledge-bases/[kbId]/search`、`POST /api/search/debug`、`GET /api/dashboard/trends` → 404；仪表盘不再返回 recentLogs
+- Prometheus rag_search_* 指标与 metricsSummary.search 字段
+- 前端「检索调试台」视图、「检索质量趋势」卡、「最近检索日志」表（导航与 store 收敛）
+- runSearch 不再写检索日志（保留供测试集质量回归与内部排障）
+
+**修复**
+- MinerU 设置「测试连接」失效根因：/api/qdrant/test 路由文件曾因环境异常丢失（主工作区；仓库未受影响）——恢复后「以已保存配置直接测试」正常（无参回退 DB 设置）
+- Task 16 遗留 E2E 收口：MinerU 云免费档排队 12h 过期（-60012）→ 按 6h 等待上限设计失败、错误信息清晰；超大 PDF 自动拆分链路行为符合设计
+
 
 ### v1.7（2026-10 · 超大 PDF 拆分联动 MinerU 与编辑一致性闭环）
 

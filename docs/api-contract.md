@@ -711,3 +711,51 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 **新增（后续版本内嵌到 Agent API 视图，另见 §33/§34）**：
 - `/api/input/**`：入库 API（供 AI 上传文件入库 / 建库 / 配置切分与解析模式）
 - `/v1/datasets/**`：Dify 兼容数据集 API（对接 MinerU 面板「导出到 Dify」）
+
+## §33 入库 API `/api/input`（Task 17-2，2026-10-03）
+
+**定位**：供 AI / Agent 调用的入库 input API（平台只做知识库管理；对外检索 API 已移除 §32）。
+完整文档见 `docs/input-api.md`（应用内「Agent API → 查看完整 API 文档」渲染同一内容）。
+
+| 方法 | 路径 | 语义 |
+|---|---|---|
+| GET | `/api/input/docs?file=input-api\|dify-compat` | 公开文档（text/markdown） |
+| GET | `/api/input/knowledge-bases` | 知识库列表（KbSummary 含 retrievalMode） |
+| POST | `/api/input/knowledge-bases` | 建库 `{name, description?, chunkConfig?, rerankEnabled?, retrievalMode?}` → 201 `{kb}`（走 createKnowledgeBaseCore：Qdrant/Embedding 强校验 + probe 锁定） |
+| GET/DELETE | `/api/input/knowledge-bases/[id]` | 详情 / 级联删除（deleteKnowledgeBaseCore） |
+| POST | `/api/input/knowledge-bases/[id]/documents` | multipart 上传：`file`（单）或 `files`（多，Promise.allSettled 并发）+ `chunkConfig` + `engine`（mineru/node）→ `{docs, deduplicated, failures}` |
+| POST | `/api/input/knowledge-bases/[id]/text` | 文本直接入库（ingestTextContent，无扩展名补 .md） |
+| GET | `/api/input/documents?kbId=&status=&q=&limit=&offset=` | 文档列表（kbId 省略=全库） |
+| GET | `/api/input/documents/[id]` | 文档详情（stageProgress/error/chunk 计数） |
+| POST | `/api/input/documents/[id]/retry` | 仅 failed 可重试（retryFailedDocumentCore，409 保护） |
+| DELETE | `/api/input/documents/[id]` | 删除文档（deleteDocumentCore） |
+
+**鉴权**：`Authorization: Bearer rag-…`；401 无效、403 disabled/readonly 写入；命中 callCount+1。
+**共享层**：kbcreate.ts（建库）/ ingest.ts（上传/文本）——与 /api/kb UI 路径同一实现（17-2 重构，回归通过）。
+**并发语义**：多文件 allSettled；流水线并发 2 + MinerU 等待不占槽（waiting_mineru）；sha256 秒传；单文件 200MB / 单请求 500MB。
+
+## §34 Dify 兼容数据集 API `/v1/datasets`（Task 17-3，2026-10-03）
+
+**定位**：Dify「知识库 API」兼容子集——MinerU 面板「导出到 Dify」填**本平台根地址 + 平台 API Key**即可直连（无需部署 Dify）。完整对接文档 `docs/dify-compat.md`（应用内「Agent API → Dify 卡 → 查看对接文档」）。
+
+| 方法 | 路径 | Dify 语义 |
+|---|---|---|
+| GET | `/v1/datasets?page=&limit=&keyword=` | 数据集列表 `{data, has_more, limit, total, page}`（MinerU「检查链接」） |
+| POST | `/v1/datasets` | 建空数据集（name ≤40；重名 409 dataset_name_duplicate） |
+| GET/PATCH/DELETE | `/v1/datasets/[id]` | 详情 / 重命名改描述 / 删除（204 空体） |
+| GET | `/v1/datasets/[id]/documents?page=&limit=&keyword=` | 文档列表（Dify 形状） |
+| GET/DELETE | `/v1/datasets/[id]/documents/[docId]` | 文档详情 / 删除（204） |
+| GET | `/v1/datasets/[id]/documents/[batch]/indexing-status` | 进度轮询（batch=文档 id；completed_segments=enabled chunk 数） |
+| POST | `/v1/datasets/[id]/document/create-by-file` | multipart `data`(JSON)+`file` → `{document, batch}` |
+| POST | `/v1/datasets/[id]/document/create-by-text`（+`create_by_text` 别名） | `{name, text, process_rule?}` |
+
+**错误体**：`{code, message, status}`（unauthorized/forbidden/not_found/invalid_param/dataset_name_duplicate/no_file_uploaded/too_many_files/file_too_large）。
+**状态映射**：queued→waiting、parsing→parsing、chunking→splitting、embedding|upserting→indexing、ready→completed、failed→error。
+**process_rule**：custom+max_tokens→chunk size（clamp 64..8192）；separator/doc_form/doc_language/indexing_technique 记录到 metaJson.difyParams（结构切分 vs 分隔符切分差异在文档披露）；word_count 以 chunk 数近似。
+
+## §35 程序日志（Task 17-5，2026-10-03）
+
+**表**：`ProgramLog`（level info/warn/error × category api/kb/document/chunk/pipeline/auth/backup/system；ts/level/category 三索引）。
+**写入点**：共享层包装（kb.create / doc.upload / doc.ingest_text / kb.delete / doc.delete / doc.retry，成功 info 失败 warn+statusCode）+ pipeline 永久失败（pipeline.job_failed，error 级）+ settings.update（只记字段名）+ auth.key_* + backup.create/restore（warn 破坏性）+ instrumentation onRequestError（system/api.request_error 全局兜底）。
+**API**：`GET /api/system/oplogs?level=&category=&q=&hours=&limit=&offset=` → `{logs, total}`（detail 已 JSON.parse）；`DELETE ?olderThanHours=`（0=清空）。
+**UI**：OpsView「程序日志」卡（关键词防抖搜索 / 三级筛选 / 10s 自动刷新 / 行内详情 / 加载更多 / 导出 JSON / 二次确认清理）。
