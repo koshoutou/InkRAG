@@ -86,6 +86,7 @@ export function ApiKeysView() {
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [deleteKey, setDeleteKey] = useState<ApiKeyItem | null>(null)
   const [docsOpen, setDocsOpen] = useState(false)
+  const [difyDocsOpen, setDifyDocsOpen] = useState(false)
 
   const keysQuery = useQuery({ queryKey: ['keys'], queryFn: () => ragApi.listKeys() })
 
@@ -194,15 +195,15 @@ export function ApiKeysView() {
           </CardHeader>
           <CardContent className="flex h-full flex-col gap-3">
             <p className="text-xs leading-relaxed text-muted-foreground">
-              对接 MinerU 面板「导出到 Dify」：填本平台地址与 API Key 即可。
+              对接 MinerU 面板「导出到 Dify」：API 服务器地址填本平台根地址（勿带 /v1）、API 密钥填平台 API Key——检查链接 / 选择导出位置 / 高级配置（段落分隔符 + 每段最大 token）全部原生兼容。
             </p>
             <div className="mt-auto flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" className="gap-1.5" disabled>
+              <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setDifyDocsOpen(true)}>
                 <BookOpen className="h-3.5 w-3.5" />
-                查看文档
+                查看对接文档
               </Button>
-              <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300">
-                即将上线
+              <Badge variant="outline" className="border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-600 dark:text-teal-300">
+                MinerU 面板可用
               </Badge>
             </div>
           </CardContent>
@@ -298,6 +299,15 @@ export function ApiKeysView() {
         title="入库 API 文档"
         description="POST /api/input/** · 鉴权 Bearer · 建库 / 上传 / 轮询 / 重试 / 删除"
         src="/api/input/docs"
+      />
+
+      {/* Dify 兼容层对接文档（数据源 /api/input/docs?file=dify-compat，Task 17-3） */}
+      <ApiDocsDialog
+        open={difyDocsOpen}
+        onOpenChange={setDifyDocsOpen}
+        title="Dify 兼容数据集 API · 对接文档"
+        description="/v1/datasets/** · MinerU 面板「导出到 Dify」直接填本平台地址与 Key"
+        src="/api/input/docs?file=dify-compat"
       />
 
       {/* 新建 Key Dialog */}
