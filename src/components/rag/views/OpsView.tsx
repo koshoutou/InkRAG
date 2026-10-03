@@ -7,6 +7,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   AlertTriangle,
+  Ban,
   Camera,
   Check,
   CheckCircle2,
@@ -16,6 +17,7 @@ import {
   Eraser,
   Gauge,
   HardDrive,
+  Hourglass,
   Info,
   ListChecks,
   Loader2,
@@ -1643,14 +1645,40 @@ export function OpsView() {
           </AlertDialogContent>
         </AlertDialog>
 
-        {/* 任务统计卡 */}
+        {/* 任务统计卡（16-f：补 waiting_mineru / cancelled 两态） */}
         {stats && (
-          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <StatCard icon={<ListChecks className="h-4 w-4" />} label="待处理 (pending)" value={stats.pending} accent="stone" />
-            <StatCard icon={<Play className="h-4 w-4" />} label="执行中 (active)" value={stats.active} accent="amber" />
-            <StatCard icon={<CheckCircle2 className="h-4 w-4" />} label="已完成 (completed)" value={stats.completed} accent="emerald" />
-            <StatCard icon={<XCircle className="h-4 w-4" />} label="失败 (failed)" value={stats.failed} accent="rose" />
-          </div>
+          <>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6">
+              <StatCard icon={<ListChecks className="h-4 w-4" />} label="待处理" value={stats.pending} accent="stone" hint="pending · 排队等槽位" />
+              <StatCard icon={<Play className="h-4 w-4" />} label="执行中" value={stats.active} accent="amber" hint="active · 占并发槽" />
+              <StatCard
+                icon={<Hourglass className="h-4 w-4" />}
+                label="等 MinerU"
+                value={stats.waiting}
+                accent="violet"
+                hint="waiting_mineru · 远端解析中，不占本地槽位"
+              />
+              <StatCard icon={<CheckCircle2 className="h-4 w-4" />} label="已完成" value={stats.completed} accent="emerald" />
+              <StatCard icon={<XCircle className="h-4 w-4" />} label="失败" value={stats.failed} accent="rose" hint="失败列表可重试/删除" />
+              <StatCard icon={<Ban className="h-4 w-4" />} label="已取消" value={stats.cancelled} accent="stone" hint="删库/重解析时自动取消在途任务" />
+            </div>
+            {/* 16-f：本地进程调度说明（用户要求的提醒） */}
+            <details className="group rounded-xl border border-border/60 bg-muted/20 px-4 py-3">
+              <summary className="flex cursor-pointer list-none items-center gap-2 text-xs font-medium">
+                <Info className="h-3.5 w-3.5 text-primary" />
+                本地流水线调度说明（并发 / 心跳 / 重试 / MinerU 等待）
+                <span className="ml-auto text-[10px] text-muted-foreground group-open:rotate-180 transition-transform">▾</span>
+              </summary>
+              <ul className="mt-2.5 space-y-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                <li>· <b className="text-foreground">并发 2</b>：同时执行的文档流水线任务数上限（parse→chunk→embed→upsert 四阶段串行走完）；MinerU 引擎另有独立信号量（同时上传 ≤ 2）。</li>
+                <li>· <b className="text-foreground">等 MinerU 不占槽</b>：提交远端后任务转入 waiting_mineru 状态并释放本地并发槽，其他文档继续处理；独立轮询器每 5s 查询远端进度（实时活动流可见「k/n 段完成 · 已等待 X 分钟」）。</li>
+                <li>· <b className="text-foreground">超大 PDF 自动拆分</b>：超过 MinerU 页数/体积限制的 PDF 自动分段提交（每段独立远端任务），全部完成后合并产物，仅失效段会重新上传（断点续传）。</li>
+                <li>· <b className="text-foreground">心跳与僵死回收</b>：执行中任务每 20s 续租心跳；超过 120s 无心跳判定僵死自动回收重跑（CAS 防双跑）。</li>
+                <li>· <b className="text-foreground">重试 3 次</b>：瞬时错误（网络/限频/5xx）自动退避重试；业务错误（格式不支持/Token 无效/超页数）不重试直接失败并给出原因。</li>
+                <li>· <b className="text-foreground">断点续传</b>：MinerU 任务 ID 持久化，重试/重启后不重新上传文件、从远端状态继续；远端任务失效仅重提缺失段。</li>
+              </ul>
+            </details>
+          </>
         )}
 
         <div className="grid grid-cols-1 gap-4 xl:grid-cols-[1fr_360px]">
@@ -1667,6 +1695,7 @@ export function OpsView() {
                     <SelectItem value="all" className="text-xs">全部状态</SelectItem>
                     <SelectItem value="pending" className="text-xs">pending</SelectItem>
                     <SelectItem value="active" className="text-xs">active</SelectItem>
+                    <SelectItem value="waiting_mineru" className="text-xs">waiting_mineru</SelectItem>
                     <SelectItem value="completed" className="text-xs">completed</SelectItem>
                     <SelectItem value="failed" className="text-xs">failed</SelectItem>
                   </SelectContent>

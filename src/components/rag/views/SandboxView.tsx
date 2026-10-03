@@ -2,7 +2,9 @@
 
 // 切分沙盒（对标 RAGFlow，M4 核心；§27 入库语义）
 // 参数面板（滑块/策略/保护块）→ 300ms 防抖 POST chunk-preview → 统计卡 + 预览列表
-// 与当前生效配置 diff 高亮；主操作「入库此切分结果」/ 次「按当前配置重新入库」AlertDialog
+// 与当前生效配置 diff 高亮；入库按钮合一（16-e）：
+//   参数有变更 → 「入库此切分结果」（沙盒参数入库并成为新生效配置）
+//   参数无变更 → 「按当前配置重新入库」（等价动作：重切+重嵌入+新版本，用于重建向量数据）
 //   → POST action rechunk（后端：旧版本自动快照 + parse_config_v+1 + 清旧向量 + 重切 + 重嵌入）
 
 import { useEffect, useMemo, useState } from 'react'
@@ -66,8 +68,7 @@ export function SandboxView() {
   const [appliedSnapKey, setAppliedSnapKey] = useState<string | null>(null)
   const [previewPage, setPreviewPage] = useState(0)
   const [applyOpen, setApplyOpen] = useState(false)
-  // 入库模式：new = 沙盒参数入库（主按钮）；asis = 按当前生效配置原样重新入库（次按钮）
-  const [applyMode, setApplyMode] = useState<'new' | 'asis'>('new')
+  // 16-e 按钮合一：入库模式由参数是否变更推导（有变更 = 沙盒参数入库；无变更 = 按当前配置重入库）
 
   const kbsQuery = useQuery({ queryKey: ['kbs'], queryFn: () => ragApi.listKbs() })
   const kbs = kbsQuery.data?.kbs ?? []
@@ -113,6 +114,23 @@ export function SandboxView() {
     placeholderData: (prev) => prev,
   })
 
+  const changed = useMemo(() => {
+    if (!snapConfig) return null
+    const diff: string[] = []
+    if (config.size !== snapConfig.size) diff.push(`size ${snapConfig.size} → ${config.size}`)
+    if (config.overlap !== snapConfig.overlap) diff.push(`overlap ${snapConfig.overlap} → ${config.overlap}`)
+    if (config.parentSize !== snapConfig.parentSize) diff.push(`parentSize ${snapConfig.parentSize} → ${config.parentSize}`)
+    if (config.strategy !== snapConfig.strategy) diff.push(`strategy ${snapConfig.strategy} → ${config.strategy}`)
+    const a = [...config.protects].sort().join(',')
+    const b = [...snapConfig.protects].sort().join(',')
+    if (a !== b) diff.push(`protects [${snapConfig.protects.join(',')}] → [${config.protects.join(',')}]`)
+    return diff.length > 0 ? diff : null
+  }, [config, snapConfig])
+
+  // 入库模式（16-e 推导式）：有参数变更 → new（沙盒参数入库）；无变更 → asis（按已存配置重入库，
+  // 两者后端动作完全一致：快照旧版本 + parseConfigV+1 + 清旧向量 + 重切 + 重嵌入，仅是否更新切分参数之差）
+  const applyMode: 'new' | 'asis' = changed ? 'new' : 'asis'
+
   const applyMutation = useMutation({
     // asis 不传 chunkConfig → 后端按文档存储的当前生效配置重切
     mutationFn: (mode: 'new' | 'asis') =>
@@ -136,18 +154,6 @@ export function SandboxView() {
 
   const preview = previewQuery.data?.preview
   const stats = preview?.stats
-  const changed = useMemo(() => {
-    if (!snapConfig) return null
-    const diff: string[] = []
-    if (config.size !== snapConfig.size) diff.push(`size ${snapConfig.size} → ${config.size}`)
-    if (config.overlap !== snapConfig.overlap) diff.push(`overlap ${snapConfig.overlap} → ${config.overlap}`)
-    if (config.parentSize !== snapConfig.parentSize) diff.push(`parentSize ${snapConfig.parentSize} → ${config.parentSize}`)
-    if (config.strategy !== snapConfig.strategy) diff.push(`strategy ${snapConfig.strategy} → ${config.strategy}`)
-    const a = [...config.protects].sort().join(',')
-    const b = [...snapConfig.protects].sort().join(',')
-    if (a !== b) diff.push(`protects [${snapConfig.protects.join(',')}] → [${config.protects.join(',')}]`)
-    return diff.length > 0 ? diff : null
-  }, [config, snapConfig])
 
   const previewItems = preview?.chunks ?? []
   const pageItems = previewItems.slice(previewPage * PAGE_SIZE, (previewPage + 1) * PAGE_SIZE)
@@ -360,34 +366,21 @@ export function SandboxView() {
                 </div>
 
                 <div className="flex flex-col gap-2 border-t border-border/60 pt-3">
+                  {/* 16-e 按钮合一：有参数变更 = 入库沙盒参数（成为新生效配置）；无变更 = 按当前配置重新入库 */}
                   <Button
                     size="sm"
-                    className="gap-1.5"
-                    disabled={!changed || applyMutation.isPending}
-                    onClick={() => {
-                      setApplyMode('new')
-                      setApplyOpen(true)
-                    }}
-                  >
-                    <Zap className="h-3.5 w-3.5" />
-                    入库此切分结果
-                  </Button>
-                  <Button
-                    size="sm"
-                    variant="outline"
                     className="gap-1.5"
                     disabled={!snapConfig || applyMutation.isPending}
-                    title="切分参数不变，按当前生效配置重新生成版本快照并重新向量化（可用于重建向量库数据）"
-                    onClick={() => {
-                      setApplyMode('asis')
-                      setApplyOpen(true)
-                    }}
+                    title={changed ? '将沙盒参数设为新的生效切分配置，并重新切分入库' : '切分参数与当前生效配置一致：重新生成版本快照并重新向量化（可用于重建向量库数据）'}
+                    onClick={() => setApplyOpen(true)}
                   >
-                    <DatabaseZap className="h-3.5 w-3.5" />
-                    按当前配置重新入库
+                    {changed ? <Zap className="h-3.5 w-3.5" /> : <DatabaseZap className="h-3.5 w-3.5" />}
+                    {changed ? `入库此切分结果（${changed.length} 项参数变更）` : '按当前配置重新入库'}
                   </Button>
                   <p className="text-[10px] leading-relaxed text-muted-foreground">
-                    入库 = 生成新版本快照 + 重嵌入 + 向量库更新；旧版本可在「文档版本管理」恢复或删除
+                    {changed
+                      ? '入库 = 沙盒参数成为新生效配置 + 生成新版本快照 + 重切 + 重嵌入 + 向量库更新；旧版本可在「文档版本管理」恢复或删除'
+                      : '当前参数与生效配置一致：入库不会改变切分效果，仅重新生成版本快照并重建向量数据（常用于向量库损坏后重建）'}
                   </p>
                   <Button
                     size="sm"
@@ -535,10 +528,7 @@ export function SandboxView() {
       {/* 入库确认（§27：rechunk = 旧版本自动快照 + 版本号+1 + 清旧向量 + 重切 + 重嵌入） */}
       <AlertDialog
         open={applyOpen}
-        onOpenChange={(o) => {
-          setApplyOpen(o)
-          if (!o) setApplyMode('new')
-        }}
+        onOpenChange={setApplyOpen}
       >
         <AlertDialogContent>
           <AlertDialogHeader>
@@ -549,17 +539,22 @@ export function SandboxView() {
                 : `按当前配置重新入库「${currentDoc?.filename}」？`}
             </AlertDialogTitle>
             <AlertDialogDescription className="leading-relaxed">
-              入库后文档版本号 +1（旧版本自动快照），
-              {applyMode === 'new' ? '当前切分结果' : '当前文档内容按现有切分参数'}将重新向量化写入向量库，
-              可在「文档版本管理」回滚。
-              {applyMode === 'asis' && (
+              入库后文档版本号 +1（旧版本自动快照），将重新切分并重新向量化写入向量库，可在「文档版本管理」回滚。
+              {applyMode === 'new' ? (
+                <>
+                  <span className="mt-1 block text-[11px] text-muted-foreground">
+                    本次动作：沙盒切分参数将成为该文档新的生效配置（后续重切 / 重新入库均按新参数执行）。
+                  </span>
+                  {changed && (
+                    <span className="mt-1 block font-mono text-[11px] text-amber-600 dark:text-amber-400">
+                      变更项：{changed.join('；')}
+                    </span>
+                  )}
+                </>
+              ) : (
                 <span className="mt-1 block text-[11px] text-muted-foreground">
-                  切分参数保持当前生效值不变，仅重新生成版本快照并重建向量数据。
-                </span>
-              )}
-              {applyMode === 'new' && changed && (
-                <span className="mt-1 block font-mono text-[11px] text-amber-600 dark:text-amber-400">
-                  变更项：{changed.join('；')}
+                  本次动作：切分参数保持当前生效值不变，按现有配置重切当前文档全文（含三屏联动编辑后的内容）并重建向量数据——
+                  适用于向量库数据损坏后的重建，或确认编辑结果已同步到文档产物。
                 </span>
               )}
             </AlertDialogDescription>
