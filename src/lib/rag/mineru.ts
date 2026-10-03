@@ -23,6 +23,13 @@
  *   MinerU 等待期不占流水线并发槽（PipelineJob.status='waiting_mineru' + 独立轮询器），
  *   远端 jobId 持久化到 Document 实现断点续传（重试不再重新上传）。
  *
+ * 【超大 PDF 自动拆分（Task 16-b）】单文件超 MinerU 页数/体积限制（云·精准 200MB/200 页、
+ *   轻量 10MB/20 页）时，提交前用 pdf-lib 按页切成多段（{doc}/parts/part-XXXX.pdf），
+ *   逐段提交远端（复合句柄 {kind:'parts'} 持久化为 JSON 存 Document.mineruJobId，
+ *   断点续传粒度 = 段：仅失效段重新上传）；轮询聚合各段状态（k/n 段完成实时可见），
+ *   全部完成后逐段下载产物并精确偏移合并（markdown 拼接 + middle 页码/字符偏移平移）。
+ *   每段页数：设置 mineruPdfPartPages（0 = Provider 默认）；体积超限按页密度折算。
+ *
  * 【错误分类】沿用 StoreError retryable/nonRetryable（云错误码：A0202 Token 错误→nonRetryable；
  *   -30001/-30002/-30003 轻量限制→nonRetryable 带清晰中文提示；-10001 服务异常→retryable）
  *
@@ -55,7 +62,13 @@ import { epubToMarkdown } from './parsers/epub'
 import { ofdToMarkdown } from './parsers/ofd'
 import { mhtmlToMarkdown } from './parsers/mhtml'
 import { isImageExt, isMineruExt } from './parsers/formats'
-import { ensureDocDir, markdownPath, middleJsonPath } from './artifacts'
+import { ensureDocDir, markdownPath, middleJsonPath, docDir } from './artifacts'
+import {
+  MINERU_PART_LIMITS,
+  countPdfPages,
+  splitPdfToParts,
+  pdfPartFileName,
+} from './pdf-split'
 import { StoreError, isNonRetryable } from './vectorstore'
 import type { RagSettings, MinerUProviderKind } from './settings'
 import type { LayoutBlock, MiddleJson, ParseArtifacts, ParseProgressEvent } from './types'
@@ -257,29 +270,9 @@ function classifyCloudError(code: number | string | undefined, msg: string, pref
 // Provider 抽象
 // ---------------------------------------------------------------------------
 
-export interface MinerUParseInput {
-  localPath: string
-  filename: string
-  /** 产物输出目录（full.md / middle.json） */
-  outDir: string
-  onProgress?: (e: ParseProgressEvent) => void
-}
-
-export interface MinerUParseOutput {
-  markdownPath: string
-  middleJsonPath: string
-  /** 远端任务 ID（断点续传/观测） */
-  jobId?: string
-  fileId?: string
-}
-
-interface MinerUProvider {
-  readonly kind: MinerUProviderKind
-  parseFile(input: MinerUParseInput): Promise<MinerUParseOutput>
-}
-
 // ---------------------------------------------------------------------------
-// Provider · selfhost（自部署 V1 —— 六步协议，原样保留）
+// Provider · selfhost（自部署 V1 —— 六步协议；16-b 起只暴露分阶段方法，
+// 同步轮询逻辑统一上收到 parseWithMineru / 流水线轮询器）
 // ---------------------------------------------------------------------------
 
 const UploadResSchema = z.object({ id: z.string().min(1), upload_url: z.string().min(1) })
@@ -415,31 +408,6 @@ class MinerUClient {
     return this.fetchJson<MinerUJob>(`/v1/parse/jobs/${encodeURIComponent(jobId)}`)
   }
 
-  /** ⑤ 有界轮询（初始 2s，×1.6 退避 + 20% jitter，max 30s，maxAttempts 600） */
-  async pollJob(
-    jobId: string,
-    opts: { onProgress?: (p: number) => void } = {}
-  ): Promise<MinerUJob> {
-    let delay = 2_000
-    const maxAttempts = 600
-    for (let i = 0; i < maxAttempts; i++) {
-      let job: MinerUJob
-      try {
-        job = await this.getJob(jobId)
-      } catch (e) {
-        // 轮询期间任务被清理（坑#8）→ 可重试（重试时重新提交）
-        if (e instanceof StoreError && e.status === 404) throw retryable(`MinerU job ${jobId} 已不存在（服务可能重启）`)
-        throw e
-      }
-      opts.onProgress?.(Math.min(90, 10 + (i / maxAttempts) * 80))
-      if (TERMINAL_STATES.has(job.status)) return job
-      await sleepJitter(delay)
-      delay = Math.min(delay * 1.6, 30_000)
-    }
-    // 预算耗尽不是终态失败 → 交上层重试（jobId 已持久化可续轮）
-    throw retryable(`MinerU job ${jobId} 轮询预算耗尽`)
-  }
-
   /** ⑥ 流式下载产物（.part → 校验 → rename；zip 则解压取 full.md + middle.json） */
   async downloadArtifact(fileId: string, outDir: string): Promise<{ markdownPath: string; middleJsonPath: string }> {
     const url = this.base.replace(/\/+$/, '') + `/v1/files/${encodeURIComponent(fileId)}/content`
@@ -509,45 +477,11 @@ async function writeArtifactFromBytes(
   return { markdownPath: mdPath, middleJsonPath: midPath }
 }
 
-class MinerUSelfhostProvider implements MinerUProvider {
-  readonly kind = 'selfhost' as const
-  constructor(private client: MinerUClient) {}
-
-  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
-    const { localPath, filename, outDir, onProgress } = input
-    onProgress?.({ progress: 5, message: '上传文件至 MinerU（自部署）' })
-    const { fileId } = await this.client.uploadFile(localPath, filename)
-    onProgress?.({ progress: 20, message: '提交解析任务' })
-    const jobId = await this.client.submitJob(fileId)
-
-    const job = await this.client.pollJob(jobId, {
-      onProgress: (p) => onProgress?.({ progress: p, message: 'MinerU 解析中' }),
-    })
-
-    // §5.4 状态映射
-    if (job.status === 'partial') {
-      throw nonRetryable('MINERU_PARTIAL', `MinerU 任务部分完成（单文件任务不应出现）: ${job.error ?? ''}`)
-    }
-    if (job.status === 'failed') {
-      throw retryable(`MINERU_FAILED: ${job.error ?? 'MinerU 解析失败'}`)
-    }
-    if (job.status === 'canceled') {
-      throw nonRetryable('MINERU_CANCELED', 'MinerU 任务已取消')
-    }
-
-    onProgress?.({ progress: 92, message: '下载解析产物' })
-    const { markdownPath: mdPath, middleJsonPath: midPath } = await this.client.downloadArtifact(fileId, outDir)
-    return { markdownPath: mdPath, middleJsonPath: midPath, jobId, fileId }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Provider · cloud（官方云·精准 API v4，Bearer Token）
 // ---------------------------------------------------------------------------
 
-/** 云批量结果轮询参数（指南 §2.4.3 语义：3s 起步 ×1.5 max 20s，最多 200 次） */
-const CLOUD_POLL_MAX_ATTEMPTS = 200
-const CLOUD_POLL_INITIAL_MS = 3_000
+/** 同步轮询节奏上限（阶段化 probe 单查 + 短休眠循环） */
 const CLOUD_POLL_MAX_MS = 20_000
 
 const CLOUD_STATE_LABELS: Record<string, string> = {
@@ -558,7 +492,7 @@ const CLOUD_STATE_LABELS: Record<string, string> = {
   converting: '转换中',
 }
 
-class MinerUCloudProvider implements MinerUProvider {
+class MinerUCloudProvider {
   readonly kind = 'cloud' as const
   constructor(private token: string) {}
 
@@ -688,51 +622,13 @@ class MinerUCloudProvider implements MinerUProvider {
     return writeArtifactFromBytes(zipBuf, outDir)
   }
 
-  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
-    const { localPath, filename, outDir, onProgress } = input
-
-    const batchId = await this.submitBatch(localPath, filename, onProgress)
-
-    // ③ 有界轮询批量结果（上传完成后系统自动提交解析，无需再调提交接口）
-    onProgress?.({ progress: 25, message: 'MinerU 云解析中' })
-    let delay = CLOUD_POLL_INITIAL_MS
-    let lastState = ''
-    for (let attempt = 1; attempt <= CLOUD_POLL_MAX_ATTEMPTS; attempt++) {
-      const r = await this.probeBatch(batchId)
-      lastState = r.state
-      if (r.state === 'done') {
-        if (!r.fullZipUrl) {
-          throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 full_zip_url')
-        }
-        // ④ 下载 zip 产物
-        onProgress?.({ progress: 90, message: '下载解析产物' })
-        const { markdownPath: mdPath, middleJsonPath: midPath } = await this.downloadZip(r.fullZipUrl, outDir)
-        return { markdownPath: mdPath, middleJsonPath: midPath, jobId: batchId }
-      }
-      if (r.state === 'failed') {
-        if (r.errCode !== undefined) {
-          throw classifyCloudError(r.errCode, r.errMsg, 'MinerU 云解析失败')
-        }
-        // 结果项仅有 err_msg：文案级硬失败识别（大小/页数/类型/额度等不重试）
-        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
-          throw nonRetryable('MINERU_CLOUD_FAILED', `MinerU 云解析失败: ${r.errMsg.slice(0, 200)}`)
-        }
-        throw retryable(`MINERU_CLOUD_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云解析失败'}`)
-      }
-      const label = CLOUD_STATE_LABELS[r.state] ?? r.state
-      onProgress?.({ progress: Math.min(88, 25 + attempt * 0.3), message: `MinerU 云解析中（${label}）` })
-      await sleepJitter(delay)
-      delay = Math.min(delay * 1.5, CLOUD_POLL_MAX_MS)
-    }
-    throw retryable(`MinerU 云任务 ${batchId} 轮询预算耗尽（最后状态 ${lastState || '未知'}）`)
-  }
 }
 
 // ---------------------------------------------------------------------------
 // Provider · cloud-agent（官方云·Agent 轻量，免 Token、IP 限频）
 // ---------------------------------------------------------------------------
 
-class MinerUAgentProvider implements MinerUProvider {
+class MinerUAgentProvider {
   readonly kind = 'cloud-agent' as const
 
   private async apiJson<T>(
@@ -863,61 +759,11 @@ class MinerUAgentProvider implements MinerUProvider {
     return { markdownPath: mdPath, middleJsonPath: midPath }
   }
 
-  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
-    const { localPath, filename, outDir, onProgress } = input
-
-    const taskId = await this.submitFile(localPath, filename, onProgress)
-
-    // ③ 有界轮询（3s 起步 ×1.5 max 20s ≤200 次）
-    onProgress?.({ progress: 25, message: 'MinerU 云解析中（Agent）' })
-    let delay = CLOUD_POLL_INITIAL_MS
-    let lastState = ''
-    for (let attempt = 1; attempt <= CLOUD_POLL_MAX_ATTEMPTS; attempt++) {
-      const r = await this.probeTask(taskId)
-      lastState = r.state
-      if (r.state === 'done') {
-        if (!r.markdownUrl) {
-          throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 markdown_url')
-        }
-        // ④ 下载 markdown（仅 Markdown 输出，无 middle → 合成空）
-        onProgress?.({ progress: 90, message: '下载解析产物' })
-        const { markdownPath: mdPath, middleJsonPath: midPath } = await this.downloadMarkdown(r.markdownUrl, outDir)
-        return { markdownPath: mdPath, middleJsonPath: midPath, jobId: taskId }
-      }
-      if (r.state === 'failed') {
-        if (r.errCode !== undefined) {
-          throw classifyCloudError(r.errCode, r.errMsg, 'MinerU 云（Agent）解析失败')
-        }
-        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
-          throw nonRetryable('MINERU_AGENT_FAILED', `MinerU 云（Agent）解析失败: ${r.errMsg.slice(0, 200)}`)
-        }
-        throw retryable(`MINERU_AGENT_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云（Agent）解析失败'}`)
-      }
-      const label = CLOUD_STATE_LABELS[r.state] ?? r.state
-      onProgress?.({ progress: Math.min(88, 25 + attempt * 0.3), message: `MinerU 云解析中（${label}）` })
-      await sleepJitter(delay)
-      delay = Math.min(delay * 1.5, CLOUD_POLL_MAX_MS)
-    }
-    throw retryable(`MinerU 云（Agent）任务 ${taskId} 轮询预算耗尽（最后状态 ${lastState || '未知'}）`)
-  }
 }
 
 // ---------------------------------------------------------------------------
-// Provider 工厂 + MinerU 主链路
+// MinerU middle.json 尽力归一化为统一格式（真实结构 M0 实测前 best-effort）
 // ---------------------------------------------------------------------------
-
-function createMinerUProvider(s: RagSettings['mineru']): MinerUProvider {
-  switch (s.provider) {
-    case 'cloud':
-      return new MinerUCloudProvider(s.apiKey)
-    case 'cloud-agent':
-      return new MinerUAgentProvider()
-    default:
-      return new MinerUSelfhostProvider(new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode))
-  }
-}
-
-/** MinerU middle.json 尽力归一化为统一格式（真实结构 M0 实测前 best-effort） */
 function normalizeMiddleJson(raw: unknown, markdown: string): MiddleJson {
   const empty: MiddleJson = { pages: [], blocks: [] }
   if (!raw || typeof raw !== 'object') return empty
@@ -962,101 +808,130 @@ function normalizeMiddleJson(raw: unknown, markdown: string): MiddleJson {
   return { pages, blocks }
 }
 
-async function parseWithMineru(input: ParseDocumentInput): Promise<ParseArtifacts> {
-  const { settings, onProgress } = input
-  const s = settings.mineru
-  // 配置完备性（engine 强制或全局 mineru 模式都给出可操作的明确报错）
-  if (s.provider === 'selfhost' && !s.url) {
-    throw nonRetryable(
-      'MINERU_NOT_CONFIGURED',
-      'MinerU 引擎已选定（自部署 V1），但服务地址未配置——请在「设置 → MinerU」填写 API 地址，或将该文档改用 Node 引擎解析'
-    )
-  }
-  if (s.provider === 'cloud' && !s.apiKey) {
-    throw nonRetryable(
-      'MINERU_NOT_CONFIGURED',
-      'MinerU 引擎已选定（官方云·精准 API），但 API Token 未配置——请在「设置 → MinerU」填写 Token，或将该文档改用 Node 引擎解析'
-    )
-  }
-  // cloud-agent：免凭据，恒可用
-
-  const outDir = await ensureDocDir(input.kbId, input.docId)
-  const provider = createMinerUProvider(s)
-  // 并发闸门：全局同时进行的 MinerU 解析 ≤ 2（含轮询占用期）
-  const out = await withMineruSlot(() =>
-    provider.parseFile({
-      localPath: input.localPath,
-      filename: input.filename,
-      outDir,
-      onProgress,
-    })
-  )
-
-  // middle.json 归一化
-  onProgress?.({ progress: 95, message: '归一化布局元数据' })
-  const markdown = await fs.readFile(out.markdownPath, 'utf-8')
-  let rawMiddle: unknown = {}
-  try {
-    rawMiddle = JSON.parse(await fs.readFile(out.middleJsonPath, 'utf-8'))
-  } catch {}
-  const middle = normalizeMiddleJson(rawMiddle, markdown)
-  await fs.writeFile(out.middleJsonPath, JSON.stringify(middle))
-
-  onProgress?.({ progress: 100, message: '解析完成' })
-  return {
-    engine: 'mineru',
-    markdownPath: out.markdownPath,
-    middleJsonPath: out.middleJsonPath,
-    pages: middle.pages.length,
-    blockCount: middle.blocks.length,
-    mineruJobId: out.jobId,
-    mineruFileId: out.fileId,
-  }
-}
-
 // ---------------------------------------------------------------------------
-// 分阶段 MinerU API（Task 15-c 审计#P1-1/P1-3：等待移出并发槽 + 断点续传）
-//
-// 流水线 execParse 只做「上传+提交」（占 MinerU 信号量、占流水线槽位的都是短 IO），
-// 拿到远端 jobId 后持久化到 Document.mineruJobId/mineruUploadId/mineruFileId 并把
-// PipelineJob 置为 waiting_mineru（不占 active 槽）；独立轮询器（pipeline.ts，5s 一轮）
-// 用 probeMineruJob 单次查状态，done 后用 finishMineruArtifact 下载产物并回置 pending
-// 带 payloadJson 阶段游标，正常槽位竞争继续跑 parse 尾部（doc 字段回写 + 入队 chunk）。
+// 远端任务句柄（Task 16-b：单任务 / PDF 多段复合句柄）
 // ---------------------------------------------------------------------------
 
-/** 远端任务句柄（与 Document.mineruJobId/mineruUploadId/mineruFileId 一一对应） */
-export interface MinerUHandle {
-  /** selfhost: parse job id；cloud: batch_id；cloud-agent: task_id */
+/** 单个远端任务（selfhost: parse job id；cloud: batch_id；cloud-agent: task_id） */
+export interface MinerUSingleHandle {
+  kind?: 'single'
   jobId: string
   uploadId?: string
   fileId?: string
 }
 
-/** 单次状态探测结果（绝不内部循环等待） */
-export type MinerUProbeResult =
-  | { state: 'running'; label?: string }
-  /** done：cloud/cloud-agent 携带产物直链（selfhost 用 handle.fileId 下载） */
-  | { state: 'done'; downloadUrl?: string }
-  /** 远端明确失败（终态 failed / 不可重试业务错误） */
-  | { state: 'failed'; error: StoreError }
-  /** 远端任务不存在（404：服务重启/过期清理）→ 调用方清字段重新提交 */
-  | { state: 'gone' }
-  /** 瞬时错误（网络/5xx/429）→ 轮询器下轮再查，不计失败 */
-  | { state: 'error'; error: StoreError }
+/** PDF 拆分后的一段（jobId 为空 = 尚未提交或已失效待重提） */
+export interface MinerUPartHandle {
+  jobId?: string
+  uploadId?: string
+  fileId?: string
+  /** 覆盖源 PDF 的页范围（1 起，含端点） */
+  pageFrom: number
+  pageTo: number
+}
 
-/** 判定文档将使用的解析引擎（per-doc engineChoice > 全局 parseMode；均未配置 → 硬失败） */
-export function resolveDocEngine(
-  settings: RagSettings,
-  engineChoice?: 'mineru' | 'node'
-): 'mineru' | 'node' {
-  if (engineChoice === 'node') return 'node'
-  if (engineChoice === 'mineru') return 'mineru'
-  if (settings.parseMode === 'mineru') return 'mineru'
-  if (settings.parseMode === 'fallback') return 'node'
-  throw nonRetryable(
-    'PARSE_NOT_CONFIGURED',
-    '未配置 MinerU API 且未启用降级解析器，无法解析文档（请在设置中配置 MinerU 或开启 useFallbackParser）'
+/** 复合句柄：PDF 多段（持久化为 JSON 存 Document.mineruJobId） */
+export interface MinerUPartsHandle {
+  kind: 'parts'
+  /** 源 PDF 总页数 */
+  pages: number
+  parts: MinerUPartHandle[]
+}
+
+export type MinerUHandle = MinerUSingleHandle | MinerUPartsHandle
+
+/** 句柄 → Document 持久化字段（单任务仍存裸 jobId 字符串，复合句柄存 JSON） */
+export function serializeHandle(h: MinerUHandle): {
+  jobId: string
+  uploadId: string | null
+  fileId: string | null
+} {
+  if (h.kind === 'parts') {
+    return { jobId: JSON.stringify(h), uploadId: null, fileId: null }
+  }
+  return { jobId: h.jobId, uploadId: h.uploadId ?? null, fileId: h.fileId ?? null }
+}
+
+/** Document 持久化字段 → 句柄（null = 无在途远端任务；损坏 JSON 按 null 处理走重提） */
+export function parsePersistedHandle(doc: {
+  mineruJobId?: string | null
+  mineruUploadId?: string | null
+  mineruFileId?: string | null
+}): MinerUHandle | null {
+  const raw = (doc.mineruJobId ?? '').trim()
+  if (!raw) return null
+  if (raw.startsWith('{"kind":"parts"')) {
+    try {
+      const h = JSON.parse(raw) as MinerUPartsHandle
+      if (h && h.kind === 'parts' && Array.isArray(h.parts) && h.parts.length > 0) return h
+    } catch {
+      /* fallthrough */
+    }
+    return null
+  }
+  return { jobId: raw, uploadId: doc.mineruUploadId ?? undefined, fileId: doc.mineruFileId ?? undefined }
+}
+
+/** 段级错误包装（保留 retryable/status/name 语义，仅加段号定位前缀） */
+function partError(i: number, total: number, part: MinerUPartHandle, e: StoreError): StoreError {
+  const wrapped = new StoreError(
+    `第 ${i + 1}/${total} 段（第 ${part.pageFrom}-${part.pageTo} 页）：${e.message}`,
+    { retryable: e.retryable, status: e.status }
   )
+  wrapped.name = e.name
+  return wrapped
+}
+
+// ---------------------------------------------------------------------------
+// 超大 PDF 自动拆分规划（Task 16-b）
+// ---------------------------------------------------------------------------
+
+interface PdfSplitPlan {
+  pages: number
+  pagesPerPart: number
+  parts: Array<{ index: number; pageFrom: number; pageTo: number }>
+}
+
+/** PDF 拆分段文件目录（{doc}/parts/；合并成功后清理，失败保留供断点续传） */
+function pdfPartsDir(kbId: string, docId: string): string {
+  return path.join(docDir(kbId, docId), 'parts')
+}
+
+/**
+ * 判定是否需要拆分并生成段文件（无需拆分返回 null）。
+ * 触发条件（满足其一）：页数 > 每段页数上限（用户配置或 Provider 默认）；
+ * 文件体积 > Provider 体积上限（按页密度折算每段页数）。
+ */
+async function planPdfSplit(input: {
+  kbId: string
+  docId: string
+  filename: string
+  localPath: string
+  settings: RagSettings
+}): Promise<PdfSplitPlan | null> {
+  const s = input.settings.mineru
+  if (!s.pdfAutoSplit) return null
+  const ext = path.extname(input.filename).toLowerCase().replace('.', '')
+  if (ext !== 'pdf') return null
+  const limit = MINERU_PART_LIMITS[s.provider] ?? MINERU_PART_LIMITS.selfhost
+  const stat = await fs.stat(input.localPath).catch(() => null)
+  if (!stat) return null
+  const pages = await countPdfPages(input.localPath)
+  // 每段页数：用户配置 > 0 显式优先，否则 Provider 默认（0 = 无页数限制）
+  const configured = s.pdfPartPages > 0 ? s.pdfPartPages : limit.pages
+  let pagesPerPart = configured
+  // 体积折算：fileSize 超限 → 按页密度缩每段页数（0.9 安全系数，下限 1）
+  if (limit.bytes > 0 && stat.size > limit.bytes) {
+    const bySize = Math.max(1, Math.floor(((pages * limit.bytes) / stat.size) * 0.9))
+    pagesPerPart = pagesPerPart > 0 ? Math.min(pagesPerPart, bySize) : bySize
+  }
+  if (pagesPerPart <= 0 || pages <= pagesPerPart) {
+    console.log(`[mineru] PDF 拆分判定：${input.filename} ${pages} 页 / ${(stat.size / 1024 / 1024).toFixed(1)}MB，每段上限 ${pagesPerPart} 页 → 无需拆分`)
+    return null
+  }
+  const { parts } = await splitPdfToParts(input.localPath, pagesPerPart, pdfPartsDir(input.kbId, input.docId))
+  console.log(`[mineru] PDF 拆分计划：${input.filename} ${pages} 页 → ${parts.length} 段（每段 ≤ ${pagesPerPart} 页）`)
+  return { pages, pagesPerPart, parts }
 }
 
 /** MinerU 配置完备性（与 parseWithMineru 同文案） */
@@ -1076,51 +951,130 @@ function assertMineruConfigured(s: RagSettings['mineru']): void {
   // cloud-agent：免凭据，恒可用
 }
 
-/**
- * 阶段一：上传 + 提交（占 MinerU 信号量；短 IO，不含轮询等待）。
- * 返回远端任务句柄，由调用方持久化后转入 waiting_mineru 等待轮询器接管。
- */
-export async function submitMineruJob(input: {
-  docId: string
-  kbId: string
-  filename: string
-  localPath: string
-  settings: RagSettings
-  onProgress?: (e: ParseProgressEvent) => void
-}): Promise<MinerUHandle> {
-  const s = input.settings.mineru
-  assertMineruConfigured(s)
+// ---------------------------------------------------------------------------
+// 主链路（同步版：submit → 有界轮询 → finish；流水线不走这里，仅兜底/直跑）
+// ---------------------------------------------------------------------------
 
-  if (s.provider === 'cloud') {
-    const p = new MinerUCloudProvider(s.apiKey)
-    const batchId = await withMineruSlot(() => p.submitBatch(input.localPath, input.filename, input.onProgress))
-    return { jobId: batchId }
-  }
-  if (s.provider === 'cloud-agent') {
-    const p = new MinerUAgentProvider()
-    const taskId = await withMineruSlot(() => p.submitFile(input.localPath, input.filename, input.onProgress))
-    return { jobId: taskId }
-  }
-  const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
-  return withMineruSlot(async () => {
-    input.onProgress?.({ progress: 5, message: '上传文件至 MinerU（自部署）' })
-    const { uploadId, fileId } = await client.uploadFile(input.localPath, input.filename)
-    input.onProgress?.({ progress: 20, message: '提交解析任务' })
-    const jobId = await client.submitJob(fileId)
-    return { jobId, uploadId, fileId }
+/** 同步链路轮询上限（60 分钟；流水线走 waiting_mineru 独立轮询器，不受此限） */
+const SYNC_POLL_CAP_MS = 60 * 60_000
+
+async function parseWithMineru(input: ParseDocumentInput): Promise<ParseArtifacts> {
+  const { settings, onProgress } = input
+  const s = settings.mineru
+  assertMineruConfigured(s)
+  const outDir = await ensureDocDir(input.kbId, input.docId)
+
+  let handle = await submitMineruJob({
+    docId: input.docId,
+    kbId: input.kbId,
+    filename: input.filename,
+    localPath: input.localPath,
+    settings,
+    onProgress,
   })
+
+  // 有界轮询（阶段化函数复用：probe 单次查询 + 短休眠；复合句柄聚合各段状态）
+  const deadline = Date.now() + SYNC_POLL_CAP_MS
+  let delay = 3_000
+  for (;;) {
+    const probe = await probeMineruJob(handle, settings)
+    if (probe.state === 'done') {
+      const art = await finishMineruArtifact(handle, probe, { kbId: input.kbId, docId: input.docId }, settings, onProgress)
+      onProgress?.({ progress: 100, message: '解析完成' })
+      return {
+        engine: 'mineru',
+        markdownPath: path.join(outDir, 'full.md'),
+        middleJsonPath: path.join(outDir, 'middle.json'),
+        pages: art.pages,
+        blockCount: art.blockCount,
+        mineruJobId: handle.kind === 'parts' ? JSON.stringify(handle) : handle.jobId,
+        mineruUploadId: handle.kind === 'parts' ? undefined : handle.uploadId,
+        mineruFileId: handle.kind === 'parts' ? undefined : handle.fileId,
+      }
+    }
+    if (probe.state === 'failed') throw probe.error
+    if (probe.state === 'gone') {
+      // 远端任务失效 → 重新提交（复合句柄只重提失效段）
+      const resume: MinerUPartsHandle | undefined =
+        handle.kind === 'parts'
+          ? {
+              ...handle,
+              parts: handle.parts.map((p, i) =>
+                probe.goneParts?.includes(i) || !p.jobId
+                  ? { ...p, jobId: undefined, uploadId: undefined, fileId: undefined }
+                  : { ...p }
+              ),
+            }
+          : undefined
+      onProgress?.({ progress: 15, message: '远端任务已失效，重新上传解析' })
+      handle = await submitMineruJob({
+        docId: input.docId,
+        kbId: input.kbId,
+        filename: input.filename,
+        localPath: input.localPath,
+        settings,
+        resume,
+        onProgress,
+      })
+      continue
+    }
+    if (Date.now() > deadline) {
+      throw retryable(`MinerU 同步轮询超时（${Math.round(SYNC_POLL_CAP_MS / 60_000)} 分钟）——请稍后重试`)
+    }
+    const label = probe.state === 'running' && probe.label ? `（${probe.label}）` : ''
+    onProgress?.({ progress: 30, message: `MinerU 解析中${label}` })
+    await sleepJitter(delay)
+    delay = Math.min(delay * 1.5, CLOUD_POLL_MAX_MS)
+  }
 }
 
-/** 阶段二：单次状态查询（不占任何信号量/槽位；网络瞬时错误 → state='error'） */
-export async function probeMineruJob(
-  handle: MinerUHandle,
-  settings: RagSettings
+// ---------------------------------------------------------------------------
+// 分阶段 MinerU API（Task 15-c 审计#P1-1/P1-3 + Task 16-b 复合句柄）
+//
+// 流水线 execParse 只做「上传+提交」（占 MinerU 信号量、占流水线槽位的都是短 IO），
+// 拿到远端 jobId 后持久化到 Document.mineruJobId/mineruUploadId/mineruFileId 并把
+// PipelineJob 置为 waiting_mineru（不占 active 槽）；独立轮询器（pipeline.ts，5s 一轮）
+// 用 probeMineruJob 单次查状态，done 后用 finishMineruArtifact 下载产物并回置 pending
+// 带 payloadJson 阶段游标，正常槽位竞争继续跑 parse 尾部（doc 字段回写 + 入队 chunk）。
+// 16-b：超大 PDF 拆多段时 mineruJobId 存复合句柄 JSON；断点续传粒度 = 段。
+// ---------------------------------------------------------------------------
+
+/** 单次状态探测结果（绝不内部循环等待） */
+export type MinerUProbeResult =
+  | { state: 'running'; label?: string }
+  /** done：cloud/cloud-agent 携带产物直链（selfhost 用 handle.fileId 下载）；复合句柄按段携带 */
+  | { state: 'done'; downloadUrl?: string; partDownloads?: (string | undefined)[] }
+  /** 远端明确失败（终态 failed / 不可重试业务错误） */
+  | { state: 'failed'; error: StoreError }
+  /** 远端任务不存在（404：服务重启/过期清理）→ 调用方重提（复合句柄带失效段列表） */
+  | { state: 'gone'; goneParts?: number[] }
+  /** 瞬时错误（网络/5xx/429）→ 轮询器下轮再查，不计失败 */
+  | { state: 'error'; error: StoreError }
+
+/** 判定文档将使用的解析引擎（per-doc engineChoice > 全局 parseMode；均未配置 → 硬失败） */
+export function resolveDocEngine(
+  settings: RagSettings,
+  engineChoice?: 'mineru' | 'node'
+): 'mineru' | 'node' {
+  if (engineChoice === 'node') return 'node'
+  if (engineChoice === 'mineru') return 'mineru'
+  if (settings.parseMode === 'mineru') return 'mineru'
+  if (settings.parseMode === 'fallback') return 'node'
+  throw nonRetryable(
+    'PARSE_NOT_CONFIGURED',
+    '未配置 MinerU API 且未启用降级解析器，无法解析文档（请在设置中配置 MinerU 或开启 useFallbackParser）'
+  )
+}
+
+/** 单任务状态探测（provider 内部协议；复合句柄逐段调用） */
+async function probeSingle(
+  s: RagSettings['mineru'],
+  h: { jobId: string; uploadId?: string; fileId?: string }
 ): Promise<MinerUProbeResult> {
-  const s = settings.mineru
   try {
     if (s.provider === 'cloud') {
       const p = new MinerUCloudProvider(s.apiKey)
-      const r = await p.probeBatch(handle.jobId)
+      const r = await p.probeBatch(h.jobId)
       if (r.state === 'done') return { state: 'done', downloadUrl: r.fullZipUrl }
       if (r.state === 'failed') {
         if (r.errCode !== undefined) {
@@ -1141,7 +1095,7 @@ export async function probeMineruJob(
     }
     if (s.provider === 'cloud-agent') {
       const p = new MinerUAgentProvider()
-      const r = await p.probeTask(handle.jobId)
+      const r = await p.probeTask(h.jobId)
       if (r.state === 'done') return { state: 'done', downloadUrl: r.markdownUrl }
       if (r.state === 'failed') {
         if (r.errCode !== undefined) {
@@ -1161,7 +1115,7 @@ export async function probeMineruJob(
       return { state: 'running', label: CLOUD_STATE_LABELS[r.state] ?? r.state }
     }
     const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
-    const job = await client.getJob(handle.jobId)
+    const job = await client.getJob(h.jobId)
     if (TERMINAL_STATES.has(job.status)) {
       // §5.4 状态映射（与同步链路 parseWithMineru 同口径）
       if (job.status === 'completed') return { state: 'done' }
@@ -1187,19 +1141,224 @@ export async function probeMineruJob(
   }
 }
 
+/** 状态探测：单任务直查；复合句柄逐段并发查 + 聚合（优先级 failed > gone > error > 全done > running） */
+export async function probeMineruJob(
+  handle: MinerUHandle,
+  settings: RagSettings
+): Promise<MinerUProbeResult> {
+  const s = settings.mineru
+  if (handle.kind !== 'parts') {
+    return probeSingle(s, handle)
+  }
+  const total = handle.parts.length
+  const results = await Promise.all(
+    handle.parts.map((p, i) =>
+      p.jobId
+        ? probeSingle(s, { jobId: p.jobId, uploadId: p.uploadId, fileId: p.fileId }).then((r) => ({ i, r }))
+        : Promise.resolve({ i, r: { state: 'gone' } as MinerUProbeResult })
+    )
+  )
+  const failed = results.find((x) => x.r.state === 'failed')
+  if (failed) {
+    return { state: 'failed', error: partError(failed.i, total, handle.parts[failed.i], (failed.r as { error: StoreError }).error) }
+  }
+  const goneParts = results.filter((x) => x.r.state === 'gone').map((x) => x.i)
+  if (goneParts.length > 0) return { state: 'gone', goneParts }
+  const errored = results.find((x) => x.r.state === 'error')
+  if (errored) {
+    return { state: 'error', error: partError(errored.i, total, handle.parts[errored.i], (errored.r as { error: StoreError }).error) }
+  }
+  if (results.every((x) => x.r.state === 'done')) {
+    return {
+      state: 'done',
+      partDownloads: results.map((x) => (x.r.state === 'done' ? x.r.downloadUrl : undefined)),
+    }
+  }
+  const doneCount = results.filter((x) => x.r.state === 'done').length
+  const runningEntry = results.find((x) => x.r.state === 'running')
+  const runningLabel = runningEntry && runningEntry.r.state === 'running' ? runningEntry.r.label : undefined
+  return {
+    state: 'running',
+    label: `${doneCount}/${total} 段完成${runningLabel ? ` · ${runningLabel}` : ''}`,
+  }
+}
+
+/** 单文件/单段提交（按 provider；内部占 MinerU 信号量） */
+async function submitSingle(
+  s: RagSettings['mineru'],
+  filePath: string,
+  filename: string,
+  onProgress?: (e: ParseProgressEvent) => void
+): Promise<MinerUSingleHandle> {
+  if (s.provider === 'cloud') {
+    const p = new MinerUCloudProvider(s.apiKey)
+    const batchId = await withMineruSlot(() => p.submitBatch(filePath, filename, onProgress))
+    return { jobId: batchId }
+  }
+  if (s.provider === 'cloud-agent') {
+    const p = new MinerUAgentProvider()
+    const taskId = await withMineruSlot(() => p.submitFile(filePath, filename, onProgress))
+    return { jobId: taskId }
+  }
+  const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
+  return withMineruSlot(async () => {
+    onProgress?.({ progress: 5, message: `上传文件至 MinerU（自部署）：${filename}` })
+    const { uploadId, fileId } = await client.uploadFile(filePath, filename)
+    onProgress?.({ progress: 20, message: '提交解析任务' })
+    const jobId = await client.submitJob(fileId)
+    return { jobId, uploadId, fileId }
+  })
+}
+
 /**
- * 阶段三：下载 + 解压 + middle.json 归一化（复用同步链路产物处理逻辑）。
- * 产物写入 {kbId}/{docId}/full.md + middle.json，返回页数与布局块数。
+ * 阶段一：上传 + 提交（占 MinerU 信号量；短 IO，不含轮询等待）。
+ * 16-b：超大 PDF 自动拆分——逐段提交（每段独立远端任务，断点续传只重提缺 jobId 的段）。
+ * 返回远端任务句柄，由调用方持久化后转入 waiting_mineru 等待轮询器接管。
+ */
+export async function submitMineruJob(input: {
+  docId: string
+  kbId: string
+  filename: string
+  localPath: string
+  settings: RagSettings
+  /** 16-b：断点续传——传入已有复合句柄时只（重）提交缺 jobId 的段 */
+  resume?: MinerUPartsHandle
+  onProgress?: (e: ParseProgressEvent) => void
+}): Promise<MinerUHandle> {
+  const s = input.settings.mineru
+  assertMineruConfigured(s)
+
+  // ---- 16-b：超大 PDF 自动拆分 / 断点续传 ----
+  let parts: MinerUPartHandle[] | null = null
+  let pages = 0
+  if (input.resume && input.resume.kind === 'parts') {
+    // 断点续传：段文件在（parts/ 未被清理）→ 只重提缺 jobId 的段；段文件丢失 → 整体重拆
+    const dir = pdfPartsDir(input.kbId, input.docId)
+    const missing = await Promise.all(
+      input.resume.parts.map((_, i) =>
+        fs
+          .access(path.join(dir, pdfPartFileName(i)))
+          .then(() => false)
+          .catch(() => true)
+      )
+    )
+    if (!missing.some(Boolean)) {
+      parts = input.resume.parts.map((p) => ({ ...p }))
+      pages = input.resume.pages
+    }
+  }
+  if (!parts) {
+    const plan = await planPdfSplit(input)
+    if (plan) {
+      parts = plan.parts.map((p) => ({ pageFrom: p.pageFrom, pageTo: p.pageTo }))
+      pages = plan.pages
+    }
+  }
+  if (parts && parts.length > 0) {
+    const total = parts.length
+    const dir = pdfPartsDir(input.kbId, input.docId)
+    const baseName = path.basename(input.filename, path.extname(input.filename))
+    for (let i = 0; i < total; i++) {
+      const part = parts[i]
+      if (part.jobId) continue // 断点续传：已提交的段不重传（远端任务仍在/已完成）
+      const partPath = path.join(dir, pdfPartFileName(i))
+      const partName = `${baseName}.p${i + 1}of${total}.pdf`
+      input.onProgress?.({
+        progress: Math.min(28, 5 + Math.round((i / total) * 23)),
+        message: `PDF 已拆分 ${total} 段，提交第 ${i + 1}/${total} 段（第 ${part.pageFrom}-${part.pageTo} 页）`,
+      })
+      const h = await submitSingle(s, partPath, partName, input.onProgress)
+      part.jobId = h.jobId
+      part.uploadId = h.uploadId
+      part.fileId = h.fileId
+    }
+    return { kind: 'parts', pages, parts }
+  }
+
+  // ---- 单文件（原有链路） ----
+  return submitSingle(s, input.localPath, input.filename, input.onProgress)
+}
+
+/**
+ * 阶段三：下载 + 解压 + middle.json 归一化。
+ * 单任务：产物写入 {kbId}/{docId}/full.md + middle.json。
+ * 16-b 复合句柄：逐段下载到 parts/art-XXXX/，再精确偏移合并（markdown 拼接 +
+ * middle 页码按段累加、字符偏移按段平移——段内偏移已由 normalizeMiddleJson 对齐）。
  */
 export async function finishMineruArtifact(
   handle: MinerUHandle,
-  probe: { state: 'done'; downloadUrl?: string },
+  probe: { state: 'done'; downloadUrl?: string; partDownloads?: (string | undefined)[] },
   input: { docId: string; kbId: string },
   settings: RagSettings,
   onProgress?: (e: ParseProgressEvent) => void
 ): Promise<{ pages: number; blockCount: number }> {
   const s = settings.mineru
   const outDir = await ensureDocDir(input.kbId, input.docId)
+
+  // ---- 16-b：复合句柄（PDF 多段）→ 逐段下载 + 精确偏移合并 ----
+  if (handle.kind === 'parts') {
+    const total = handle.parts.length
+    const mds: string[] = []
+    const middles: MiddleJson[] = []
+    for (let i = 0; i < total; i++) {
+      const part = handle.parts[i]
+      const partDir = path.join(outDir, 'parts', `art-${String(i).padStart(4, '0')}`)
+      await fs.mkdir(partDir, { recursive: true })
+      onProgress?.({
+        progress: 90,
+        message: `下载解析产物：第 ${i + 1}/${total} 段（第 ${part.pageFrom}-${part.pageTo} 页）`,
+      })
+      let mdPath: string
+      let midPath: string
+      if (s.provider === 'cloud') {
+        const url = probe.partDownloads?.[i]
+        if (!url) throw nonRetryable('MINERU_BAD_RESPONSE', `第 ${i + 1} 段任务 done 但缺少 full_zip_url`)
+        ;({ markdownPath: mdPath, middleJsonPath: midPath } = await new MinerUCloudProvider(s.apiKey).downloadZip(url, partDir))
+      } else if (s.provider === 'cloud-agent') {
+        const url = probe.partDownloads?.[i]
+        if (!url) throw nonRetryable('MINERU_BAD_RESPONSE', `第 ${i + 1} 段任务 done 但缺少 markdown_url`)
+        ;({ markdownPath: mdPath, middleJsonPath: midPath } = await new MinerUAgentProvider().downloadMarkdown(url, partDir))
+      } else {
+        if (!part.fileId) {
+          throw nonRetryable('MINERU_BAD_RESPONSE', `第 ${i + 1} 段缺少 file_id，无法下载产物（将重新提交）`)
+        }
+        const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
+        ;({ markdownPath: mdPath, middleJsonPath: midPath } = await client.downloadArtifact(part.fileId, partDir))
+      }
+      const md = await fs.readFile(mdPath, 'utf-8')
+      let rawMiddle: unknown = {}
+      try {
+        rawMiddle = JSON.parse(await fs.readFile(midPath, 'utf-8'))
+      } catch {}
+      mds.push(md)
+      middles.push(normalizeMiddleJson(rawMiddle, md))
+    }
+    onProgress?.({ progress: 95, message: `合并 ${total} 段解析产物（源 PDF 共 ${handle.pages} 页）` })
+    const mergedMd = mds.join('\n\n')
+    const pages: { w: number; h: number }[] = []
+    const blocks: LayoutBlock[] = []
+    let charOffset = 0
+    for (let i = 0; i < total; i++) {
+      const pagesBefore = pages.length
+      pages.push(...middles[i].pages)
+      for (const b of middles[i].blocks) {
+        blocks.push({
+          ...b,
+          page: b.page + pagesBefore,
+          charStart: b.charStart + charOffset,
+          charEnd: b.charEnd + charOffset,
+        })
+      }
+      charOffset += mds[i].length + 2 // 连接符 '\n\n' 长度
+    }
+    await fs.writeFile(path.join(outDir, 'full.md'), mergedMd, 'utf-8')
+    await fs.writeFile(path.join(outDir, 'middle.json'), JSON.stringify({ pages, blocks }), 'utf-8')
+    // 清理段文件与分段产物（源 PDF 在 sourcePath，不受影响）
+    await fs.rm(path.join(outDir, 'parts'), { recursive: true, force: true }).catch(() => {})
+    return { pages: pages.length, blockCount: blocks.length }
+  }
+
+  // ---- 单任务（原有链路） ----
   onProgress?.({ progress: 92, message: '下载解析产物' })
   let mdPath: string
   let midPath: string

@@ -68,6 +68,8 @@ const DEFAULT_FORM: RagSettings = {
   mineruApiKey: '',
   mineruTier: 'standard',
   mineruOcrMode: 'auto',
+  mineruPdfAutoSplit: true,
+  mineruPdfPartPages: 0,
   useFallbackParser: true,
   useMockEmbedding: false,
   useMockRerank: true,
@@ -455,6 +457,38 @@ export function RagSettingsDialog() {
                   PDF/图片/Docx/PPTx/Xlsx。无需配置——保存后即可在上传时选择 MinerU 引擎使用。
                 </div>
               )}
+              {/* 16-b：超大 PDF 自动拆分（全 Provider 通用） */}
+              <div className="rounded-md border border-border/60 bg-muted/20 px-3 py-2.5">
+                <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5">
+                  <Switch
+                    id="mineru-pdf-split"
+                    checked={form.mineruPdfAutoSplit}
+                    onCheckedChange={(v) => update('mineruPdfAutoSplit', v)}
+                    aria-label="超大 PDF 自动拆分开关"
+                  />
+                  <label htmlFor="mineru-pdf-split" className="cursor-pointer text-xs font-medium">
+                    超大 PDF 自动拆分
+                  </label>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <Label htmlFor="mineru-pdf-part-pages" className="text-[11px] text-muted-foreground">每段页数</Label>
+                    <Input
+                      id="mineru-pdf-part-pages"
+                      type="number"
+                      min={0}
+                      max={10000}
+                      value={form.mineruPdfPartPages}
+                      onChange={(e) => update('mineruPdfPartPages', Math.max(0, Math.min(10000, Number(e.target.value) || 0)))}
+                      disabled={!form.mineruPdfAutoSplit}
+                      className="h-7 w-20 px-2 font-mono text-xs"
+                    />
+                  </div>
+                </div>
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  超过限制的 PDF 提交前自动按页拆分成多段，逐段送 MinerU 解析后合并产物（页数/坐标连续，检索无感）。
+                  每段页数 0 = 按服务商默认（云·精准 200 页 / 轻量 20 页 / 自部署不拆）；体积超限（200MB / 10MB）时按页密度自动折算更小段。
+                  注意：分段各自计入 MinerU 页数额度，多段大文件会成倍消耗每日免费额度。
+                </p>
+              </div>
               <TestButton
                 kind="mineru"
                 label={`测试 MinerU（${MINERU_PROVIDER_LABELS[form.mineruProvider || 'selfhost'] ?? '自部署'}）`}

@@ -152,13 +152,26 @@ function MineruSwitchCard({
           正在检测 MinerU 接口状态，检测结果不影响 Node 解析的使用。
         </p>
       ) : status.available ? (
-        <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
-          开启后 PDF / 图片 / Office 等类型默认用 MinerU（OCR 高精度）；关闭则本批全部 Node 本地解析（更快）。
-          仅 MinerU 支持的类型（图片 / doc / ppt / xls）需开启后才可上传。
-        </p>
+        <div className="mt-1.5 space-y-1 text-[11px] leading-relaxed text-muted-foreground">
+          <p>
+            开启后 PDF / 图片 / Office 等类型默认用 MinerU（OCR 高精度）；关闭则本批全部 Node 本地解析（更快）。
+            仅 MinerU 支持的类型（图片 / doc / ppt / xls）需开启后才可上传。
+          </p>
+          <p className="rounded border border-border/60 bg-background/60 px-2 py-1.5">
+            <span className="font-medium text-foreground">页数与体积限制（MinerU 官方）：</span>
+            云·精准 单文件 ≤ 200MB / 200 页；轻量（Agent）≤ 10MB / 20 页。
+            超限 PDF 将<b>自动按页拆分</b>成多段逐段解析后合并（页数/坐标连续），每段页数可在「设置 → MinerU」调整；
+            分段会成倍消耗每日免费页数额度。
+          </p>
+          <p className="rounded border border-border/60 bg-background/60 px-2 py-1.5">
+            <span className="font-medium text-foreground">Node 引擎无页数限制：</span>
+            本地直接提取 PDF 文本层 + 坐标，几百页大文件也能完整解析（速度取决于 CPU）；
+            但扫描件 / 图片型 PDF 无文本层，需选 MinerU OCR。
+          </p>
+        </div>
       ) : (
         <p className="mt-1.5 text-[11px] leading-relaxed text-amber-600 dark:text-amber-300" title={status.message ?? undefined}>
-          MinerU 不可用（未配置或探测失败），可在「设置 → MinerU」中配置；当前仅 Node 解析。
+          MinerU 不可用（未配置或探测失败），可在「设置 → MinerU」中配置；当前仅 Node 解析（PDF 文本层 / md / Office 等本地直解）。
         </p>
       )}
     </div>

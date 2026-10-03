@@ -34,7 +34,10 @@ import {
   submitMineruJob,
   probeMineruJob,
   finishMineruArtifact,
+  parsePersistedHandle,
+  serializeHandle,
   type MinerUHandle,
+  type MinerUPartsHandle,
 } from './mineru'
 import { assertEmbedScheme, embedTexts } from './embed'
 import { deterministicChunkId, textHash16 } from './ids'
@@ -303,6 +306,9 @@ async function tick(eng: PipelineEngineState): Promise<void> {
 // MinerU 轮询器（审计#P1-1：等待移出并发槽）
 // ---------------------------------------------------------------------------
 
+/** 16-b：running 态进度上报节流表（jobId → 最近标签/时间；仅标签变化或 30s 才上报） */
+const mineruRunningReport = new Map<string, { label: string; at: number }>()
+
 /** 轮询器单轮：收集 waiting_mineru 任务并发查远端状态（不占文档槽） */
 async function mineruPollTick(eng: PipelineEngineState): Promise<void> {
   if (eng.mineruBusy) return
@@ -332,18 +338,15 @@ async function pollOneMineruJob(
     const doc = await db.document.findUnique({ where: { id: job.documentId } })
     if (!doc) return // 文档/库已删（级联会清理本行）
 
-    if (!doc.mineruJobId) {
+    // 16-b：句柄解析统一走 parsePersistedHandle（单任务 / PDF 多段复合句柄 JSON）
+    const handle = parsePersistedHandle(doc)
+    if (!handle) {
       // 断点字段被清（重解析重置）→ 回 pending 从头跑 parse
       await db.pipelineJob.updateMany({
         where: { id: job.id, status: 'waiting_mineru' },
         data: { status: 'pending', payloadJson: '{}' },
       })
       return
-    }
-    const handle: MinerUHandle = {
-      jobId: doc.mineruJobId,
-      uploadId: doc.mineruUploadId ?? undefined,
-      fileId: doc.mineruFileId ?? undefined,
     }
 
     // 远端任务等待上限（防永久挂起；重试时 probe gone → 重新提交）
@@ -363,6 +366,17 @@ async function pollOneMineruJob(
     let probeFails = Number(safeParseJson(job.payloadJson).probeFails) || 0
     if (probe.state === 'running') {
       probeFails = 0
+      // 16-b：实时进度——远端状态标签（排队中/解析中/转换中/k 段完成）变化或每 30s
+      // 刷新一次文档进度与活动流，用户可实时看到 MinerU 解析到哪了
+      const label = probe.label ?? '远端解析中'
+      const waitedMin = job.startedAt ? Math.max(0, Math.floor((Date.now() - job.startedAt.getTime()) / 60_000)) : 0
+      const msg = `MinerU 解析中（${label}）${waitedMin > 0 ? ` · 已等待 ${waitedMin} 分钟` : ''}`
+      const last = mineruRunningReport.get(job.id)
+      const now = Date.now()
+      if (!last || last.label !== label || now - last.at > 30_000) {
+        mineruRunningReport.set(job.id, { label, at: now })
+        await reportProgress(doc, 'parsing', 30, msg)
+      }
       // 续租（防御性：waiting 本就不参与 active 僵死回收）
       await db.pipelineJob.updateMany({
         where: { id: job.id, status: 'waiting_mineru' },
@@ -370,6 +384,7 @@ async function pollOneMineruJob(
       })
       return
     }
+    mineruRunningReport.delete(job.id)
     if (probe.state === 'error') {
       probeFails += 1
       if (probeFails >= 120) {
@@ -411,12 +426,14 @@ async function pollOneMineruJob(
     try {
       const art = await finishMineruArtifact(handle, probe, { kbId: doc.kbId, docId: doc.id }, settings)
       await reportProgress(doc, 'parsing', 92, 'MinerU 解析完成，产物已落盘', true)
+      // 16-b：句柄序列化（单任务 = 裸 jobId；复合句柄 = JSON）
+      const ser = serializeHandle(handle)
       const payload = JSON.stringify({
         stage: 'chunk',
         mineru: {
-          jobId: handle.jobId,
-          fileId: handle.fileId ?? null,
-          uploadId: handle.uploadId ?? null,
+          jobId: ser.jobId,
+          fileId: ser.fileId,
+          uploadId: ser.uploadId,
           pages: art.pages,
           blockCount: art.blockCount,
         },
@@ -890,17 +907,42 @@ async function execParse(job: JobRow, doc: DocRow, ctx: JobRunCtx): Promise<void
     return
   }
 
-  // ---- MinerU 引擎：分阶段（审计#P1-1：等待移出并发槽；P1-3：断点续传） ----
-  const existing: MinerUHandle | null = doc.mineruJobId
-    ? {
-        jobId: doc.mineruJobId,
-        uploadId: doc.mineruUploadId ?? undefined,
-        fileId: doc.mineruFileId ?? undefined,
-      }
-    : null
+  // ---- MinerU 引擎：分阶段（审计#P1-1：等待移出并发槽；P1-3：断点续传；16-b：PDF 多段复合句柄） ----
+  const existing = parsePersistedHandle(doc)
 
   let handle: MinerUHandle
-  if (existing) {
+  if (existing && existing.kind === 'parts') {
+    // 16-b 复合句柄断点续传：逐段探测聚合（不重新上传已提交段）
+    const probe = await probeMineruJob(existing, settings)
+    if (probe.state === 'running' || probe.state === 'done') {
+      handle = existing // 交给轮询器接管
+    } else if (probe.state === 'gone') {
+      // 仅失效段重新提交（goneParts / 缺 jobId 的段）
+      const resume: MinerUPartsHandle = {
+        ...existing,
+        parts: existing.parts.map((p, i) =>
+          probe.goneParts?.includes(i) || !p.jobId
+            ? { ...p, jobId: undefined, uploadId: undefined, fileId: undefined }
+            : { ...p }
+        ),
+      }
+      await reportProgress(doc, 'parsing', 10, '部分段远端任务已失效，重新上传这些段', true)
+      handle = await submitMineruJob({
+        docId: doc.id,
+        kbId: doc.kbId,
+        filename: doc.filename,
+        localPath,
+        settings,
+        resume,
+        onProgress: (e) => {
+          void reportProgress(doc, 'parsing', Math.max(5, Math.min(30, e.progress)), e.message)
+        },
+      })
+    } else {
+      // failed（远端终态失败/不可重试业务错误）→ 常规失败路径
+      throw probe.error
+    }
+  } else if (existing) {
     // 断点续传：不重新上传，先探一次旧任务状态
     const probe = await probeMineruJob(existing, settings)
     if (probe.state === 'running' || probe.state === 'done') {
@@ -944,14 +986,15 @@ async function execParse(job: JobRow, doc: DocRow, ctx: JobRunCtx): Promise<void
   // 上传/提交返回后先响应取消（审计#N13：避免给已取消任务写入断点字段）
   ctx.checkAlive()
 
-  // 持久化断点字段（先落字段再置状态：轮询器不会见到缺句柄的 waiting 任务）
+  // 持久化断点字段（16-b：复合句柄存 JSON；先落字段再置状态：轮询器不会见到缺句柄的 waiting 任务）
+  const ser = serializeHandle(handle)
   await serializeDocWrite(doc.id, () =>
     db.document.update({
       where: { id: doc.id },
       data: {
-        mineruJobId: handle.jobId,
-        mineruUploadId: handle.uploadId ?? null,
-        mineruFileId: handle.fileId ?? null,
+        mineruJobId: ser.jobId,
+        mineruUploadId: ser.uploadId,
+        mineruFileId: ser.fileId,
       },
     })
   )

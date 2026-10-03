@@ -43,6 +43,8 @@ export interface RagSettings {
     mineruApiKey: string
     mineruTier: string
     mineruOcrMode: string
+    mineruPdfAutoSplit: boolean
+    mineruPdfPartPages: number
     useFallbackParser: boolean
     useMockEmbedding: boolean
     useMockRerank: boolean
@@ -53,7 +55,17 @@ export interface RagSettings {
   embedMode: EmbedMode
   rerankMode: RerankMode
   qdrant: { url: string; apiKey: string }
-  mineru: { provider: MinerUProviderKind; url: string; apiKey: string; tier: string; ocrMode: string }
+  mineru: {
+    provider: MinerUProviderKind
+    url: string
+    apiKey: string
+    tier: string
+    ocrMode: string
+    /** 16-b：超大 PDF 自动拆分 */
+    pdfAutoSplit: boolean
+    /** 16-b：每段页数上限（0 = Provider 默认：cloud 200 / cloud-agent 20 / selfhost 不拆） */
+    pdfPartPages: number
+  }
   embed: { apiBase: string; apiKey: string; model: string }
   rerank: { apiBase: string; apiKey: string; model: string }
 }
@@ -125,6 +137,8 @@ export async function getRagSettings(): Promise<RagSettings> {
       mineruApiKey: row.mineruApiKey,
       mineruTier: row.mineruTier,
       mineruOcrMode: row.mineruOcrMode,
+      mineruPdfAutoSplit: row.mineruPdfAutoSplit,
+      mineruPdfPartPages: row.mineruPdfPartPages,
       useFallbackParser: row.useFallbackParser,
       useMockEmbedding: row.useMockEmbedding,
       useMockRerank: row.useMockRerank,
@@ -141,6 +155,8 @@ export async function getRagSettings(): Promise<RagSettings> {
       apiKey: row.mineruApiKey,
       tier: row.mineruTier || 'standard',
       ocrMode: row.mineruOcrMode || 'auto',
+      pdfAutoSplit: row.mineruPdfAutoSplit,
+      pdfPartPages: row.mineruPdfPartPages || 0,
     },
     embed: {
       apiBase: row.embedApiBase.trim(),

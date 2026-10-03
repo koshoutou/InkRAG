@@ -32,6 +32,8 @@ function serializeSettings(row: {
   mineruApiKey: string
   mineruTier: string
   mineruOcrMode: string
+  mineruPdfAutoSplit: boolean
+  mineruPdfPartPages: number
   useFallbackParser: boolean
   useMockEmbedding: boolean
   useMockRerank: boolean
@@ -57,6 +59,8 @@ function serializeSettings(row: {
     hasMineruApiKey: row.mineruApiKey.length > 0,
     mineruTier: row.mineruTier,
     mineruOcrMode: row.mineruOcrMode,
+    mineruPdfAutoSplit: row.mineruPdfAutoSplit,
+    mineruPdfPartPages: row.mineruPdfPartPages,
     useFallbackParser: row.useFallbackParser,
     useMockEmbedding: row.useMockEmbedding,
     useMockRerank: row.useMockRerank,
@@ -90,6 +94,10 @@ interface SettingsInput {
   mineruApiKey?: string
   mineruTier?: string
   mineruOcrMode?: string
+  /** 16-b：超大 PDF 自动拆分（缺省保留现值） */
+  mineruPdfAutoSplit?: boolean
+  /** 16-b：每段页数上限，0=Provider 默认（缺省保留现值；非负整数） */
+  mineruPdfPartPages?: number
   useFallbackParser?: boolean
   useMockEmbedding?: boolean
   useMockRerank?: boolean
@@ -106,6 +114,15 @@ export async function PUT(req: NextRequest) {
       { status: 400 },
     )
   }
+  if (body.mineruPdfPartPages !== undefined) {
+    const p = Number(body.mineruPdfPartPages)
+    if (!Number.isInteger(p) || p < 0 || p > 10000) {
+      return NextResponse.json(
+        { error: '无效 mineruPdfPartPages（需 0-10000 的整数，0 = 按服务商默认）' },
+        { status: 400 },
+      )
+    }
+  }
   // mineruProvider 缺省时保留现值（旧客户端/基座 SettingsDialog 不携带该字段，避免意外重置回 selfhost）
   const existing = await db.qdrantSetting.findUnique({ where: { id: 'default' } })
 
@@ -113,28 +130,35 @@ export async function PUT(req: NextRequest) {
   const secretOrDefault = (v: string | undefined, current: string): string =>
     isMaskedOrEmpty(v) ? (current ?? '') : v
 
+  // 16-b：非密钥字段缺省保留现值（部分 PUT 不再清空未携带字段；显式传空串仍可清空）
+  const keep = <T>(v: T | undefined, current: T | undefined, fallback: T): T =>
+    v !== undefined ? v : (current ?? fallback)
+
   const data = {
-    url: (body.url ?? '').trim(),
+    url: keep(body.url, existing?.url, '').trim(),
     apiKey: secretOrDefault(body.apiKey, existing?.apiKey ?? ''),
-    defaultCollection: body.defaultCollection ?? '',
-    embedApiBase: (body.embedApiBase ?? '').trim(),
+    defaultCollection: keep(body.defaultCollection, existing?.defaultCollection, ''),
+    embedApiBase: keep(body.embedApiBase, existing?.embedApiBase, '').trim(),
     embedApiKey: secretOrDefault(body.embedApiKey, existing?.embedApiKey ?? ''),
-    embedModel: (body.embedModel ?? '').trim(),
-    rerankApiBase: (body.rerankApiBase ?? '').trim(),
+    embedModel: keep(body.embedModel, existing?.embedModel, '').trim(),
+    rerankApiBase: keep(body.rerankApiBase, existing?.rerankApiBase, '').trim(),
     rerankApiKey: secretOrDefault(body.rerankApiKey, existing?.rerankApiKey ?? ''),
-    rerankModel: (body.rerankModel ?? '').trim(),
+    rerankModel: keep(body.rerankModel, existing?.rerankModel, '').trim(),
     mineruProvider:
       body.mineruProvider !== undefined
         ? normalizeMinerUProvider(body.mineruProvider)
         : normalizeMinerUProvider(existing?.mineruProvider ?? 'selfhost'),
-    mineruApiUrl: (body.mineruApiUrl ?? '').trim(),
+    mineruApiUrl: keep(body.mineruApiUrl, existing?.mineruApiUrl, '').trim(),
     mineruApiKey: secretOrDefault(body.mineruApiKey, existing?.mineruApiKey ?? ''),
-    mineruTier: body.mineruTier ?? 'standard',
-    mineruOcrMode: body.mineruOcrMode ?? 'auto',
-    useFallbackParser: body.useFallbackParser !== false,
-    // useMockEmbedding 缺省为 false（与 schema 默认一致；避免旧客户端不携带该字段时静默开启 mock 嵌入）
-    useMockEmbedding: body.useMockEmbedding === true,
-    useMockRerank: body.useMockRerank !== false,
+    mineruTier: keep(body.mineruTier, existing?.mineruTier, 'standard'),
+    mineruOcrMode: keep(body.mineruOcrMode, existing?.mineruOcrMode, 'auto'),
+    // 16-b：PDF 拆分配置缺省保留现值（旧客户端不携带时不重置）
+    mineruPdfAutoSplit: body.mineruPdfAutoSplit ?? existing?.mineruPdfAutoSplit ?? true,
+    mineruPdfPartPages: body.mineruPdfPartPages ?? existing?.mineruPdfPartPages ?? 0,
+    useFallbackParser: keep(body.useFallbackParser, existing?.useFallbackParser, true),
+    // useMockEmbedding 缺省保留现值（与 schema 默认 false 对齐；避免旧客户端不携带该字段时静默开启 mock 嵌入）
+    useMockEmbedding: body.useMockEmbedding ?? existing?.useMockEmbedding ?? false,
+    useMockRerank: keep(body.useMockRerank, existing?.useMockRerank, true),
   }
   const row = await db.qdrantSetting.upsert({
     where: { id: 'default' },

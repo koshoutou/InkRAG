@@ -363,6 +363,10 @@ export interface RagSettings {
   mineruApiKey: string
   mineruTier: string
   mineruOcrMode: string
+  /** 16-b：超大 PDF 自动拆分（超过 MinerU 页数/体积限制时分段解析后合并） */
+  mineruPdfAutoSplit: boolean
+  /** 16-b：每段页数上限（0 = 按服务商默认：cloud 200 / cloud-agent 20 / selfhost 不拆） */
+  mineruPdfPartPages: number
   useFallbackParser: boolean
   useMockEmbedding: boolean
   useMockRerank: boolean

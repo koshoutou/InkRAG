@@ -626,3 +626,38 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 }
 ```
 - `cpuPercent`：两次 `process.cpuUsage()` 差分 ÷ 墙钟时间（globalThis 缓存上次采样，首次请求返回 0）；字节数原始值返回，前端格式化
+
+## §30 超大 PDF 自动拆分 / MinerU 复合任务句柄（Task 16-b，2026-10-03）
+
+### 30.1 触发条件与拆分决策
+
+- 仅 MinerU 引擎 + `.pdf` 扩展名参与；设置项 `mineruPdfAutoSplit`（默认 true）+ `mineruPdfPartPages`（默认 0 = 按 Provider 默认）
+- Provider 单文件硬限制（`src/lib/rag/pdf-split.ts`）：cloud 200MB/200 页；cloud-agent 10MB/20 页；selfhost 无默认限制
+- 拆分判定：`页数 > 每段页数上限` 或 `体积 > Provider 体积上限`（后者按页密度折算更小段，0.9 安全系数）
+- 段文件落盘 `{artifacts}/{kbId}/{docId}/parts/part-XXXX.pdf`（合并成功后清理；失败保留供断点续传）
+
+### 30.2 复合句柄（Document.mineruJobId 持久化协议）
+
+- 单任务：裸 jobId 字符串（原样保留，向后兼容）
+- 多段：JSON `{"kind":"parts","pages":N,"parts":[{jobId?,uploadId?,fileId?,pageFrom,pageTo}]}`
+  - `jobId` 为空 = 该段未提交/已失效待重提（断点续传只重提缺失段，不重传已提交段）
+  - 解析入口统一走 `parsePersistedHandle(doc)`；序列化走 `serializeHandle(handle)`
+
+### 30.3 状态聚合（probeMineruJob 复合语义）
+
+- 逐段单次探测并发查询，聚合优先级：`failed > gone > error > 全 done > running`
+- failed/gone/error 的错误信息带段号定位（「第 i/n 段（页 x-y）：原因」）；gone 携带 `goneParts: number[]`
+- running 携带聚合标签 `k/n 段完成 · {远端状态}`——独立轮询器（5s）在标签变化或每 30s 时
+  通过 `document:progress` 事件上报（消息形如「MinerU 解析中（1/3 段完成 · 解析中）· 已等待 12 分钟」）
+
+### 30.4 产物合并（finishMineruArtifact 复合语义）
+
+- 逐段下载到 `parts/art-XXXX/` → 每段 middle.json 先归一化（段内 charStart/charEnd 对齐段 markdown）
+- 合并：markdown `'\n\n'` 拼接；middle 页码按段累加、块 charStart/charEnd 按段平移（精确偏移，无二次猜测）
+- 合并后写 `{doc}/full.md + middle.json` 并清理 parts/ 目录
+
+### 30.5 相关设置字段（`/api/qdrant/settings`）
+
+- `mineruPdfAutoSplit: boolean`（缺省保留现值）、`mineruPdfPartPages: number`（0-10000，0=Provider 默认；缺省保留现值）
+- PUT 缺省语义（16-b）：**所有非密钥字段未携带时保留现值**（此前部分 PUT 会清空未携带字段——已修复）；显式传空串仍可清空
+

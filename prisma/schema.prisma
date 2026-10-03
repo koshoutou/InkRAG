@@ -43,6 +43,12 @@ model QdrantSetting {
   mineruTier        String   @default("standard") // flash | basic | standard | advanced（仅 selfhost）
   mineruOcrMode     String   @default("auto")     // auto | txt | ocr（仅 selfhost）
 
+  // ---- MinerU 超大 PDF 自动拆分（Task 16-b）----
+  /// 超过页数/体积限制的 PDF 是否自动拆分分段解析后合并（MinerU 云·精准 200MB/200页、轻量 10MB/20页）
+  mineruPdfAutoSplit Boolean  @default(true)
+  /// 每段页数上限（0 = 按 Provider 默认：cloud 200 / cloud-agent 20 / selfhost 不拆分）
+  mineruPdfPartPages Int      @default(0)
+
   // ---- 平台行为开关 ----
   /// 未配置 MinerU 时是否启用内置降级解析器（文本/PDF 直解，非 MinerU）
   useFallbackParser Boolean   @default(true)
