@@ -15,6 +15,7 @@ import { db } from '@/lib/db'
 import { docDir, chunksDir, resolveStorageKey } from './artifacts'
 import { getVectorStore } from './vectorstore'
 import { enqueueDocument } from './pipeline'
+import { assertEmbedScheme, embedTexts } from './embed'
 import { emitToRoom } from './events'
 
 export const CURRENT_VERSION = 'current'
@@ -683,6 +684,18 @@ export async function restoreDocVersion(docId: string, version: string): Promise
 
   const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
   if (!kb) throw new Error('知识库不存在')
+
+  // v1.6：恢复会重写向量库，先断言当前嵌入与建库时锁定的方案（dim / sparseScheme）一致，
+  // 不一致给明确报错（防止恢复动作把异构向量写进库）
+  try {
+    const sample = snapChunks.find((c) => !c.isParent) ?? snapChunks[0]
+    const sampleText =
+      (typeof sample.fullText === 'string' && sample.fullText) || sample.textPreview || ''
+    const probe = await embedTexts([sampleText || 'connectivity probe'], { dim: kb.dim || 1024 })
+    assertEmbedScheme(kb, probe)
+  } catch (e) {
+    throw new Error(`恢复失败：${(e as Error).message}`)
+  }
 
   // 1) 归档当前 + 版本号递增
   const restoredVersion = await bumpDocVersion(docId)

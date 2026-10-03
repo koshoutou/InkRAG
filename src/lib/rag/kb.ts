@@ -13,13 +13,9 @@ export async function kbSummaryWithCounts(kb: KnowledgeBase): Promise<KbSummary>
     db.document.count({ where: { kbId: kb.id } }),
     db.chunk.count({ where: { kbId: kb.id, isParent: false } }),
   ])
-  let pointCount = kb.pointCount
-  if (settings.vectorMode === 'local') {
-    try {
-      pointCount = await db.vectorPoint.count({ where: { collection: kb.collection } })
-    } catch {}
-  }
-  return toKbSummary(kb, { docCount, chunkCount, pointCount }, settings.vectorMode)
+  // pointCount 用库行快照（pipeline 每次 ready 后回写）；
+  // 不在此处实时探测 Qdrant（列表页逐库 count 会放大远程延迟，且不可达时列表不应失败）
+  return toKbSummary(kb, { docCount, chunkCount, pointCount: kb.pointCount }, settings.vectorMode)
 }
 
 export async function kbSummaries(kbs: KnowledgeBase[]): Promise<KbSummary[]> {

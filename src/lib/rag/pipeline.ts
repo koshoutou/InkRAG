@@ -14,7 +14,7 @@ import { getRagSettings } from './settings'
 import { getVectorStore, isNonRetryable, StoreError } from './vectorstore'
 import { DEFAULT_CHUNK_CONFIG, splitMarkdown, countTokens, type ChunkConfig } from './chunking'
 import { parseDocument } from './mineru'
-import { embedTexts } from './embed'
+import { assertEmbedScheme, embedTexts } from './embed'
 import { deterministicChunkId, textHash16 } from './ids'
 import {
   chunksDir,
@@ -602,6 +602,16 @@ async function execEmbed(job: JobRow, doc: DocRow, kb: KbRow): Promise<void> {
       void reportProgress(doc, 'embedding', 5 + Math.round((55 * done) / total), `嵌入 ${done}/${total}`)
     },
   })
+
+  // v1.6：入库前断言嵌入方案与建库锁定一致（dim / sparseScheme；
+  // 不一致 → EMBED_SCHEME_MISMATCH 不可重试失败，防止中途换模型污染向量库）
+  try {
+    assertEmbedScheme(kb, emb)
+  } catch (e) {
+    const err = new StoreError(`EMBED_SCHEME_MISMATCH: ${(e as Error).message}`, { retryable: false })
+    err.name = 'EMBED_SCHEME_MISMATCH'
+    throw err
+  }
 
   await setDocStatus(doc, 'upserting', 65)
 

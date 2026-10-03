@@ -1,13 +1,13 @@
 /**
- * 嵌入模块（契约 §8）：real（OpenAI 兼容 /embeddings）| mock（确定性哈希特征向量）
+ * 嵌入模块（契约 §8）：real（OpenAI 兼容 /embeddings）| mock（确定性哈希特征向量，显式离线调试）
  *
- * - real：64/批调用 {base}/embeddings；sparse 优先读响应 data[].sparse_indices/values，
- *   无则退化为词法生成（与 mock 的 sparse 算法一致）。
- *   provider 携带真实模型名（`openai-compatible · {model}`），
- *   供检索白盒/调用日志区分 real/mock（mock 为 'mock-deterministic'）。
- * - mock：tokenize（与 countTokens 同口径）→ FNV-1a hash → index = hash % dim →
- *   权重 = 1+log(tf) → L2 归一化；sparse：index = hash % 65536，value = tf。
- *   同文本必得同向量（确定性，语义近似：共现词越多向量越接近）。
+ * v1.6 变更：
+ * - real 模式 sparse 输出：从响应 data[i] 上多字段探测原生稀疏（openai-compatible 变体 /
+ *   BGE-M3 lexical_weights / Cohere 风格嵌套）。探测不到 → sparse = {indices:[],values:[]}，
+ *   **绝不**退化为 mock 词袋（防止两种 sparse 空间静默混用导致索引断裂）。
+ * - mock 模式仅由设置页显式开启（useMockEmbedding，离线调试专用），默认关闭。
+ * - probeEmbedding()：建库前实测探测 dim + sparse 方案（写入 kb.dim / kb.sparseScheme 锁定）。
+ * - assertEmbedScheme()：入库/恢复前断言当前嵌入与建库时锁定的方案一致。
  */
 import { tokenizeText } from './chunking'
 import { getRagSettings } from './settings'
@@ -37,7 +37,7 @@ function parseRetryAfter(res: Response): number | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Mock 算法
+// Mock 算法（仅显式离线调试开关 useMockEmbedding=true 时启用）
 // ---------------------------------------------------------------------------
 
 function fnv1a(str: string): number {
@@ -77,15 +77,134 @@ export function mockEmbedOne(text: string, dim: number): { dense: number[]; spar
 }
 
 // ---------------------------------------------------------------------------
-// Real 调用（OpenAI 兼容）
+// Real 调用（OpenAI 兼容）+ 原生稀疏多字段探测
 // ---------------------------------------------------------------------------
 
 interface RealEmbedResponse {
   data: {
     index?: number
     embedding: number[]
+    /** openai-compatible 稀疏变体（x-ai / 荷开等网关） */
     sparse_indices?: { indices: number[]; values: number[] }
+    /** 备选字段（多字段探测按优先级依次尝试） */
+    sparse_embedding?: unknown
+    lexical_weights?: unknown
+    sparse?: unknown
+    /** Cohere 风格嵌套（data[i].embeddings.sparse） */
+    embeddings?: { sparse?: unknown }
   }[]
+}
+
+/** data[i] 上探测原生稀疏输出的字段候选（按优先级） */
+const SPARSE_FIELD_CANDIDATES = ['sparse_embedding', 'sparse_indices', 'lexical_weights', 'sparse'] as const
+
+/** 空稀疏向量（sparseScheme=none：点位不带稀疏，检索强制 dense） */
+export const EMPTY_SPARSE: SparseVector = { indices: [], values: [] }
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v)
+}
+
+/**
+ * 归一稀疏向量：indices 升序 + values 同步重排（values 与 indices 一一对应）。
+ * 输入允许乱序（providers 可能按词序返回）。
+ */
+function sortSparse(indices: number[], values: number[]): SparseVector {
+  const order = indices.map((_, i) => i).sort((a, b) => indices[a] - indices[b])
+  return {
+    indices: order.map((i) => indices[i]),
+    values: order.map((i) => values[i] ?? 0),
+  }
+}
+
+/**
+ * 从单个字段值解析稀疏向量，兼容多种形态：
+ * - {indices:number[], values:number[]}（及 values/data/weights 命名变体）
+ * - [[idx, w], ...] 二元组数组
+ * - { [token_id]: weight } 对象映射（BGE-M3 lexical_weights 官方命名等）
+ * 解析失败（空/形态不符）返回 null。
+ */
+function parseSparseField(raw: unknown): SparseVector | null {
+  if (raw === null || raw === undefined) return null
+
+  // 二元组数组：[[idx, w], ...]
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return null
+    const indices: number[] = []
+    const values: number[] = []
+    for (const item of raw) {
+      if (
+        Array.isArray(item) &&
+        item.length >= 2 &&
+        isFiniteNumber(item[0]) &&
+        isFiniteNumber(item[1])
+      ) {
+        indices.push(item[0])
+        values.push(item[1])
+      } else {
+        return null // 混合形态视为不匹配
+      }
+    }
+    return indices.length > 0 ? sortSparse(indices, values) : null
+  }
+
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>
+    // {indices, values | data | weights} 形态
+    const idx = obj.indices
+    if (Array.isArray(idx) && idx.length > 0) {
+      const valArr = (obj.values ?? obj.data ?? obj.weights) as unknown
+      if (Array.isArray(valArr) && valArr.length === idx.length) {
+        const indices: number[] = []
+        const values: number[] = []
+        let ok = true
+        for (let i = 0; i < idx.length; i++) {
+          const id = idx[i]
+          const w = valArr[i]
+          if (!isFiniteNumber(id) || !isFiniteNumber(w)) {
+            ok = false
+            break
+          }
+          indices.push(id)
+          values.push(w)
+        }
+        if (ok) return sortSparse(indices, values)
+      }
+      // {indices, values} 变体长度不齐 → 尝试其它字段
+    }
+    // { [token_id]: weight } 对象映射（BGE-M3 lexical_weights：{"8980": 0.13, ...}）
+    const indices: number[] = []
+    const values: number[] = []
+    for (const [k, w] of Object.entries(obj)) {
+      const id = Number(k)
+      if (Number.isInteger(id) && isFiniteNumber(w) && w !== 0) {
+        indices.push(id)
+        values.push(w)
+      }
+    }
+    if (indices.length > 0) return sortSparse(indices, values)
+  }
+  return null
+}
+
+/**
+ * 从响应 data[i] 上探测原生稀疏输出（按字段候选优先级 + Cohere 风格嵌套）。
+ * 探测不到返回 null（调用方写入空 sparse，绝不退化 mock 词袋）。
+ */
+function probeSparseFromDatum(d: RealEmbedResponse['data'][number]): SparseVector | null {
+  for (const key of SPARSE_FIELD_CANDIDATES) {
+    const v = (d as unknown as Record<string, unknown>)[key]
+    if (v === null || v === undefined) continue
+    const parsed = parseSparseField(v)
+    if (parsed) return parsed
+  }
+  // Cohere 风格：data[i].embeddings.sparse
+  const nested = (d as unknown as Record<string, unknown>)['embeddings']
+  if (nested && typeof nested === 'object') {
+    const parsed = parseSparseField((nested as Record<string, unknown>)['sparse'])
+    if (parsed) return parsed
+  }
+  return null
 }
 
 async function realEmbedBatch(
@@ -169,20 +288,8 @@ async function realEmbedBatch(
       )
     }
     const vectors = data.map((d) => d.embedding)
-    const sparse = data.map((d, i) => {
-      if (d.sparse_indices?.indices?.length) {
-        // 保持与 indices 排序一致
-        const order = d.sparse_indices.indices.map((_, j) => j).sort(
-          (a, b) => d.sparse_indices!.indices[a] - d.sparse_indices!.indices[b]
-        )
-        return {
-          indices: order.map((j) => d.sparse_indices!.indices[j]),
-          values: order.map((j) => d.sparse_indices!.values?.[j] ?? 0),
-        }
-      }
-      // 无原生 sparse → 词法生成（同 mock 口径）
-      return mockEmbedOne(texts[i], vectors[i]?.length ?? DEFAULT_EMBED_DIM).sparse
-    })
+    // 原生稀疏多字段探测；探测不到 → 空 sparse（绝不退化 mock 词袋）
+    const sparse = data.map((d) => probeSparseFromDatum(d) ?? EMPTY_SPARSE)
     return { vectors, sparse }
   }
   throw (
@@ -250,7 +357,7 @@ export async function embedTexts(
     return { vectors, sparse, dim, provider: 'mock-deterministic' }
   }
 
-  throw new StoreError('未配置 Embedding 且未启用 Mock，请检查平台设置（useMockEmbedding）', {
+  throw new StoreError('未配置 Embedding API（且未显式开启 Mock 调试开关），请到「设置 → Embedding」配置', {
     retryable: false,
   })
 }
@@ -267,4 +374,96 @@ export async function embedQuery(
 /** 当前嵌入模式（API 展示用） */
 export async function currentEmbedMode(): Promise<EmbedMode> {
   return (await getRagSettings()).embedMode
+}
+
+// ---------------------------------------------------------------------------
+// 建库探测 + 方案断言（v1.6：dim / sparse 方案建库时锁定）
+// ---------------------------------------------------------------------------
+
+export interface EmbedProbeResult {
+  ok: boolean
+  /** 实测向量维度（探测成功时 > 0） */
+  dim: number
+  /** native：provider 原生稀疏输出 | none：无稀疏输出（检索强制 dense） */
+  sparseScheme: 'native' | 'none'
+  /** provider 标识（如 openai-compatible · BAAI/bge-m3） */
+  provider: string
+  error?: string
+}
+
+/**
+ * 嵌入一条探测文本，实测 dim 与稀疏方案（建库时调用，写入 kb.dim / kb.sparseScheme 锁定）。
+ * embedMode !== 'real'（未配置或仅 mock 调试）→ ok:false + 明确错误（不允许以 mock 建库）。
+ */
+export async function probeEmbedding(): Promise<EmbedProbeResult> {
+  const settings = await getRagSettings()
+  if (settings.embedMode !== 'real') {
+    return {
+      ok: false,
+      dim: 0,
+      sparseScheme: 'none',
+      provider: 'unconfigured',
+      error: '未配置 Embedding API（请到「设置 → Embedding」配置 API Base 与模型 ID）',
+    }
+  }
+  try {
+    const r = await realEmbedBatch(['connectivity probe'], settings.embed)
+    const dim = r.vectors[0]?.length ?? 0
+    if (dim <= 0) {
+      return {
+        ok: false,
+        dim: 0,
+        sparseScheme: 'none',
+        provider: 'unknown',
+        error: 'Embedding API 返回空向量',
+      }
+    }
+    const hasSparse = r.sparse[0]?.indices?.length > 0
+    return {
+      ok: true,
+      dim,
+      sparseScheme: hasSparse ? 'native' : 'none',
+      provider: `openai-compatible · ${settings.embed.model}`,
+    }
+  } catch (e) {
+    return {
+      ok: false,
+      dim: 0,
+      sparseScheme: 'none',
+      provider: 'unknown',
+      error: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+    }
+  }
+}
+
+/**
+ * 断言当前嵌入产出与建库时锁定的方案一致（pipeline upsert 前 / 版本恢复重嵌入前调用）。
+ * - dim 不匹配（kb.dim > 0 且不等）→ 失败
+ * - kb.sparseScheme='native' 但存在空 sparse 点 → 失败（原生稀疏库不该出现空点）
+ * - kb.sparseScheme='none' 但存在非空 sparse 点 → 失败（none 库检索强制 dense，混入稀疏即方案漂移）
+ */
+export function assertEmbedScheme(
+  kb: { dim: number; sparseScheme: string },
+  emb: { vectors: number[][]; sparse: SparseVector[]; dim: number }
+): void {
+  if (kb.dim > 0 && emb.dim > 0 && emb.dim !== kb.dim) {
+    throw new StoreError(
+      `嵌入维度与建库时锁定不一致（库 dim=${kb.dim}，当前 ${emb.dim}）：与建库时锁定的方案不一致，请勿中途更换嵌入模型/配置（换模型请新建知识库重导）`,
+      { retryable: false }
+    )
+  }
+  const native = kb.sparseScheme === 'native'
+  const emptyCount = emb.sparse.filter((s) => !s || s.indices.length === 0).length
+  if (native && emptyCount > 0) {
+    throw new StoreError(
+      `建库锁定 sparseScheme=native（原生稀疏），但本次嵌入存在 ${emptyCount} 个空稀疏点：与建库时锁定的方案不一致，请勿中途更换嵌入模型/配置`,
+      { retryable: false }
+    )
+  }
+  if (!native && emptyCount < emb.sparse.length) {
+    throw new StoreError(
+      `建库锁定 sparseScheme=none（无稀疏输出，检索强制 dense），但本次嵌入携带了稀疏向量：与建库时锁定的方案不一致，请勿中途更换嵌入模型/配置`,
+      { retryable: false }
+    )
+  }
 }

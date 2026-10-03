@@ -19,7 +19,9 @@
 interface KbSummary {
   id: string; name: string; description: string;
   collection: string; embeddingModel: string; dim: number;
-  chunkConfig: ChunkConfig; vectorMode: 'local'|'qdrant';
+  chunkConfig: ChunkConfig;
+  vectorMode: 'qdrant'|'unconfigured';   // v1.6：本地引擎已移除，未配置 Qdrant 时建库/向量读写硬失败
+  sparseScheme: 'none'|'native';         // v1.6：稀疏方案建库时探测锁定（none=检索强制 dense；native=入库断言非空）
   rerankEnabled: boolean;
   docCount: number; chunkCount: number; pointCount: number;
   createdAt: string; updatedAt: string;
@@ -34,8 +36,22 @@ interface ChunkConfig {
 ```
 
 ### POST /api/kb
-Body: `{ name, description?, embeddingModel?, dim?, chunkConfig?, rerankEnabled? }`
-→ 201 `{ kb: KbSummary }`（自动建 collection：qdrant 模式按计划书 §6.3 固化配置；local 模式建内置引擎集合）
+Body: `{ name, description?, chunkConfig?, rerankEnabled? }`
+→ 201 `{ kb: KbSummary }`（v1.6：自动建 Qdrant collection，按计划书 §6.3 固化配置；**本地向量引擎已移除**）
+
+v1.6 建库强校验（均为 400）：
+- 未配置 Qdrant（设置中 url 为空）→ `未配置 Qdrant 连接，无法创建知识库（请先到「设置 → Qdrant」配置并测试连通）`
+- 未配置 Embedding（embedMode !== 'real'，Mock 嵌入仅显式调试、不允许建库）→ `未配置 Embedding API，无法创建知识库（请先到「设置 → Embedding」配置）`
+- 嵌入探测失败（API 不可达/鉴权失败等）→ `嵌入 API 探测失败：{具体错误}`
+- 显式传入 `dim` 且与实测维度不一致 → 拒绝（以实测为准）
+
+建库时后端通过 `probeEmbedding()` 实测一条探测文本：
+- `kb.dim` = 实测维度（如 1024）；`kb.embeddingModel` = 设置中真实模型名（不再回退 mock 兜底）
+- `kb.sparseScheme`：provider 有原生稀疏输出（如 BGE-M3 `lexical_weights`）→ `native`（后续入库断言稀疏非空）；无稀疏输出（如 edgefn dense-only 网关）→ `none`（检索强制 dense，入库允许空稀疏点）
+- Qdrant 不可达时建集合硬失败（503），不落库行
+
+中途更换嵌入模型/配置会被入库前断言（errorCode=EMBED_SCHEME_MISMATCH）与版本恢复前置校验拦截（换模型 = 新建库重导）。
+
 错误：name 重复 409。
 
 ### GET /api/kb/[id]
@@ -158,6 +174,7 @@ interface SearchResponse {
     fusedTop: { chunkId: string; score: number; denseRank?: number; sparseRank?: number }[]; // 融合后 + 前序 rank
     rerankTop?: { chunkId: string; rerankScore: number; prevRank: number }[];
     fusion: string; rrfK?: number; mode: string;
+    sparseScheme?: string;  // v1.6：建库时锁定的稀疏方案。none 时无论请求何种 mode 都强制 dense（fusion 显示 dense）
   };
 }
 interface SearchHit {
@@ -290,7 +307,7 @@ BackupItem = {
   version: string       // schema 版本标识
   counts: { kbs; docs; chunks; points; keys; jobs }
   sizes: { db; artifacts; total }   // 字节
-  vectorMode: string    // local | qdrant（qdrant 时提示需单独 snapshot）
+  vectorMode: string    // qdrant | unconfigured（v1.6：未配置时提示先配置，不再有 local）
   settingsSummary: Record<string, unknown>
   includesArtifacts: boolean
 }

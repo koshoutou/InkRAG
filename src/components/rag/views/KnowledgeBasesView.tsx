@@ -249,10 +249,10 @@ function KbCard({ kb, onOpen, onEdit, onDelete }: { kb: KbSummary; onOpen: () =>
           <Tooltip>
             <TooltipTrigger asChild>
               <Badge variant="outline" className="max-w-[200px] truncate text-[10px] font-mono">
-                {kb.embeddingModel || 'Mock 嵌入'}
+                {kb.embeddingModel || '未锁定'}
               </Badge>
             </TooltipTrigger>
-            <TooltipContent className="text-xs">Embedding 模型 · dim={kb.dim}</TooltipContent>
+            <TooltipContent className="text-xs">Embedding 模型 · dim={kb.dim} · 稀疏方案 {kb.sparseScheme === 'native' ? 'native（原生稀疏）' : 'none（强制 dense）'}</TooltipContent>
           </Tooltip>
         </TooltipProvider>
         <Badge variant="secondary" className="text-[10px] font-mono">{kb.dim}d</Badge>
@@ -318,7 +318,7 @@ function FirstUseHint({ onCreate }: { onCreate: () => void }) {
       </div>
       <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
         {[
-          { icon: <Library className="h-5 w-5" />, step: '①', title: '建库', desc: '指定 Embedding 模型、维度与父子切分配置，平台自动创建向量集合。' },
+          { icon: <Library className="h-5 w-5" />, step: '①', title: '建库', desc: '先在设置中配置 Qdrant 与 Embedding，建库时自动实测维度并锁定，再设置父子切分配置。' },
           { icon: <FileText className="h-5 w-5" />, step: '②', title: '传文档', desc: '拖入 PDF / Markdown / TXT / HTML，MinerU 或降级解析器完成解析与切分。' },
           { icon: <Search className="h-5 w-5" />, step: '③', title: '检索', desc: '三屏联动查看切分效果，在调试台白盒验证召回质量，再接入 Agent API。' },
         ].map((s) => (
@@ -383,10 +383,6 @@ function KbFormDialog({ open, editing, onClose }: { open: boolean; editing: KbSu
       toast.error('请填写知识库名称')
       return
     }
-    if (form.dim < 64 || form.dim > 8192) {
-      toast.error('维度需要在 64 - 8192 之间')
-      return
-    }
     setSaving(true)
     try {
       if (editing) {
@@ -398,11 +394,11 @@ function KbFormDialog({ open, editing, onClose }: { open: boolean; editing: KbSu
         })
         toast.success('知识库已更新')
       } else {
+        // v1.6：建库时后端实测当前配置的 Embedding 维度并锁定（embeddingModel/dim 不再由前端指定）。
+        // 未配置 Qdrant / Embedding 时后端返回 400，toast 展示引导文案
         await ragApi.createKb({
           name: form.name.trim(),
           description: form.description,
-          embeddingModel: form.embeddingModel.trim() || undefined,
-          dim: form.dim,
           chunkConfig: form.chunkConfig,
           rerankEnabled: form.rerankEnabled,
         })
@@ -429,7 +425,7 @@ function KbFormDialog({ open, editing, onClose }: { open: boolean; editing: KbSu
           <DialogDescription className="text-xs">
             {editing
               ? 'Embedding 模型与维度建库后不可修改（向量集合已按该维度创建）。'
-              : 'Embedding 模型留空则使用内置 Mock 嵌入（确定性哈希特征向量，演示模式）。'}
+              : '建库时会实测「设置 → Embedding」中配置的模型维度并锁定；需先配置 Qdrant 与 Embedding（未配置时创建将被拒绝并提示）。'}
           </DialogDescription>
         </DialogHeader>
 
@@ -459,30 +455,37 @@ function KbFormDialog({ open, editing, onClose }: { open: boolean; editing: KbSu
                 className="mt-1.5 min-h-[64px] text-sm"
               />
             </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <Label htmlFor="kb-model" className="text-xs text-muted-foreground">Embedding 模型</Label>
-                <Input
-                  id="kb-model"
-                  value={form.embeddingModel}
-                  onChange={(e) => update({ embeddingModel: e.target.value })}
-                  disabled={!!editing}
-                  placeholder="留空 = Mock 嵌入"
-                  className="mt-1.5 h-9 font-mono text-xs"
-                />
+            {editing ? (
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <Label htmlFor="kb-model" className="text-xs text-muted-foreground">Embedding 模型</Label>
+                  <Input
+                    id="kb-model"
+                    value={form.embeddingModel}
+                    onChange={(e) => update({ embeddingModel: e.target.value })}
+                    disabled
+                    className="mt-1.5 h-9 font-mono text-xs"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="kb-dim" className="text-xs text-muted-foreground">向量维度</Label>
+                  <Input
+                    id="kb-dim"
+                    type="number"
+                    value={form.dim}
+                    onChange={(e) => update({ dim: Number(e.target.value) || 0 })}
+                    disabled
+                    className="mt-1.5 h-9 text-xs"
+                  />
+                </div>
               </div>
-              <div>
-                <Label htmlFor="kb-dim" className="text-xs text-muted-foreground">向量维度</Label>
-                <Input
-                  id="kb-dim"
-                  type="number"
-                  value={form.dim}
-                  onChange={(e) => update({ dim: Number(e.target.value) || 0 })}
-                  disabled={!!editing}
-                  className="mt-1.5 h-9 text-xs"
-                />
+            ) : (
+              <div className="rounded-md border bg-muted/30 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                建库时自动使用「设置 → Embedding」当前配置的模型，并实测维度、稀疏方案一并锁定
+                （中途更换模型会被入库断言拦截，需新建知识库重导）。若未配置 Qdrant / Embedding，
+                创建会被拒绝并提示引导配置。
               </div>
-            </div>
+            )}
 
             <div className="flex items-center justify-between rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
               <div>

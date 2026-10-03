@@ -3,13 +3,14 @@
  *
  * 设置存于 Prisma QdrantSetting 单行（id='default'），首次读取时自动播种。
  * 双模式判定规则：
- *   - vectorMode: url 非空 → 'qdrant'（运行时不可达由 getVectorStore 自动降级 local 并告警），否则 'local'
+ *   - vectorMode: url 非空 → 'qdrant'，否则 'unconfigured'
+ *     （v1.6：本地向量引擎已移除；未配置或不可达时向量读写硬失败，绝不静默降级）
  *   - parseMode（MinerU 三 Provider，指南《MinerU_API_完整指南》）：
  *       provider='cloud-agent' → 'mineru'（免 Token 恒可用）
  *       provider='cloud'       → mineruApiKey 非空 → 'mineru'
  *       provider='selfhost'    → mineruApiUrl 非空 → 'mineru'
  *       否则 useFallbackParser → 'fallback'；再否则 'none'（解析时抛错）
- *   - embedMode:  embedApiBase + embedModel 非空 → 'real'；否则 useMockEmbedding → 'mock'；否则 'none'
+ *   - embedMode:  embedApiBase + embedModel 非空 → 'real'；否则 useMockEmbedding（显式离线调试开关）→ 'mock'；否则 'none'
  *   - rerankMode: rerankApiBase + rerankModel 非空 → 'real'；否则 useMockRerank → 'mock'；否则 'none'
  */
 import { db } from '@/lib/db'
@@ -42,7 +43,6 @@ export interface RagSettings {
     mineruApiKey: string
     mineruTier: string
     mineruOcrMode: string
-    useLocalVectorStore: boolean
     useFallbackParser: boolean
     useMockEmbedding: boolean
     useMockRerank: boolean
@@ -75,7 +75,7 @@ export async function getSettingsRow() {
 export async function getRagSettings(): Promise<RagSettings> {
   const row = await getSettingsRow()
 
-  const vectorMode: VectorMode = row.url.trim() ? 'qdrant' : 'local'
+  const vectorMode: VectorMode = row.url.trim() ? 'qdrant' : 'unconfigured'
 
   const mineruProvider = normalizeMinerUProvider(row.mineruProvider)
   let parseMode: ParseMode
@@ -125,7 +125,6 @@ export async function getRagSettings(): Promise<RagSettings> {
       mineruApiKey: row.mineruApiKey,
       mineruTier: row.mineruTier,
       mineruOcrMode: row.mineruOcrMode,
-      useLocalVectorStore: row.useLocalVectorStore,
       useFallbackParser: row.useFallbackParser,
       useMockEmbedding: row.useMockEmbedding,
       useMockRerank: row.useMockRerank,

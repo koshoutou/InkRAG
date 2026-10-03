@@ -87,18 +87,20 @@ export async function renderPrometheus(): Promise<string> {
   lines.push(`rag_search_duration_ms_max ${c.searchMaxMs}`)
 
   // ---- DB 聚合 ----
-  const [kbs, docsByStatus, chunks, enabledChunks, points, apiCalls, jobsByStatusType, pipe, settings] =
+  const [kbs, docsByStatus, chunks, enabledChunks, pointAgg, apiCalls, jobsByStatusType, pipe, settings] =
     await Promise.all([
       db.knowledgeBase.count(),
       db.document.groupBy({ by: ['status'], _count: { _all: true } }),
       db.chunk.count({ where: { isParent: false } }),
       db.chunk.count({ where: { isParent: false, enabled: true } }),
-      db.vectorPoint.count(),
+      // v1.6：向量点存于 Qdrant，计数用库行快照 pointCount（pipeline 回写）
+      db.knowledgeBase.aggregate({ _sum: { pointCount: true } }),
       db.apiKey.aggregate({ _sum: { callCount: true } }),
       db.pipelineJob.groupBy({ by: ['status', 'type'], _count: { _all: true } }),
       pipelineStats(),
       getRagSettings(),
     ])
+  const points = pointAgg._sum.pointCount ?? 0
 
   lines.push('# HELP rag_kbs_total 知识库总数')
   lines.push('# TYPE rag_kbs_total gauge')
@@ -149,7 +151,7 @@ export async function renderPrometheus(): Promise<string> {
   lines.push('# HELP rag_component_mode 组件运行模式（当前生效模式恒为 1）')
   lines.push('# TYPE rag_component_mode gauge')
   const modes: [string, string][] = [
-    ['qdrant', settings.vectorMode === 'qdrant' ? 'qdrant' : 'local'],
+    ['qdrant', settings.vectorMode],
     ['embedding', settings.embedMode],
     ['rerank', settings.rerankMode],
     ['mineru', settings.parseMode],
@@ -171,16 +173,17 @@ export async function metricsSummary(): Promise<{
   modes: Record<string, string>
 }> {
   const c = counters()
-  const [kbs, docsByStatus, chunks, enabledChunks, points, apiCalls, pipe, settings] = await Promise.all([
+  const [kbs, docsByStatus, chunks, enabledChunks, pointAgg, apiCalls, pipe, settings] = await Promise.all([
     db.knowledgeBase.count(),
     db.document.groupBy({ by: ['status'], _count: { _all: true } }),
     db.chunk.count({ where: { isParent: false } }),
     db.chunk.count({ where: { isParent: false, enabled: true } }),
-    db.vectorPoint.count(),
+    db.knowledgeBase.aggregate({ _sum: { pointCount: true } }),
     db.apiKey.aggregate({ _sum: { callCount: true } }),
     pipelineStats(),
     getRagSettings(),
   ])
+  const points = pointAgg._sum.pointCount ?? 0
   const documents: Record<string, number> = {}
   for (const r of docsByStatus) documents[r.status] = r._count._all
   return {
@@ -202,7 +205,7 @@ export async function metricsSummary(): Promise<{
       uptimeSec: pipe.uptimeSec,
     },
     modes: {
-      qdrant: settings.vectorMode === 'qdrant' ? 'qdrant' : 'local',
+      qdrant: settings.vectorMode,
       embedding: settings.embedMode,
       rerank: settings.rerankMode,
       mineru: settings.parseMode,

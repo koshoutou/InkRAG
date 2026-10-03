@@ -12,7 +12,10 @@ export type DocStatus =
 
 export type DocType = 'text' | 'table' | 'code' | 'image'
 export type ChunkStrategy = 'token' | 'title' | 'hybrid'
-export type VectorMode = 'qdrant' | 'local'
+/** v1.6：本地向量引擎已移除；未配置 Qdrant 时建库/向量读写硬失败 */
+export type VectorMode = 'qdrant' | 'unconfigured'
+/** 稀疏向量方案（建库时探测锁定）：none（无稀疏输出，检索强制 dense）| native（原生稀疏） */
+export type SparseScheme = 'none' | 'native'
 export type SearchMode = 'hybrid' | 'dense' | 'sparse'
 export type FusionMode = 'rrf' | 'dbsf'
 export type ApiKeyRole = 'admin' | 'operator' | 'readonly'
@@ -64,6 +67,8 @@ export interface KbSummary {
   dim: number
   chunkConfig: ChunkConfig
   vectorMode: VectorMode
+  /** 稀疏向量方案（建库时探测锁定）：none | native */
+  sparseScheme: SparseScheme
   rerankEnabled: boolean
   docCount: number
   chunkCount: number
@@ -358,7 +363,6 @@ export interface RagSettings {
   mineruApiKey: string
   mineruTier: string
   mineruOcrMode: string
-  useLocalVectorStore: boolean
   useFallbackParser: boolean
   useMockEmbedding: boolean
   useMockRerank: boolean
@@ -449,13 +453,13 @@ export interface BackupItem {
   }
   /** 文件体积（字节；total 含 Qdrant 快照） */
   sizes: { db: number; artifacts: number; total: number }
-  /** 恢复模式说明（local 向量引擎数据随库走；qdrant 模式内嵌快照见 includesQdrantSnapshots） */
+  /** 备份时向量模式（v1.6 起仅 qdrant；旧备份可能为 local，仅展示用） */
   vectorMode: string
   /** 备份时平台设置摘要 */
   settingsSummary: Record<string, unknown>
   /** 是否含 artifacts 产物目录 */
   includesArtifacts: boolean
-  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true；local 模式恒 false） */
+  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true） */
   includesQdrantSnapshots: boolean
   /** §29 内嵌快照清单（备份目录 qdrant-snapshots/ 下） */
   qdrantSnapshots?: { collection: string; file: string; sizeBytes: number }[]
@@ -750,7 +754,7 @@ export interface QdrantSnapshotItem {
 }
 
 export interface QdrantSnapshotListResult {
-  /** 当前向量库模式（qdrant = 可用；local 时接口直接 400） */
+  /** 当前向量库模式（qdrant = 可用；未配置时接口直接 400） */
   vectorMode: string
   collections: { collection: string; snapshots: QdrantSnapshotItem[] }[]
   /** 各集合快照总数 */

@@ -23,7 +23,7 @@ function parseChunkConfig(s: string): KbSummary['chunkConfig'] {
 export function toKbSummary(
   kb: KnowledgeBase,
   counts: { docCount: number; chunkCount: number; pointCount: number },
-  vectorMode: 'local' | 'qdrant'
+  vectorMode: 'qdrant' | 'unconfigured'
 ): KbSummary {
   return {
     id: kb.id,
@@ -34,6 +34,7 @@ export function toKbSummary(
     dim: kb.dim,
     chunkConfig: parseChunkConfig(kb.chunkConfig),
     vectorMode,
+    sparseScheme: kb.sparseScheme === 'native' ? 'native' : 'none',
     rerankEnabled: kb.rerankEnabled,
     docCount: counts.docCount,
     chunkCount: counts.chunkCount,

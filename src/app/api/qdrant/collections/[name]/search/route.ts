@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { qdrantFetch, getSettings, callEmbed, callRerank } from '@/lib/qdrant'
-import { getVectorStore, type LocalVectorStore } from '@/lib/rag/vectorstore'
-import { embedQuery } from '@/lib/rag/embed'
 import { rerankDocs } from '@/lib/rag/rerank'
 
 export const dynamic = 'force-dynamic'
@@ -101,116 +99,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ name: stri
     return NextResponse.json({ error: '请输入查询文本' }, { status: 400 })
 
   try {
-    const store = await getVectorStore()
-
     // =====================================================================
-    // local 模式：内置向量引擎 + embed.ts / rerank.ts 双模式适配
-    // =====================================================================
-    if (store.mode === 'local') {
-      const local = store as LocalVectorStore
-      let results: { id: any; score: number; payload: any; vector?: any }[] = []
-      let queryVector: number[] | null = null
-      let querySparse: { indices: number[]; values: number[] } | null = null
-      let reranked = false
-      let embedDim: number | undefined
-      let embedProvider = 'mock-deterministic'
-
-      if (mode === 'recommend') {
-        if (body.recommend_point_id === undefined || body.recommend_point_id === null) {
-          return NextResponse.json({ error: 'recommend 模式需要 recommend_point_id' }, { status: 400 })
-        }
-        const pts = await local.getPoints(name, [String(body.recommend_point_id)], { withVector: true })
-        const ref = pts[0]?.vector?.dense
-        if (!ref) return NextResponse.json({ error: '参考点不存在或无 dense 向量' }, { status: 404 })
-        queryVector = ref
-        embedDim = ref.length
-        results = await local.queryDense(name, ref, { limit, filter: filter ?? undefined })
-      } else {
-        // mock/real 自动路由（OpenAI 兼容 / 确定性哈希特征）
-        const embedded = await embedQuery(body.query!)
-        queryVector = embedded.dense
-        querySparse = embedded.sparse
-        embedDim = embedded.dim
-        embedProvider = embedded.provider
-        if (mode === 'dense') {
-          results = await local.queryDense(name, embedded.dense, { limit, filter: filter ?? undefined })
-        } else if (mode === 'sparse') {
-          results = await local.querySparse(name, embedded.sparse, { limit, filter: filter ?? undefined })
-        } else if (mode === 'hybrid') {
-          results = await local.queryHybrid(name, {
-            dense: embedded.dense,
-            sparse: embedded.sparse,
-            limit,
-            prefetchLimit: Math.max(50, limit),
-            filter: filter ?? undefined,
-            fusion: fusion === 'dists' ? 'dbsf' : 'rrf',
-          })
-        } else {
-          return NextResponse.json({ error: `不支持的 mode: ${mode}` }, { status: 400 })
-        }
-        // 分数阈值
-        if (scoreThreshold > 0) {
-          results = results.filter((r) => r.score >= scoreThreshold)
-        }
-      }
-
-      // 可选重排（rerank.ts：real/mock）
-      if (rerank && results.length > 1) {
-        try {
-          const docs = results.map((r) => payloadToText(r.payload))
-          const ranked = await rerankDocs(
-            body.query ?? '',
-            docs,
-            Math.min(body.rerank_top_n ?? limit, results.length)
-          )
-          results = ranked
-            .map((r) => ({
-              id: results[r.index]?.id,
-              score: r.score,
-              payload: results[r.index]?.payload,
-              original_score: results[r.index]?.score,
-            }))
-            .filter((r) => r.id !== undefined)
-          reranked = true
-        } catch (e: any) {
-          console.warn('rerank failed:', e?.message)
-        }
-      }
-
-      const took_ms = Date.now() - started
-      const results_preview = results.map((r) => ({
-        id: r.id,
-        score: r.score,
-        payload_summary: payloadToText(r.payload).slice(0, 200),
-        file: r.payload?.source || r.payload?.file || r.payload?.doc_name || r.payload?.document_id || r.payload?.path || null,
-      }))
-
-      if (body.save_history !== false) {
-        await logCall({
-          collection: name,
-          query: body.query ?? '',
-          mode, topK: limit, scoreThreshold, reranked,
-          took_ms, result_count: results.length,
-          params: { mode: 'local-engine', filter, fusion, rerank, embed_provider: embedProvider },
-          results_preview, embed_dim: embedDim,
-        })
-      }
-
-      return NextResponse.json({
-        results: withPayload
-          ? results
-          : results.map((r) => ({ id: r.id, score: r.score })),
-        query_vector: queryVector,
-        query_sparse: querySparse,
-        mode, reranked, took_ms,
-        count: results.length,
-        embed_dim: embedDim,
-        embed_provider: embedProvider,
-      })
-    }
-
-    // =====================================================================
-    // qdrant 模式：保持基座原有行为（真实 Qdrant REST）
+    // 真实 Qdrant（基座原有行为；v1.6：本地向量引擎已移除，未配置/不可达直接报错）
     // =====================================================================
     const settings = await getSettings()
     if (!settings) return NextResponse.json({ error: '请先配置 Qdrant' }, { status: 400 })

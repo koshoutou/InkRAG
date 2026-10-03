@@ -151,6 +151,7 @@ export function DocTypeBadge({ type, className }: { type: string; className?: st
   )
 }
 
+/** 向量模式徽标（v1.6 两态：qdrant | unconfigured；本地引擎已移除） */
 export function VectorModeBadge({ mode, className }: { mode: VectorMode | null | undefined; className?: string }) {
   if (!mode) return null
   return mode === 'qdrant' ? (
@@ -159,7 +160,7 @@ export function VectorModeBadge({ mode, className }: { mode: VectorMode | null |
     </Badge>
   ) : (
     <Badge variant="outline" className={cn('border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300', className)}>
-      本地引擎
+      未配置 Qdrant
     </Badge>
   )
 }

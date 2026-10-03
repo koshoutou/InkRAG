@@ -69,7 +69,7 @@ export function WorkbenchView() {
         if (cancelled) return
         store.setCollections(data.collections)
         store.setCollectionsError(null)
-        store.setConnection('ok', vectorMode === 'qdrant' ? `Qdrant 已连接 · ${data.total} 个集合` : `本地向量引擎（演示模式）· ${data.total} 个内置集合`)
+        store.setConnection('ok', `Qdrant 已连接 · ${data.total} 个集合`)
       } catch (e) {
         if (cancelled) return
         store.setCollectionsError((e as Error).message)
@@ -92,11 +92,11 @@ export function WorkbenchView() {
             <Database className="h-5 w-5 text-primary" />
             向量库浏览
             <Badge variant="outline" className={cn('text-[10px]', vectorMode === 'qdrant' ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300' : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300')}>
-              {vectorMode === 'qdrant' ? 'Qdrant 模式' : '本地引擎模式'}
+              {vectorMode === 'qdrant' ? 'Qdrant 模式' : '未配置 Qdrant'}
             </Badge>
           </h2>
           <p className="text-xs text-muted-foreground">
-            浏览平台的向量集合。Qdrant 模式显示真实 Qdrant 全部集合；本地引擎模式显示平台内置集合（演示）。
+            浏览平台的向量集合（Qdrant）。v1.6 起向量数据统一写入 Qdrant，未配置或不可达时无法浏览/入库（不降级本地存储）。
           </p>
         </div>
         <Button variant="outline" size="sm" className="h-7 gap-1 text-xs" disabled={loading} onClick={() => setRefreshFlag((f) => f + 1)}>

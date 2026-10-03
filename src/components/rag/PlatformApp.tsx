@@ -66,8 +66,9 @@ function Inner() {
         const r = await ragApi.getHealth()
         if (cancelled) return
         const mode = r.health.vectorStore?.mode
-        setVectorMode(mode === 'qdrant' ? 'qdrant' : 'local')
-        setConnection('ok', mode === 'qdrant' ? 'Qdrant 已连接' : '本地向量引擎（演示模式）')
+        // v1.6：两态 qdrant | unconfigured（本地引擎已移除；未配置时提示引导配置）
+        setVectorMode(mode === 'qdrant' ? 'qdrant' : 'unconfigured')
+        setConnection('ok', mode === 'qdrant' ? 'Qdrant 已连接' : '未配置 Qdrant（请到「设置 → Qdrant」配置）')
       } catch (e) {
         if (!cancelled) setConnection('fail', `健康检查失败：${(e as Error).message}`)
       }

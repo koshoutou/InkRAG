@@ -3,9 +3,15 @@
 // RAG 平台设置弹窗（独立于基座 SettingsDialog）
 // 分组：Qdrant 连接 / Embedding / Rerank / MinerU / 平台降级开关
 // 每个「测试」调 POST /api/qdrant/test 相应 kind；保存 PUT /api/qdrant/settings 后刷新平台 store
+//
+// v1.6：
+// - 本地向量引擎开关已删除（未配置/不可达 Qdrant 时向量读写硬失败，无本地降级）
+// - Mock 嵌入改为醒目警告样式（离线调试专用，向量无语义，生产勿用）
+// - 密钥掩码适配：GET 返回 `***尾4位` 时清空输入框并把掩码放到 placeholder，留空提交保持原值
 
 import { useEffect, useState, type Dispatch, type SetStateAction } from 'react'
 import {
+  AlertTriangle,
   CheckCircle2,
   Cpu,
   Eye,
@@ -62,19 +68,22 @@ const DEFAULT_FORM: RagSettings = {
   mineruApiKey: '',
   mineruTier: 'standard',
   mineruOcrMode: 'auto',
-  useLocalVectorStore: false,
   useFallbackParser: true,
-  useMockEmbedding: true,
+  useMockEmbedding: false,
   useMockRerank: true,
   updatedAt: '',
 }
 
+/** 普通平台开关（Mock 嵌入单独渲染警告样式） */
 const SWITCHES: { key: keyof RagSettings; label: string; desc: string }[] = [
-  { key: 'useLocalVectorStore', label: '本地向量引擎', desc: '未配置 Qdrant 或不可达时，是否启用内置 SQLite 向量引擎（演示模式）' },
   { key: 'useFallbackParser', label: '降级解析器', desc: '未配置 MinerU 时，是否启用内置解析器（md/txt/html 直转；pdf 提取文本+坐标）' },
-  { key: 'useMockEmbedding', label: 'Mock 嵌入', desc: '未配置 Embedding 服务时，是否启用确定性哈希特征向量（含词法 sparse）' },
   { key: 'useMockRerank', label: 'Mock 重排', desc: '未配置 Rerank 服务时，是否启用内置 BM25 词法重排' },
 ]
+
+/** 密钥字段掩码适配：GET 返回 `***尾4位` 时记录掩码并清空输入框（留空提交 = 保持原值） */
+const SECRET_FIELDS = ['apiKey', 'embedApiKey', 'rerankApiKey', 'mineruApiKey'] as const
+type SecretField = (typeof SECRET_FIELDS)[number]
+type SecretMasks = Partial<Record<SecretField, string>>
 
 // —— 模块级子组件（勿放回 RagSettingsDialog 函数体内：内部定义会使组件身份随 setForm 重渲染而改变，
 // React 卸载重挂整个子树导致 SecretInput 内 <Input> 每输入一个字符就失焦）——
@@ -175,6 +184,7 @@ export function RagSettingsDialog() {
 
   const [form, setForm] = useState<RagSettings>(DEFAULT_FORM)
   const [loaded, setLoaded] = useState(false)
+  const [secretMasks, setSecretMasks] = useState<SecretMasks>({})
   const [showKeys, setShowKeys] = useState<Record<string, boolean>>({})
   const [testing, setTesting] = useState<TestKind | null>(null)
   const [testResults, setTestResults] = useState<Partial<Record<TestKind, TestResult>>>({})
@@ -189,10 +199,20 @@ export function RagSettingsDialog() {
     ragApi
       .getSettings()
       .then((s) => {
-        if (!cancelled) {
-          setForm({ ...DEFAULT_FORM, ...s })
-          setLoaded(true)
+        if (cancelled) return
+        // 掩码适配：值以 *** 开头 = 后端已保存但仅回显掩码 → 清空输入框，掩码放 placeholder
+        const merged = { ...DEFAULT_FORM, ...s }
+        const masks: SecretMasks = {}
+        for (const k of SECRET_FIELDS) {
+          const v = merged[k]
+          if (typeof v === 'string' && v.startsWith('***')) {
+            masks[k] = v
+            merged[k] = ''
+          }
         }
+        setSecretMasks(masks)
+        setForm(merged)
+        setLoaded(true)
       })
       .catch((e) => {
         if (!cancelled) toast.error('读取设置失败：' + (e as Error).message)
@@ -261,6 +281,7 @@ export function RagSettingsDialog() {
   const onSave = async () => {
     setSaving(true)
     try {
+      // 密钥掩码约定：空值或 *** 开头的值照常提交（后端识别为「保持已存值不变」）
       const r = await ragApi.saveSettings(form)
       setSettingsStore(r.settings)
       toast.success('设置已保存，连接状态已刷新')
@@ -281,7 +302,7 @@ export function RagSettingsDialog() {
             平台设置
           </DialogTitle>
           <DialogDescription className="text-xs">
-            Qdrant / Embedding / Rerank / MinerU 连接配置与平台降级开关。未配置对应服务时可启用内置降级实现（演示模式）。所有配置存储在本地 SQLite。
+            Qdrant / Embedding / Rerank / MinerU 连接配置与平台开关。向量数据统一写入 Qdrant（未配置或不可达时入库/检索将直接失败）；未配置 MinerU 时可启用内置降级解析器。所有配置存储在本地 SQLite。
           </DialogDescription>
         </DialogHeader>
 
@@ -303,12 +324,12 @@ export function RagSettingsDialog() {
               <div>
                 <Label htmlFor="rag-url" className="text-xs text-muted-foreground">Qdrant 服务地址</Label>
                 <Input id="rag-url" value={form.url} onChange={(e) => update('url', e.target.value)} placeholder="https://your-qdrant.example.com 或 http://localhost:6333" className="mt-1.5 h-9 text-sm" />
-                <p className="mt-1.5 text-[11px] text-muted-foreground">留空或不可达时，平台按开关回退到内置本地向量引擎（SQLite）。</p>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">向量数据统一写入 Qdrant；未配置或不可达时入库/检索将直接失败（不降级本地存储，避免索引断裂）。</p>
               </div>
               <div>
                 <Label htmlFor="rag-key" className="text-xs text-muted-foreground">API Key（可空）</Label>
                 <div className="mt-1.5">
-                  <SecretInput id="rag-key" value={form.apiKey} onChange={(v) => update('apiKey', v)} placeholder="留空表示无鉴权" k="qdrant" showKeys={showKeys} setShowKeys={setShowKeys} />
+                  <SecretInput id="rag-key" value={form.apiKey} onChange={(v) => update('apiKey', v)} placeholder={secretMasks.apiKey ? `已保存 ${secretMasks.apiKey}，留空保持不变` : '留空表示无鉴权'} k="qdrant" showKeys={showKeys} setShowKeys={setShowKeys} />
                 </div>
               </div>
               <TestButton kind="qdrant" label="测试连接" disabled={!form.url} testing={testing} testResults={testResults} onTest={onTest} />
@@ -316,7 +337,7 @@ export function RagSettingsDialog() {
 
             <TabsContent value="embed" className="space-y-4 pb-2 pt-4">
               <div className="rounded-md border bg-muted/30 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
-                OpenAI 兼容协议：<span className="font-mono">{'{apiBase}/embeddings'}</span>，body <span className="font-mono">{'{ model, input }'}</span>。未配置且 Mock 开关开启时，使用确定性哈希特征向量。
+                OpenAI 兼容协议：<span className="font-mono">{'{apiBase}/embeddings'}</span>，body <span className="font-mono">{'{ model, input }'}</span>。未配置时嵌入直接失败（建库/入库前需先完成配置）；建库时会实测维度并锁定。
               </div>
               <div>
                 <Label htmlFor="rag-embed-base" className="text-xs text-muted-foreground">API Base</Label>
@@ -329,7 +350,7 @@ export function RagSettingsDialog() {
               <div>
                 <Label htmlFor="rag-embed-key" className="text-xs text-muted-foreground">API Key（可空）</Label>
                 <div className="mt-1.5">
-                  <SecretInput id="rag-embed-key" value={form.embedApiKey} onChange={(v) => update('embedApiKey', v)} placeholder="sk-…" k="embed" showKeys={showKeys} setShowKeys={setShowKeys} />
+                  <SecretInput id="rag-embed-key" value={form.embedApiKey} onChange={(v) => update('embedApiKey', v)} placeholder={secretMasks.embedApiKey ? `已保存 ${secretMasks.embedApiKey}，留空保持不变` : 'sk-…'} k="embed" showKeys={showKeys} setShowKeys={setShowKeys} />
                 </div>
               </div>
               <TestButton kind="embed" label="测试 Embedding" disabled={!form.embedApiBase || !form.embedModel} testing={testing} testResults={testResults} onTest={onTest} />
@@ -350,7 +371,7 @@ export function RagSettingsDialog() {
               <div>
                 <Label htmlFor="rag-rerank-key" className="text-xs text-muted-foreground">API Key（可空）</Label>
                 <div className="mt-1.5">
-                  <SecretInput id="rag-rerank-key" value={form.rerankApiKey} onChange={(v) => update('rerankApiKey', v)} placeholder="（无鉴权留空）" k="rerank" showKeys={showKeys} setShowKeys={setShowKeys} />
+                  <SecretInput id="rag-rerank-key" value={form.rerankApiKey} onChange={(v) => update('rerankApiKey', v)} placeholder={secretMasks.rerankApiKey ? `已保存 ${secretMasks.rerankApiKey}，留空保持不变` : '（无鉴权留空）'} k="rerank" showKeys={showKeys} setShowKeys={setShowKeys} />
                 </div>
               </div>
               <TestButton kind="rerank" label="测试 Rerank" disabled={!form.rerankApiBase || !form.rerankModel} testing={testing} testResults={testResults} onTest={onTest} />
@@ -383,7 +404,7 @@ export function RagSettingsDialog() {
                   <div>
                     <Label htmlFor="rag-mineru-key" className="text-xs text-muted-foreground">API Key（可空，--api-key 启动参数未设则无鉴权）</Label>
                     <div className="mt-1.5">
-                      <SecretInput id="rag-mineru-key" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder="（无鉴权留空）" k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
+                      <SecretInput id="rag-mineru-key" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder={secretMasks.mineruApiKey ? `已保存 ${secretMasks.mineruApiKey}，留空保持不变` : '（无鉴权留空）'} k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
                     </div>
                   </div>
                   <div className="grid grid-cols-2 gap-3">
@@ -422,7 +443,7 @@ export function RagSettingsDialog() {
                   <div>
                     <Label htmlFor="rag-mineru-token" className="text-xs text-muted-foreground">API Token（必填）</Label>
                     <div className="mt-1.5">
-                      <SecretInput id="rag-mineru-token" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder="在 mineru.net「API 管理」页面创建" k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
+                      <SecretInput id="rag-mineru-token" value={form.mineruApiKey} onChange={(v) => update('mineruApiKey', v)} placeholder={secretMasks.mineruApiKey ? `已保存 ${secretMasks.mineruApiKey}，留空保持不变` : '在 mineru.net「API 管理」页面创建'} k="mineru" showKeys={showKeys} setShowKeys={setShowKeys} />
                     </div>
                     <p className="mt-1.5 text-[11px] text-muted-foreground">官方云·精准 API v4（Bearer Token）：支持 pdf/图片/doc/docx/ppt/pptx/xls/xlsx，单文件 ≤ 200MB / 200 页，每账号每天 1000 页最高优先级额度。</p>
                   </div>
@@ -448,6 +469,33 @@ export function RagSettingsDialog() {
               <p className="text-[11px] leading-relaxed text-muted-foreground">
                 以下开关控制「未配置对应服务时」是否启用内置降级实现。关闭后对应能力将直接报错（便于生产环境暴露配置问题）。
               </p>
+
+              {/* Mock 嵌入：离线调试专用，醒目警告样式（红/橙） */}
+              <div
+                className={cn(
+                  'flex items-start justify-between gap-4 rounded-lg border px-3 py-2.5',
+                  form.useMockEmbedding
+                    ? 'border-rose-500/50 bg-rose-500/10'
+                    : 'border-border/60 bg-muted/20'
+                )}
+              >
+                <div className="min-w-0">
+                  <div className={cn('flex items-center gap-1.5 text-xs font-medium', form.useMockEmbedding && 'text-rose-600 dark:text-rose-400')}>
+                    <AlertTriangle className={cn('h-3.5 w-3.5', form.useMockEmbedding ? 'text-rose-500' : 'text-muted-foreground')} />
+                    Mock 嵌入（离线调试专用）
+                  </div>
+                  <p className={cn('mt-0.5 text-[11px] leading-relaxed', form.useMockEmbedding ? 'text-rose-600/90 dark:text-rose-400/90' : 'text-muted-foreground')}>
+                    启用后用确定性哈希特征向量代替真实 Embedding——<span className="font-semibold">向量无语义，生产环境勿用</span>。仅用于无外网环境的链路调试；未配置真实 Embedding 时建库会被拒绝。
+                  </p>
+                </div>
+                <Switch
+                  checked={!!form.useMockEmbedding}
+                  onCheckedChange={(v) => update('useMockEmbedding', v)}
+                  aria-label="Mock 嵌入（离线调试专用）"
+                  className={cn(form.useMockEmbedding && 'data-[state=checked]:bg-rose-600')}
+                />
+              </div>
+
               {SWITCHES.map((s) => (
                 <div key={s.key} className="flex items-start justify-between gap-4 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
                   <div>

@@ -32,11 +32,15 @@ export interface ChunkConfig {
   protects: string[]
 }
 
-/** 双模式判定结果 */
-export type VectorMode = 'local' | 'qdrant'
+/** 双模式判定结果（v1.6：本地向量引擎已移除，未配置 Qdrant 时建库/写入硬失败） */
+export type VectorMode = 'qdrant' | 'unconfigured'
 export type ParseMode = 'mineru' | 'fallback' | 'none'
 export type EmbedMode = 'real' | 'mock' | 'none'
 export type RerankMode = 'real' | 'mock' | 'none'
+
+/** 稀疏向量方案（建库时探测锁定，防止两种 sparse 空间静默混用）：
+ *  none（provider 无稀疏输出，检索强制 dense）| native（provider 原生稀疏，写入断言非空） */
+export type SparseScheme = 'none' | 'native'
 
 // ---------------------------------------------------------------------------
 // Layout（middle.json 契约 §10 产物布局）
@@ -119,6 +123,8 @@ export interface KbSummary {
   dim: number
   chunkConfig: ChunkConfig
   vectorMode: VectorMode
+  /** 稀疏向量方案（建库时探测锁定）：none | native */
+  sparseScheme: SparseScheme
   rerankEnabled: boolean
   docCount: number
   chunkCount: number
@@ -270,6 +276,8 @@ export interface SearchResponse {
     fusion: string
     rrfK?: number
     mode: string
+    /** 建库时锁定的稀疏方案（none 时强制 dense 检索） */
+    sparseScheme?: string
   }
 }
 

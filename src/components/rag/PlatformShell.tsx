@@ -80,7 +80,7 @@ function ConnDot() {
     conn === 'ok'
       ? vectorMode === 'qdrant'
         ? 'Qdrant 已连接'
-        : '本地向量引擎（演示模式）'
+        : '未配置 Qdrant（请到设置中配置）'
       : conn === 'fail'
         ? msg || '连接失败'
         : conn === 'loading'
@@ -291,9 +291,9 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
             <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300">
               Qdrant 模式
             </Badge>
-          ) : vectorMode === 'local' ? (
+          ) : vectorMode === 'unconfigured' ? (
             <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300">
-              本地引擎（演示）
+              未配置 Qdrant
             </Badge>
           ) : (
             <span>向量引擎未检测</span>

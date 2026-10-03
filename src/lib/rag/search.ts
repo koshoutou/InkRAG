@@ -62,7 +62,6 @@ async function readChunkFullText(
 export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
   const startedAll = Date.now()
   const topK = Math.min(Math.max(opts.topK ?? DEFAULT_TOP_K, 1), 50)
-  const mode = opts.mode ?? 'hybrid'
   const prefetchLimit = Math.min(
     Math.max(opts.debug?.prefetchLimit ?? opts.prefetchLimit ?? DEFAULT_PREFETCH, topK),
     200
@@ -77,6 +76,12 @@ export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
   if (!kb) throw new Error('知识库不存在')
   const store = await getVectorStore()
   const dim = kb.dim || 1024
+  // v1.6：sparseScheme 建库时锁定。none（provider 无稀疏输出）→ 无论请求何种 mode 都强制
+  // dense 检索（空稀疏召回无语义，且避免误触发 sparse 查询报错）；native → 按请求 mode 执行
+  const sparseScheme: 'none' | 'native' = kb.sparseScheme === 'native' ? 'native' : 'none'
+  const requestedMode = opts.mode ?? 'hybrid'
+  const mode: 'hybrid' | 'dense' | 'sparse' =
+    sparseScheme === 'none' ? 'dense' : requestedMode
 
   // ---- Stage A · Embedding ----
   const tEmbed = Date.now()
@@ -95,6 +100,13 @@ export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
   })
   const needDense = mode === 'hybrid' || mode === 'dense'
   const needSparse = mode === 'hybrid' || mode === 'sparse'
+  if (needSparse && embedded.sparse.indices.length === 0) {
+    // 防御：native 库理论上查询嵌入必有稀疏输出；空则说明嵌入方案与建库锁定不一致
+    throw new StoreError(
+      `知识库 sparseScheme=native 但查询嵌入无稀疏输出（嵌入配置可能已变更，与建库时锁定的方案不一致）`,
+      { retryable: false }
+    )
+  }
   const [denseRanked, sparseRanked] = await Promise.all([
     needDense
       ? store.queryDense(kb.collection, embedded.dense, { limit: prefetchLimit, filter: vfilter })
@@ -103,11 +115,11 @@ export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
       ? store.querySparse(kb.collection, embedded.sparse, { limit: prefetchLimit, filter: vfilter })
       : Promise.resolve([] as QueryHit[]),
   ]).catch((e: unknown) => {
-    // 双模式体验兜底：collection 在当前向量库不存在（典型：local→qdrant 切换后检索旧 KB）
-    // 转为友好错误而非裸 500，前端可引导「重新解析/切分入库」
+    // 集合在当前 Qdrant 不存在（典型：换实例后未重新入库）→ 转为友好错误而非裸 500，
+    // 前端可引导「重新解析/切分入库」
     if (e instanceof StoreError && e.status === 404) {
       throw new Error(
-        `向量集合 ${kb.collection} 在当前向量库中不存在（可能是切换向量库模式后未重新入库），请在文档中心对该知识库文档执行重解析或重切分`
+        `向量集合 ${kb.collection} 在当前 Qdrant 中不存在（可能更换了 Qdrant 实例后未重新入库），请在文档中心对该知识库文档执行重解析或重切分`
       )
     }
     throw e
@@ -284,6 +296,7 @@ export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
       fusion: mode === 'hybrid' ? fusion : mode,
       rrfK: mode === 'hybrid' && fusion === 'rrf' ? rrfK : undefined,
       mode,
+      sparseScheme,
     },
   }
 

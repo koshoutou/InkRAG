@@ -254,9 +254,7 @@ export function OpsView() {
         {
           description: b.includesQdrantSnapshots
             ? `含 Qdrant 快照 ×${b.qdrantSnapshots?.length ?? 0}（${(b.qdrantSnapshots ?? []).map((s) => s.collection).join('、')}），下载 tar 包含两者`
-            : b.vectorMode === 'local'
-              ? 'local 模式：向量数据已随面板数据一并备份（VectorPoint 随库走）'
-              : '仅面板数据（未包含 Qdrant 快照）',
+            : '仅面板数据（未包含 Qdrant 快照；向量实体在 Qdrant，如需备份请勾选「含 Qdrant 快照」）',
         },
       )
       if (b.warnings && b.warnings.length > 0) {
@@ -1089,7 +1087,7 @@ export function OpsView() {
                             {b.vectorMode === 'qdrant' ? (
                               <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300" title="备份时平台处于 Qdrant 模式">qdrant</Badge>
                             ) : (
-                              <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="备份时平台处于 local 模式">local</Badge>
+                              <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="旧版本备份（当时为 local 模式，仅展示）">local</Badge>
                             )}
                             {b.auto === true && (
                               <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 text-[10px] text-amber-600 dark:text-amber-300" title="定时任务自动创建（受保留轮转管理，手动备份不受影响）">

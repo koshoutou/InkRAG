@@ -4,8 +4,8 @@
  * 备份内容：SQLite 快照（VACUUM INTO 一致性在线备份）+ artifacts 产物目录（可选）+ manifest.json。
  * 备份存储：{DB_DIR}/backups/{backupId}/（db.sqlite / artifacts/ / manifest.json）。
  *
- * - local 向量引擎的向量数据在 VectorPoint 表中随库备份；
- * - qdrant 模式需另行 Qdrant snapshot（UI 提示），此处仅备份元数据与 DB；
+ * - 向量数据存于 Qdrant（v1.6 起本地向量引擎已移除）：qdrant 模式需另行 Qdrant snapshot
+ *   （§29 支持备份时内嵌快照文件），此处仅备份面板元数据与 DB；
  * - 恢复语义：独立 PrismaClient 读备份库 → 主库事务内全表 deleteMany + createMany
  *   （先删子表后删父表，插入反序）→ artifacts 目录整体替换；
  * - 定时任务（契约 §15）：进程内调度器 globalThis 单例，复用 createBackup，
@@ -55,13 +55,13 @@ export interface BackupItem {
   version: string
   counts: { kbs: number; docs: number; chunks: number; points: number; keys: number; jobs: number }
   sizes: { db: number; artifacts: number; total: number }
-  /** local 向量引擎数据随库走；qdrant 模式需单独 snapshot */
+  /** 备份时的向量存储模式（v1.6 起仅 qdrant；旧备份可能为 local，仅展示用） */
   vectorMode: string
   settingsSummary: Record<string, unknown>
   includesArtifacts: boolean
   /** 是否定时任务自动创建（手动备份缺省/false；轮转清理只删 auto===true，契约 §15） */
   auto?: boolean
-  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true；local 模式恒 false） */
+  /** §29 是否内嵌 Qdrant 快照文件（qdrant 模式创建且未显式关闭时 true） */
   includesQdrantSnapshots: boolean
   /** §29 内嵌快照清单（备份目录 qdrant-snapshots/ 下） */
   qdrantSnapshots?: BackupQdrantSnapshot[]
@@ -246,14 +246,16 @@ export async function createBackup(
     }
 
     // 3) manifest：DB 计数 + 文件体积 + 模式 + 设置摘要（非敏感字段）
-    const [kbs, docs, chunks, points, keys, jobs] = await Promise.all([
+    // points 为库行快照 pointCount 之和（向量实体在 Qdrant，随快照文件另存）
+    const [kbs, docs, chunks, pointAgg, keys, jobs] = await Promise.all([
       db.knowledgeBase.count(),
       db.document.count(),
       db.chunk.count(),
-      db.vectorPoint.count(),
+      db.knowledgeBase.aggregate({ _sum: { pointCount: true } }),
       db.apiKey.count(),
       db.pipelineJob.count(),
     ])
+    const points = pointAgg._sum.pointCount ?? 0
     const dbSize = (await fs.stat(dbPath)).size
     const artifactsSize = artifactsCopied ? await dirSize(path.join(dir, 'artifacts')) : 0
     const qdrantBytes = qdrantSnapshots.reduce((a, s) => a + (s.sizeBytes || 0), 0)
@@ -275,7 +277,6 @@ export async function createBackup(
         mineruApiUrl: settings.row.mineruApiUrl,
         mineruTier: settings.row.mineruTier,
         mineruOcrMode: settings.row.mineruOcrMode,
-        useLocalVectorStore: settings.row.useLocalVectorStore,
         useFallbackParser: settings.row.useFallbackParser,
         useMockEmbedding: settings.row.useMockEmbedding,
         useMockRerank: settings.row.useMockRerank,
@@ -334,7 +335,7 @@ export async function listBackups(): Promise<BackupItem[]> {
           artifacts: m.sizes.artifacts ?? 0,
           total: m.sizes.total ?? 0,
         },
-        vectorMode: m.vectorMode ?? 'local',
+        vectorMode: m.vectorMode ?? 'qdrant',
         settingsSummary: m.settingsSummary ?? {},
         includesArtifacts: !!m.includesArtifacts,
         // 旧版 manifest 无 auto 字段 → 视为手动备份（false）
@@ -410,7 +411,8 @@ export async function restoreBackup(
 
   try {
     // 备份库读出全部表数据（DateTime 字段保持 Date 对象，直接传给 createMany，不做 JSON 化）
-    const [callLogs, testCases, chunks, jobs, docs, kbs, keys, points, settingsRows] = await Promise.all([
+    // （v1.6：VectorPoint 表已随本地向量引擎移除；旧备份含该表时忽略，向量实体经 Qdrant 快照恢复）
+    const [callLogs, testCases, chunks, jobs, docs, kbs, keys, settingsRows] = await Promise.all([
       backupClient.qdrantCallLog.findMany(),
       backupClient.retrievalTestCase.findMany(),
       backupClient.chunk.findMany(),
@@ -418,7 +420,6 @@ export async function restoreBackup(
       backupClient.document.findMany(),
       backupClient.knowledgeBase.findMany(),
       backupClient.apiKey.findMany(),
-      backupClient.vectorPoint.findMany(),
       backupClient.qdrantSetting.findMany(),
     ])
 
@@ -432,13 +433,11 @@ export async function restoreBackup(
         await tx.document.deleteMany({})
         await tx.knowledgeBase.deleteMany({})
         await tx.apiKey.deleteMany({})
-        await tx.vectorPoint.deleteMany({})
         await tx.qdrantSetting.deleteMany({})
 
-        // 插入反序：QdrantSetting → VectorPoint → ApiKey → KnowledgeBase →
+        // 插入反序：QdrantSetting → ApiKey → KnowledgeBase →
         // Document → PipelineJob → Chunk → RetrievalTestCase → QdrantCallLog
         if (settingsRows.length) await tx.qdrantSetting.createMany({ data: settingsRows })
-        if (points.length) await tx.vectorPoint.createMany({ data: points })
         if (keys.length) await tx.apiKey.createMany({ data: keys })
         if (kbs.length) await tx.knowledgeBase.createMany({ data: kbs })
         if (docs.length) await tx.document.createMany({ data: docs })
@@ -455,7 +454,7 @@ export async function restoreBackup(
       kbs: kbs.length,
       docs: docs.length,
       chunks: chunks.length,
-      points: points.length,
+      points: kbs.reduce((a, k) => a + (k.pointCount ?? 0), 0),
       keys: keys.length,
       jobs: jobs.length,
       settings: settingsRows.length > 0,
@@ -465,10 +464,6 @@ export async function restoreBackup(
   } finally {
     await backupClient.$disconnect().catch(() => {})
   }
-
-  // local 向量引擎内存缓存失效（数据面 VectorPoint 已整体替换）
-  const g = globalThis as unknown as { __ragLocalVectorCache?: Map<string, unknown[]> }
-  g.__ragLocalVectorCache?.clear()
 
   // artifacts 恢复：备份含产物目录时整体替换
   const backupArtifacts = path.join(dir, 'artifacts')

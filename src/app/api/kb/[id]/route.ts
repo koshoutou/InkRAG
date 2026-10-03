@@ -88,14 +88,14 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     const docs = await db.document.findMany({ where: { kbId: id }, select: { id: true } })
     const chunkCount = await db.chunk.count({ where: { kbId: id } })
 
-    // 1) 向量集合整体删除（qdrant deleteCollection / local 清表）
+    // 1) 向量集合整体删除（Qdrant deleteCollection；不可达时跳过并告警，行数据仍级联删除）
     let pointsDeleted = 0
     try {
       const store = await getVectorStore()
       pointsDeleted = await store.count(kb.collection).catch(() => 0)
       await store.deleteCollection(kb.collection)
     } catch (e: any) {
-      console.warn('[kb] 删除向量集合失败（可能不存在）:', e?.message ?? e)
+      console.warn('[kb] 删除向量集合失败（可能不存在/不可达）:', e?.message ?? e)
     }
     // 2) 行删除（Chunk/Document 级联）
     await db.chunk.deleteMany({ where: { kbId: id } })

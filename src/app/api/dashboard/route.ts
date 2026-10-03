@@ -10,13 +10,15 @@ export const runtime = 'nodejs'
 /** GET /api/dashboard —— 仪表盘聚合（契约 §7） */
 export async function GET() {
   try {
-    const [kbs, docs, chunks, enabledChunks, points] = await Promise.all([
+    const [kbs, docs, chunks, enabledChunks, pointAgg] = await Promise.all([
       db.knowledgeBase.count(),
       db.document.count(),
       db.chunk.count({ where: { isParent: false } }),
       db.chunk.count({ where: { isParent: false, enabled: true } }),
-      db.vectorPoint.count(),
+      // v1.6：向量点存于 Qdrant，面板计数用库行快照 pointCount（pipeline 回写）
+      db.knowledgeBase.aggregate({ _sum: { pointCount: true } }),
     ])
+    const points = pointAgg._sum.pointCount ?? 0
 
     const [docsReady, docsFailed, docsProcessing, statusFlowRows] = await Promise.all([
       db.document.count({ where: { status: 'ready' } }),
