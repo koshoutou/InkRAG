@@ -20,6 +20,29 @@ type Ctx = { params: Promise<{ id: string }> }
 /** 上传接受的全量类型（权威清单见 lib/rag/parsers/formats.ts） */
 const SUPPORTED_EXTS: string[] = [...ALL_ACCEPTED_EXTS]
 
+/** 上传体积上限（Task 15-b / 审计 #2：防止磁盘被打满） */
+const MAX_FILE_BYTES = 200 * 1024 * 1024 // 单文件 200MB（与 MinerU 云服务一致）
+const MAX_REQUEST_BYTES = 500 * 1024 * 1024 // 单请求总上传量 500MB
+
+function fmtMB(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)}MB`
+}
+
+/** 遍历 formData 全部文件做体积校验（单文件 / 单请求双限额），超限返 413 */
+function checkUploadLimits(files: File[]): string | null {
+  let total = 0
+  for (const f of files) {
+    if (f.size > MAX_FILE_BYTES) {
+      return `文件「${f.name || 'untitled'}」体积 ${fmtMB(f.size)} 超过单文件上限 ${fmtMB(MAX_FILE_BYTES)}（200MB，与 MinerU 云服务一致）`
+    }
+    total += f.size
+  }
+  if (total > MAX_REQUEST_BYTES) {
+    return `单次请求总上传量 ${fmtMB(total)} 超过上限 ${fmtMB(MAX_REQUEST_BYTES)}`
+  }
+  return null
+}
+
 /** GET /api/kb/[id]/documents?status=&q=&limit=&offset= → { docs, total } */
 export async function GET(req: NextRequest, ctx: Ctx) {
   try {
@@ -67,6 +90,17 @@ export async function POST(req: NextRequest, ctx: Ctx) {
 
     const form = await req.formData().catch(() => null)
     if (!form) return NextResponse.json({ error: '请求必须是 multipart/form-data' }, { status: 400 })
+
+    // ---- 体积上限（Task 15-b）：遍历请求内全部文件，单文件 200MB / 单请求 500MB ----
+    const allFiles: File[] = []
+    for (const [, value] of form.entries()) {
+      if (value instanceof File && value.size > 0) allFiles.push(value)
+    }
+    const limitError = checkUploadLimits(allFiles)
+    if (limitError) {
+      return NextResponse.json({ error: limitError }, { status: 413 })
+    }
+
     const file = form.get('file')
     if (!(file instanceof File)) {
       return NextResponse.json({ error: '缺少 file 字段' }, { status: 400 })
@@ -115,6 +149,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         if (done) break
         if (value) {
           sizeBytes += value.byteLength
+          // 流式限额兑底（防御伪造 Content-Length / size 声明的请求）
+          if (sizeBytes > MAX_FILE_BYTES) {
+            await reader.cancel().catch(() => {})
+            return NextResponse.json(
+              { error: `文件「${filename}」实际体积超过单文件上限 ${fmtMB(MAX_FILE_BYTES)}（200MB），已中断上传` },
+              { status: 413 },
+            )
+          }
           hash.update(value)
           if (!ws.write(value)) await once(ws, 'drain')
         }

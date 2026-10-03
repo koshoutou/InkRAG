@@ -1,16 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { randomBytes } from 'node:crypto'
 import { db } from '@/lib/db'
+import { apiKeyColumns, apiKeyPreview } from '@/lib/rag/apikey'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-function keyPreview(key: string): string {
-  if (key.length <= 12) return key
-  return `${key.slice(0, 8)}…${key.slice(-4)}`
-}
-
-/** GET /api/apikeys → { keys }（不返回完整 key） */
+/** GET /api/apikeys → { keys }（不返回完整 key；掩码展示用 keyPrefix） */
 export async function GET() {
   try {
     const keys = await db.apiKey.findMany({ orderBy: { createdAt: 'desc' } })
@@ -23,7 +19,8 @@ export async function GET() {
         callCount: k.callCount,
         lastUsedAt: k.lastUsedAt ? k.lastUsedAt.toISOString() : null,
         createdAt: k.createdAt.toISOString(),
-        keyPreview: keyPreview(k.key),
+        keyPrefix: k.keyPrefix,
+        keyPreview: apiKeyPreview(k),
       })),
     })
   } catch (e: any) {
@@ -31,7 +28,7 @@ export async function GET() {
   }
 }
 
-/** POST /api/apikeys Body: { name, role? } → 201 { key }（完整 key 仅此一次返回） */
+/** POST /api/apikeys Body: { name, role? } → 201 { key }（完整 key 仅此一次返回，落库只存 sha256） */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}))
@@ -40,7 +37,7 @@ export async function POST(req: NextRequest) {
     const role = ['admin', 'operator', 'readonly'].includes(body.role) ? body.role : 'readonly'
 
     const key = `rag-${randomBytes(16).toString('hex')}`
-    const created = await db.apiKey.create({ data: { name, role, key } })
+    const created = await db.apiKey.create({ data: { name, role, ...apiKeyColumns(key) } })
     return NextResponse.json(
       {
         key: {
@@ -51,7 +48,8 @@ export async function POST(req: NextRequest) {
           callCount: created.callCount,
           lastUsedAt: null,
           createdAt: created.createdAt.toISOString(),
-          keyPreview: keyPreview(created.key),
+          keyPrefix: created.keyPrefix,
+          keyPreview: apiKeyPreview(created),
           key, // 完整 key 仅此一次返回
         },
       },

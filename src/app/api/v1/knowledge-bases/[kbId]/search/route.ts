@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { runSearch } from '@/lib/rag/search'
+import { verifyApiKey } from '@/lib/rag/apikey'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -22,7 +23,8 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!token) {
       return NextResponse.json({ error: '缺少 Authorization: Bearer <ApiKey>' }, { status: 401 })
     }
-    const apiKey = await db.apiKey.findUnique({ where: { key: token } })
+    // Task 15-b：keyHash 恒定时间比对 + 存量明文惰性迁移（详见 lib/rag/apikey.ts）
+    const apiKey = await verifyApiKey(token)
     if (!apiKey) return NextResponse.json({ error: '无效的 API Key' }, { status: 401 })
     if (!apiKey.enabled) return NextResponse.json({ error: 'API Key 已被禁用' }, { status: 403 })
 

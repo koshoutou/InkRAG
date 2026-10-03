@@ -155,7 +155,7 @@ export async function editChunkText(
   void emitToRoom('global', 'pipeline:activity', {
     at: new Date().toISOString(),
     level: 'info',
-    message: `chunk 编辑重入库 · ${doc.name} · seq=${chunk.seq} · ${oldTokens}→${updated.tokenCount} tok · ${tookMs}ms`,
+    message: `chunk 编辑重入库 · ${doc.filename} · seq=${chunk.seq} · ${oldTokens}→${updated.tokenCount} tok · ${tookMs}ms`,
   })
 
   return {
@@ -223,7 +223,7 @@ export async function revertChunkText(
   void emitToRoom('global', 'pipeline:activity', {
     at: new Date().toISOString(),
     level: 'info',
-    message: `chunk 还原重入库 · ${doc.name} · seq=${chunk.seq} · ${updated.tokenCount} tok · ${tookMs}ms`,
+    message: `chunk 还原重入库 · ${doc.filename} · seq=${chunk.seq} · ${updated.tokenCount} tok · ${tookMs}ms`,
   })
 
   return {

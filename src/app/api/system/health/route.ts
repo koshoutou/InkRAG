@@ -75,17 +75,34 @@ export async function GET() {
       }
     }
 
-    // ---- MinerU ----
+    // ---- MinerU（Task 15-b：按 provider 判定，直接读原始设置行，不依赖 getRagSettings 形状）----
+    // selfhost → url 非空且探测可达；cloud → Token 配置即「已配置·云服务」；cloud-agent → 恒「已配置·Agent 免 Token」
+    const settingRow = await db.qdrantSetting.findUnique({ where: { id: 'default' } })
+    const rawProvider = settingRow?.mineruProvider ?? 'selfhost'
+    const mineruProvider = (['selfhost', 'cloud', 'cloud-agent'].includes(rawProvider)
+      ? rawProvider
+      : 'selfhost') as 'selfhost' | 'cloud' | 'cloud-agent'
+    const mineruUrl = (settingRow?.mineruApiUrl ?? '').trim()
+    const mineruKey = (settingRow?.mineruApiKey ?? '').trim()
+
     let mineru: { mode: string; ok: boolean; message: string }
-    if (!settings.mineru.url) {
+    if (mineruProvider === 'cloud-agent') {
+      mineru = { mode: 'mineru', ok: true, message: '已配置 · MinerU 官方云（Agent 免 Token）' }
+    } else if (mineruProvider === 'cloud') {
+      mineru = mineruKey
+        ? { mode: 'mineru', ok: true, message: '已配置 · MinerU 官方云（Token 鉴权）' }
+        : {
+            mode: 'fallback',
+            ok: true,
+            message: 'MinerU 云服务缺少 API Token（未生效），当前使用内置降级解析器',
+          }
+    } else if (!mineruUrl) {
       mineru = { mode: 'fallback', ok: true, message: '未配置 MinerU，使用内置降级解析器（md/txt/html/pdf）' }
     } else {
       try {
-        const base = settings.mineru.url.replace(/\/+$/, '')
+        const base = mineruUrl.replace(/\/+$/, '')
         const res = await fetch(base + '/v1/health', {
-          headers: settings.mineru.apiKey
-            ? { Authorization: `Bearer ${settings.mineru.apiKey}` }
-            : {},
+          headers: mineruKey ? { Authorization: `Bearer ${mineruKey}` } : {},
           signal: AbortSignal.timeout(3_000),
         })
         mineru = res.ok

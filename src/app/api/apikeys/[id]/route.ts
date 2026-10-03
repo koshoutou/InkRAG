@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { apiKeyPreview } from '@/lib/rag/apikey'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 type Ctx = { params: Promise<{ id: string }> }
 
-/** PATCH /api/apikeys/[id] Body: { enabled } */
+/** PATCH /api/apikeys/[id] Body: { enabled, name?, role? } */
 export async function PATCH(req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params
@@ -29,10 +30,8 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
         callCount: updated.callCount,
         lastUsedAt: updated.lastUsedAt ? updated.lastUsedAt.toISOString() : null,
         createdAt: updated.createdAt.toISOString(),
-        keyPreview:
-          updated.key.length <= 12
-            ? updated.key
-            : `${updated.key.slice(0, 8)}…${updated.key.slice(-4)}`,
+        keyPrefix: updated.keyPrefix,
+        keyPreview: apiKeyPreview(updated),
       },
     })
   } catch (e: any) {

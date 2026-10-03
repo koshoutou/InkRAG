@@ -10,8 +10,33 @@ export const runtime = 'nodejs'
 type Ctx = { params: Promise<{ id: string }> }
 
 /**
+ * Content-Type 白名单（Task 15-b / 审计 #3，存储型 XSS 修复）：
+ * 服务端产物只有 pdf 与图片允许携带真实媒体类型（均为安全格式），
+ * 其余一律 application/octet-stream —— 不信任 DB 里的 mimeType（来自上传时的客户端声明）。
+ * 叠加 Content-Disposition: attachment + X-Content-Type-Options: nosniff，浏览器不会把产物当 HTML 渲染。
+ */
+const SAFE_SOURCE_CONTENT_TYPES: Record<string, string> = {
+  pdf: 'application/pdf',
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+  bmp: 'image/bmp',
+}
+
+function safeSourceContentType(ext: string): string {
+  return SAFE_SOURCE_CONTENT_TYPES[ext] ?? 'application/octet-stream'
+}
+
+/** RFC 5987 编码（中文文件名安全下载） */
+function contentDispositionAttachment(filename: string): string {
+  return `attachment; filename*=UTF-8''${encodeURIComponent(filename)}`
+}
+
+/**
  * GET /api/documents/[id]/file?kind=source|markdown|middle
- * → 原始字节流（source 按 mimeType；markdown → text/markdown；middle → application/json）
+ * → 原始字节流（一律 attachment 下载 + nosniff；source 按扩展名白名单定 Content-Type）
  */
 export async function GET(req: NextRequest, ctx: Ctx) {
   try {
@@ -33,7 +58,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     } else if (kind === 'source') {
       const ext = path.extname(doc.filename).toLowerCase().replace('.', '') || 'bin'
       filePath = sourcePath(doc.kbId, doc.id, ext)
-      contentType = doc.mimeType || 'application/octet-stream'
+      contentType = safeSourceContentType(ext)
     } else {
       return NextResponse.json({ error: `无效 kind: ${kind}` }, { status: 400 })
     }
@@ -49,7 +74,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       headers: {
         'Content-Type': contentType,
         'Content-Length': String(buf.length),
-        'Content-Disposition': `inline; filename*=UTF-8''${encodeURIComponent(path.basename(filePath))}`,
+        'Content-Disposition': contentDispositionAttachment(path.basename(filePath)),
+        'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'no-store',
       },
     })
