@@ -1,12 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { promises as fs } from 'node:fs'
 import { db } from '@/lib/db'
-import { getVectorStore } from '@/lib/rag/vectorstore'
-import { kbSummaryWithCounts } from '@/lib/rag/kb'
+import { kbSummaryWithCounts, deleteKnowledgeBaseCore } from '@/lib/rag/kb'
 import { parseChunkConfig, toDocSummary } from '@/lib/rag/serialize'
-import { ARTIFACTS_ROOT } from '@/lib/rag/artifacts'
-import { cancelKbJobs } from '@/lib/rag/pipeline'
-import path from 'node:path'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -79,48 +74,16 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
   }
 }
 
-/** DELETE /api/kb/[id] 级联：文档 + chunks + 向量集合 + 磁盘产物 */
+/**
+ * DELETE /api/kb/[id] 级联：文档 + chunks + 向量集合 + 磁盘产物
+ * 实现抽取至 lib/rag/kb.ts deleteKnowledgeBaseCore（Task 17-2，与 /api/input 同一语义）
+ */
 export async function DELETE(_req: NextRequest, ctx: Ctx) {
   try {
     const { id } = await ctx.params
-    const kb = await db.knowledgeBase.findUnique({ where: { id } })
-    if (!kb) return NextResponse.json({ error: '知识库不存在' }, { status: 404 })
-
-    const docs = await db.document.findMany({ where: { kbId: id }, select: { id: true } })
-    const chunkCount = await db.chunk.count({ where: { kbId: id } })
-
-    // 0) 先取消该 KB 全部在途任务（pending/active/waiting_mineru → cancelled + abort）。
-    // 审计#N13：原先不取消 → 删除后 runJob 下轮查 kb=null 抛「知识库不存在」+ 产物目录已删 → 半写状态。
-    // 必须先取消再删向量/行/目录。
-    const cancelledJobs = await cancelKbJobs(id)
-
-    // 1) 向量集合整体删除（Qdrant deleteCollection；不可达时跳过并告警，行数据仍级联删除）
-    let pointsDeleted = 0
-    try {
-      const store = await getVectorStore()
-      pointsDeleted = await store.count(kb.collection).catch(() => 0)
-      await store.deleteCollection(kb.collection)
-    } catch (e: any) {
-      console.warn('[kb] 删除向量集合失败（可能不存在/不可达）:', e?.message ?? e)
-    }
-    // 2) 行删除（Chunk/Document 级联）
-    await db.chunk.deleteMany({ where: { kbId: id } })
-    await db.document.deleteMany({ where: { kbId: id } })
-    await db.pipelineJob.deleteMany({ where: { kbId: id } })
-    await db.knowledgeBase.delete({ where: { id } })
-    // 3) 磁盘产物
-    await fs.rm(path.join(ARTIFACTS_ROOT, id), { recursive: true, force: true })
-
-    // 4) count 校验
-    const remain = await db.chunk.count({ where: { kbId: id } })
-    if (remain !== 0) {
-      console.warn(`[kb] 级联删除校验失败：仍残留 ${remain} chunks`)
-    }
-
-    return NextResponse.json({
-      ok: true,
-      deleted: { docs: docs.length, chunks: chunkCount, points: pointsDeleted, cancelledJobs },
-    })
+    const r = await deleteKnowledgeBaseCore(id)
+    if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
+    return NextResponse.json({ ok: true, deleted: r.deleted })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
   }

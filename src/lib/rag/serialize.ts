@@ -36,6 +36,7 @@ export function toKbSummary(
     vectorMode,
     sparseScheme: kb.sparseScheme === 'native' ? 'native' : 'none',
     rerankEnabled: kb.rerankEnabled,
+    retrievalMode: kb.retrievalMode === 'dense' || kb.retrievalMode === 'sparse' ? kb.retrievalMode : 'hybrid',
     docCount: counts.docCount,
     chunkCount: counts.chunkCount,
     pointCount: counts.pointCount,

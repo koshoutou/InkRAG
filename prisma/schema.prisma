@@ -120,6 +120,8 @@ model KnowledgeBase {
   sparseScheme     String   @default("none")
   /// 是否启用 Rerank（库级默认）
   rerankEnabled    Boolean  @default(false)
+  /// 库级检索模式（hybrid/dense/sparse；元数据供外部检索平台读取，本平台不执行检索 §32）
+  retrievalMode    String   @default("hybrid")
   docCount         Int      @default(0)
   chunkCount       Int      @default(0)
   pointCount       Int      @default(0)

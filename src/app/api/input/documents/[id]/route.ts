@@ -1,26 +1,30 @@
+/**
+ * /api/input/documents/[id]（契约 §33）
+ *   GET    → { doc: DocSummary & 产物可用性 / 错误字段 } / 404
+ *   DELETE → { ok: true, deletedChunks } / 404（语义与 /api/documents/[id] DELETE 一致：
+ *            lib/rag/kb.ts deleteDocumentCore —— 向量删除 / 产物清理 / cancelDocumentJobs / updateKbStats）
+ */
 import { NextRequest, NextResponse } from 'next/server'
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { db } from '@/lib/db'
+import { requireApiKey } from '../../_guard'
 import { deleteDocumentCore } from '@/lib/rag/kb'
-import { markdownPath, middleJsonPath, sourcePath } from '@/lib/rag/artifacts'
 import { toDocSummary } from '@/lib/rag/serialize'
-import type { Document } from '@prisma/client'
+import { markdownPath, middleJsonPath, sourcePath } from '@/lib/rag/artifacts'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
 type Ctx = { params: Promise<{ id: string }> }
 
-async function loadDoc(id: string): Promise<Document | null> {
-  return db.document.findUnique({ where: { id } })
-}
-
-/** GET /api/documents/[id] → { doc: DocSummary & 附加信息 } */
-export async function GET(_req: NextRequest, ctx: Ctx) {
+/** GET /api/input/documents/[id] → { doc }（含 chunk 计数、errorCode/errorMessage、产物可用性） */
+export async function GET(req: NextRequest, ctx: Ctx) {
+  const guard = await requireApiKey(req)
+  if ('response' in guard) return guard.response
   try {
     const { id } = await ctx.params
-    const doc = await loadDoc(id)
+    const doc = await db.document.findUnique({ where: { id } })
     if (!doc) return NextResponse.json({ error: '文档不存在' }, { status: 404 })
 
     const [chunkCount, enabledChunkCount] = await Promise.all([
@@ -58,11 +62,10 @@ export async function GET(_req: NextRequest, ctx: Ctx) {
   }
 }
 
-/**
- * DELETE /api/documents/[id] 级联：向量 → chunks → document → 磁盘 → count 校验
- * 实现抽取至 lib/rag/kb.ts deleteDocumentCore（Task 17-2，与 /api/input 同一语义）
- */
-export async function DELETE(_req: NextRequest, ctx: Ctx) {
+/** DELETE /api/input/documents/[id] → 级联删除（在途任务取消 → 向量 → 行 → 磁盘 → 统计回写） */
+export async function DELETE(req: NextRequest, ctx: Ctx) {
+  const guard = await requireApiKey(req, { write: true })
+  if ('response' in guard) return guard.response
   try {
     const { id } = await ctx.params
     const r = await deleteDocumentCore(id)

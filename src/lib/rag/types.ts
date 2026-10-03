@@ -126,6 +126,8 @@ export interface KbSummary {
   /** 稀疏向量方案（建库时探测锁定）：none | native */
   sparseScheme: SparseScheme
   rerankEnabled: boolean
+  /** 库级检索模式（元数据供外部检索平台读取；§32 本平台不执行检索） */
+  retrievalMode: 'hybrid' | 'dense' | 'sparse'
   docCount: number
   chunkCount: number
   pointCount: number

@@ -1,16 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { createHash, randomUUID } from 'node:crypto'
-import { createWriteStream } from 'node:fs'
-import { promises as fs } from 'node:fs'
-import path from 'node:path'
-import { once } from 'node:events'
-import { Readable } from 'node:stream'
 import { db } from '@/lib/db'
-import { ensureDocDir, sourcePath, ARTIFACTS_ROOT } from '@/lib/rag/artifacts'
-import { enqueueDocument } from '@/lib/rag/pipeline'
-import { parseChunkConfig, toDocSummary } from '@/lib/rag/serialize'
-import { ALL_ACCEPTED_EXTS, extToMime } from '@/lib/rag/parsers/formats'
-import type { Document } from '@prisma/client'
+import { IngestError, ingestUploadFile } from '@/lib/rag/ingest'
+import { toDocSummary } from '@/lib/rag/serialize'
+import { ALL_ACCEPTED_EXTS } from '@/lib/rag/parsers/formats'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -20,23 +12,16 @@ type Ctx = { params: Promise<{ id: string }> }
 /** 上传接受的全量类型（权威清单见 lib/rag/parsers/formats.ts） */
 const SUPPORTED_EXTS: string[] = [...ALL_ACCEPTED_EXTS]
 
-/** 上传体积上限（Task 15-b / 审计 #2：防止磁盘被打满） */
-const MAX_FILE_BYTES = 200 * 1024 * 1024 // 单文件 200MB（与 MinerU 云服务一致）
-const MAX_REQUEST_BYTES = 500 * 1024 * 1024 // 单请求总上传量 500MB
+/** 单请求总上传量上限（Task 15-b / 审计 #2） */
+const MAX_REQUEST_BYTES = 500 * 1024 * 1024
 
 function fmtMB(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)}MB`
 }
 
-/** 遍历 formData 全部文件做体积校验（单文件 / 单请求双限额），超限返 413 */
-function checkUploadLimits(files: File[]): string | null {
-  let total = 0
-  for (const f of files) {
-    if (f.size > MAX_FILE_BYTES) {
-      return `文件「${f.name || 'untitled'}」体积 ${fmtMB(f.size)} 超过单文件上限 ${fmtMB(MAX_FILE_BYTES)}（200MB，与 MinerU 云服务一致）`
-    }
-    total += f.size
-  }
+/** 遍历 formData 全部文件做体积校验（单文件 200MB 在共享层校验；这里校验单请求总量），超限返 413 */
+function checkRequestLimit(files: File[]): string | null {
+  const total = files.reduce((acc, f) => acc + f.size, 0)
   if (total > MAX_REQUEST_BYTES) {
     return `单次请求总上传量 ${fmtMB(total)} 超过上限 ${fmtMB(MAX_REQUEST_BYTES)}`
   }
@@ -80,9 +65,11 @@ export async function GET(req: NextRequest, ctx: Ctx) {
   }
 }
 
-/** POST /api/kb/[id]/documents（multipart：file + 可选 chunkConfig JSON 字符串） */
+/**
+ * POST /api/kb/[id]/documents（multipart：file + 可选 chunkConfig JSON 字符串 + engine）
+ * 单文件语义；实现抽取至 lib/rag/ingest.ts（与 /api/input、/v1/datasets 三链路共用）。
+ */
 export async function POST(req: NextRequest, ctx: Ctx) {
-  const tmpPath = path.join(ARTIFACTS_ROOT, '.upload-' + randomUUID() + '.part')
   try {
     const { id } = await ctx.params
     const kb = await db.knowledgeBase.findUnique({ where: { id } })
@@ -91,12 +78,12 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const form = await req.formData().catch(() => null)
     if (!form) return NextResponse.json({ error: '请求必须是 multipart/form-data' }, { status: 400 })
 
-    // ---- 体积上限（Task 15-b）：遍历请求内全部文件，单文件 200MB / 单请求 500MB ----
+    // ---- 单请求总量上限（单文件 200MB 由共享层 checkFile 校验） ----
     const allFiles: File[] = []
     for (const [, value] of form.entries()) {
       if (value instanceof File && value.size > 0) allFiles.push(value)
     }
-    const limitError = checkUploadLimits(allFiles)
+    const limitError = checkRequestLimit(allFiles)
     if (limitError) {
       return NextResponse.json({ error: limitError }, { status: 413 })
     }
@@ -105,138 +92,44 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!(file instanceof File)) {
       return NextResponse.json({ error: '缺少 file 字段' }, { status: 400 })
     }
-    const filename = file.name || 'untitled'
-    const ext = path.extname(filename).toLowerCase().replace('.', '')
-    if (!SUPPORTED_EXTS.includes(ext)) {
-      return NextResponse.json(
-        { error: `不支持的文件类型 .${ext}（支持：${SUPPORTED_EXTS.join(' / ')}）` },
-        { status: 400 }
-      )
-    }
 
-    // 一次性覆盖配置（仅本次，契约 §2）：优先 form chunkConfig，其次 KB 默认
-    let chunkConfigSnap = kb.chunkConfig
+    // 一次性覆盖配置（仅本次，契约 §2）：优先 form chunkConfig，其次 KB 默认（共享层处理）
+    let chunkConfig: Record<string, unknown> | undefined
     const cfgRaw = form.get('chunkConfig')
     if (typeof cfgRaw === 'string' && cfgRaw.trim()) {
       try {
-        chunkConfigSnap = JSON.stringify(parseChunkConfig(cfgRaw))
+        chunkConfig = JSON.parse(cfgRaw)
       } catch {
         return NextResponse.json({ error: 'chunkConfig 不是合法 JSON' }, { status: 400 })
       }
     }
 
-    // 解析引擎选择（Task 14-e）：可选 'mineru' | 'node'，缺省跟随全局设置；
-    // engine=mineru 即便全局 parseMode 非 mineru 也强制走 MinerU（engineChoice 优先级高于全局）
+    // 解析引擎选择（14-e）：'mineru' | 'node'，缺省跟随全局路由（共享层处理）
     const engineRaw = form.get('engine')
-    let engineChoice: 'mineru' | 'node' | undefined
+    let engine: 'mineru' | 'node' | undefined
     if (typeof engineRaw === 'string' && engineRaw.trim()) {
       const v = engineRaw.trim()
       if (v !== 'mineru' && v !== 'node') {
         return NextResponse.json({ error: `无效 engine: ${v}（可选 mineru / node）` }, { status: 400 })
       }
-      engineChoice = v
+      engine = v
     }
 
-    // 流式 sha256 + 落盘临时文件
-    await fs.mkdir(ARTIFACTS_ROOT, { recursive: true })
-    const hash = createHash('sha256')
-    const ws = createWriteStream(tmpPath)
-    const reader = (file.stream() as unknown as ReadableStream<Uint8Array>).getReader()
-    let sizeBytes = 0
-    try {
-      for (;;) {
-        const { done, value } = await reader.read()
-        if (done) break
-        if (value) {
-          sizeBytes += value.byteLength
-          // 流式限额兑底（防御伪造 Content-Length / size 声明的请求）
-          if (sizeBytes > MAX_FILE_BYTES) {
-            await reader.cancel().catch(() => {})
-            return NextResponse.json(
-              { error: `文件「${filename}」实际体积超过单文件上限 ${fmtMB(MAX_FILE_BYTES)}（200MB），已中断上传` },
-              { status: 413 },
-            )
-          }
-          hash.update(value)
-          if (!ws.write(value)) await once(ws, 'drain')
-        }
-      }
-    } finally {
-      ws.end()
-      await once(ws, 'finish')
-    }
-    if (sizeBytes === 0) {
-      return NextResponse.json({ error: '上传文件为空' }, { status: 400 })
-    }
-    const contentHash = hash.digest('hex')
-
-    // 秒传判定：同 kb + hash + parseConfigV 直接返回已有文档
-    const parseConfigV = 1
-    const dup = await db.document.findFirst({
-      where: { kbId: id, contentHash, parseConfigV },
-    })
-    if (dup) {
-      await fs.rm(tmpPath, { force: true })
-      const [chunkCount, enabledChunkCount] = await Promise.all([
-        db.chunk.count({ where: { documentId: dup.id, isParent: false } }),
-        db.chunk.count({ where: { documentId: dup.id, isParent: false, enabled: true } }),
-      ])
-      return NextResponse.json(
-        { doc: toDocSummary(dup, { chunkCount, enabledChunkCount }), deduplicated: true },
-        { status: 201 }
-      )
-    }
-
-    // 建文档 + 移入产物目录
-    const docId = randomUUID()
-    await ensureDocDir(id, docId)
-    await fs.rename(tmpPath, sourcePath(id, docId, ext))
-
-    let doc: Document
-    try {
-      doc = await db.document.create({
-        data: {
-          id: docId,
-          kbId: id,
-          filename,
-          mimeType: file.type || guessMime(ext),
-          sizeBytes,
-          contentHash,
-          status: 'queued',
-          stageProgress: 0,
-          parseConfigV,
-          chunkConfigSnap,
-          storageKey: `${id}/${docId}/`,
-          ...(engineChoice ? { metaJson: JSON.stringify({ engineChoice }) } : {}),
-        },
-      })
-    } catch (e: any) {
-      // 并发同文件竞争唯一索引 → 秒传返回
-      if (String(e?.code) === 'P2002') {
-        const existing = await db.document.findFirst({
-          where: { kbId: id, contentHash, parseConfigV },
-        })
-        if (existing) {
-          await fs.rm(path.dirname(sourcePath(id, docId, ext)), { recursive: true, force: true })
-          return NextResponse.json({ doc: toDocSummary(existing), deduplicated: true }, { status: 201 })
-        }
-      }
-      throw e
-    }
-
-    // 入流水线（parse 起步）
-    await enqueueDocument(doc.id, 'parse')
-
+    const r = await ingestUploadFile(kb, file, { chunkConfig, engine })
+    const [chunkCount, enabledChunkCount] = r.deduplicated
+      ? await Promise.all([
+          db.chunk.count({ where: { documentId: r.doc.id, isParent: false } }),
+          db.chunk.count({ where: { documentId: r.doc.id, isParent: false, enabled: true } }),
+        ])
+      : [0, 0]
     return NextResponse.json(
-      { doc: toDocSummary(doc, { chunkCount: 0, enabledChunkCount: 0 }), deduplicated: false },
+      { doc: toDocSummary(r.doc, { chunkCount, enabledChunkCount }), deduplicated: r.deduplicated },
       { status: 201 }
     )
   } catch (e: any) {
-    await fs.rm(tmpPath, { force: true }).catch(() => {})
+    if (e instanceof IngestError) {
+      return NextResponse.json({ error: e.message }, { status: e.status })
+    }
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
   }
-}
-
-function guessMime(ext: string): string {
-  return extToMime(ext)
 }

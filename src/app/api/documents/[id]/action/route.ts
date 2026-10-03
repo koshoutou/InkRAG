@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { getVectorStore } from '@/lib/rag/vectorstore'
 import { enqueueDocument } from '@/lib/rag/pipeline'
 import { parseChunkConfig } from '@/lib/rag/serialize'
+import { retryFailedDocumentCore } from '@/lib/rag/kb'
 import { snapshotDocVersion } from '@/lib/rag/versions'
 
 export const dynamic = 'force-dynamic'
@@ -30,11 +31,6 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     if (!['reparse', 'rechunk', 'retry'].includes(action)) {
       return NextResponse.json({ error: `无效 action: ${action}` }, { status: 400 })
     }
-
-    let meta: Record<string, unknown> = {}
-    try {
-      meta = JSON.parse(doc.metaJson || '{}')
-    } catch {}
 
     if (action === 'reparse') {
       // 新版本产生前归档当前 chunk 集（best-effort，失败不阻塞动作）
@@ -70,26 +66,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       await clearVectors(doc.id, doc.kbId, kb.collection)
       await enqueueDocument(id, 'chunk')
     } else {
-      // retry：从失败阶段续跑（failedStage 记录在 metaJson）
-      const failedStage = String(meta.failedStage ?? '')
-      const stage: 'parse' | 'chunk' | 'embed' = ['parse', 'chunk', 'embed'].includes(failedStage)
-        ? (failedStage as 'parse' | 'chunk' | 'embed')
-        : 'parse'
-      await db.document.update({
-        where: { id },
-        data: {
-          status: 'queued',
-          stageProgress: 0,
-          errorCode: null,
-          errorMessage: null,
-          metaJson: JSON.stringify({ ...meta, failedStage: null }),
-        },
-      })
-      if (stage !== 'parse') {
-        // 续跑 chunk/embed 前先清旧产物（chunk job 亦会清理，双保险）
-        await clearVectors(doc.id, doc.kbId, kb.collection)
-      }
-      await enqueueDocument(id, stage)
+      // retry：从失败阶段续跑（实现抽取至 lib/rag/kb.ts retryFailedDocumentCore，Task 17-2；
+      // 仅 failed 文档可重试（409），与 /api/input/documents/[id]/retry 同一语义）
+      const r = await retryFailedDocumentCore(id)
+      if (!r.ok) return NextResponse.json({ error: r.error }, { status: r.status })
     }
 
     return NextResponse.json({ ok: true })
