@@ -13,7 +13,7 @@
 - **URL 导入**：粘贴 URL 抓取导入，可选 MinerU / Node 引擎
 
 ### 检索与调试
-- **混合检索**：Dense（bge-m3）+ Sparse（BM25 近似）+ RRF 融合 + Rerank（bge-reranker-v2-m3），dense/sparse/hybrid 三模式
+- **混合检索**：Dense（bge-m3）+ 稀疏双路召回（provider 原生稀疏输出，多字段自动探测；无稀疏输出时建库锁定 dense 单路）+ RRF/DBSF 融合 + Rerank（bge-reranker-v2-m3），dense/sparse/hybrid 三模式
 - **三屏联动**：原文（PDF 坐标高亮）/ Markdown / chunk 列表双向联动；chunk 可编辑、启停、删除——变更即重嵌入、同步向量库、自动递增文档版本号
 - **切分沙盒**：无损参数试验（size/overlap/parentSize/strategy/保护块），300ms 防抖预览，「入库此切分结果」一键落库
 - **检索调试台**：白盒四阶段耗时、命中卡片、调用日志回放、趋势图下钻
@@ -52,7 +52,7 @@ bun run dev
 cd mini-services/pipeline-events && bun install && bun run dev
 ```
 
-打开 `http://localhost:3000`，在「设置」中配置 Qdrant / Embedding / Rerank / MinerU；不配置时自动进入本地演示模式（本地向量引擎 + Node 解析器 + Mock 嵌入）。
+打开 `http://localhost:3000`，在「设置」中配置 Qdrant / Embedding / Rerank / MinerU（v1.6 起必须先配置 Qdrant 与 Embedding 才能创建知识库；未配置或不可达时写入硬失败并给出引导，不再自动降级本地演示模式）。
 
 ### MinerU 接入方式选择
 
@@ -70,7 +70,30 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
-### v1.5（2026-10 · 本轮）
+### v1.6（2026-10 · 安全与性能审计整改）
+
+> 本轮基于一次全面的安全与性能审计（覆盖 50 个后端路由、全部核心库、数据模型与构建配置），针对三大"静默错误"设计与吞吐锁死问题进行集中整改：
+
+**正确性与安全（P0）**
+- **移除本地向量引擎降级模式**：未配置 / 不可达 Qdrant 时写入一律硬失败并给出配置引导，杜绝"写本地、读 Qdrant"造成的静默索引断裂；LocalVectorStore 与 VectorPoint 表整体删除
+- **Mock 嵌入默认关闭**：未配置真实 Embedding API 时嵌入硬失败；建库强校验（必须已配置 Qdrant 与 Embedding，实测探测锁定维度），不再有 `mock-bge-m3` 兜底
+- **稀疏向量方案锁定**：知识库新增 `sparseScheme` 字段（建库时探测写入），真实模式稀疏输出多字段探测（`sparse_indices` / `lexical_weights` / `sparse_embedding` 等，兼容多种值形态），探测不到显式标记 `none` 并强制 dense 检索，**不再静默退化为哈希词袋**；入库与版本恢复双重断言防止两套稀疏空间混用
+- **SSRF 防护**：URL 导入增加内网 / 云元数据 / CGNAT 地址黑名单 + DNS 逐 IP 校验 + 手动逐跳重定向校验 + 流式读取 8MB 限额
+- **上传与响应加固**：单文件 200MB / 单请求 500MB 上限；文档预览改 `attachment` + Content-Type 白名单；全局 `nosniff` / `Referrer-Policy` / `X-Frame-Options` / CSP 响应头
+- **密钥安全**：设置接口密钥掩码返回（`***尾4位`，留空保持原值）；API Key 改 sha256 哈希存储 + 恒定时间比对，存量明文惰性迁移销毁
+
+**性能与可靠性（P1）**
+- **流水线重构**：MinerU 等待移出并发槽位（`waiting_mineru` 状态 + 独立轮询器 + `mineruJobId` 断点续传，杜绝重复上传重复计费）；僵死恢复改心跳续租（120s 无心跳回收，AbortController + CAS 防双跑）；嵌入批内 4 路并发、入库 2 路并发；MinerU 信号量竞态修复
+- **取消语义**：删除知识库 / 重复解析自动取消在途任务（`cancelled` 状态），不再产生半写状态与并发写冲突
+- **事件推送 fire-and-forget**：流水线不再被事件服务阻塞；进度节流表 TTL 清理防内存泄漏
+- **SQLite 开启 WAL 与 busy_timeout**；Qdrant 探测超时与重试参数适配高延迟远程实例
+
+**工程卫生（P2）**
+- 清理脚手架残留与 5 个零引用依赖；健康检查按 MinerU Provider 三态判定；修复活动流未定义字段引用
+
+> 安全说明：本平台定位为本地 / 内网自部署工具，管理面未内置登录鉴权；如需暴露公网，请置于带认证的反向代理（如 Caddy / Nginx Basic Auth）之后，并妥善保管数据目录。
+
+### v1.5（2026-10）
 
 > 本轮源于一轮集中反馈修复与功能补强，全部按需求清单逐项交付：
 
