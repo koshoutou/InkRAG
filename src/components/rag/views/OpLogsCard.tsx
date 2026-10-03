@@ -1,14 +1,15 @@
 'use client'
 
-// 程序日志卡（Task 17-5）
+// 程序日志卡（Task 17-5 + 定时清理扩展）
 // 面板操作 / 运行信息 / 报错信息的统一运维视图：
-//   数据源 GET /api/system/oplogs（level/category/keyword/hours 过滤 + 分页）
+//   数据源 GET /api/system/oplogs（level/category/keyword/hours 过滤 + 分页 + 全量 stats）
 //   写入点：共享层（建库/上传/文本/删除/重试）+ 流水线永久失败 + 设置/APIKey/备份路由
 //          + instrumentation onRequestError 全局兜底（未捕获请求错误）
 //   管理：按时长清理（0=全部）+ 导出 JSON + 10s 自动刷新 + 行内详情展开
+//          + 定时清理设置（默认关闭；保留时长 + 清理级别，调度器每小时执行）
 
 import { useMemo, useState } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   ChevronDown,
   Download,
@@ -16,6 +17,7 @@ import {
   FileTerminal,
   RefreshCw,
   Search,
+  TimerClock,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import {
@@ -31,7 +33,13 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from '@/components/ui/collapsible'
 import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
 import {
   Select,
   SelectContent,
@@ -40,6 +48,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { ragApi } from '../api'
 import { ErrorCard, formatDateTime, ragScrollbar } from '../ui'
@@ -93,6 +102,21 @@ function fmtBytes(n: number): string {
   return `${(n / 1024 / 1024).toFixed(2)} MB`
 }
 
+const KEEP_OPTIONS = [
+  { value: '24', label: '24 小时前' },
+  { value: '72', label: '3 天前' },
+  { value: '168', label: '7 天前' },
+  { value: '720', label: '30 天前' },
+  { value: '2160', label: '90 天前' },
+  { value: '8760', label: '365 天前' },
+]
+
+const MAX_LEVEL_OPTIONS = [
+  { value: 'info', label: '仅 info（保留警告和错误）' },
+  { value: 'warn', label: 'info + warn（保留错误）' },
+  { value: 'error', label: '全部级别（含错误）' },
+]
+
 export function OpLogsCard() {
   const queryClient = useQueryClient()
   const [level, setLevel] = useState('all')
@@ -104,6 +128,29 @@ export function OpLogsCard() {
   const [size, setSize] = useState(PAGE_SIZE)
   const [cleanOpen, setCleanOpen] = useState(false)
   const [cleanHours, setCleanHours] = useState('24')
+  const [schedOpen, setSchedOpen] = useState(false)
+
+  // 定时清理配置（GET 惰性拉起调度器；30s 轮询看下次运行时间）
+  const schedQuery = useQuery({
+    queryKey: ['oplog-clean-schedule'],
+    queryFn: () => ragApi.getOplogCleanSchedule(),
+    refetchInterval: 30_000,
+  })
+  const sched = schedQuery.data?.schedule
+
+  const schedMutation = useMutation({
+    mutationFn: (body: { enabled?: boolean; olderThanHours?: number; maxLevel?: string }) =>
+      ragApi.updateOplogCleanSchedule(body),
+    onSuccess: (r) => {
+      queryClient.invalidateQueries({ queryKey: ['oplog-clean-schedule'] })
+      toast.success(
+        r.schedule.enabled
+          ? `定时清理已开启：每小时清理 ${r.schedule.olderThanHours}h 前日志（级别 ≤ ${r.schedule.maxLevel}）`
+          : '定时清理已关闭',
+      )
+    },
+    onError: (e: Error) => toast.error('保存失败：' + e.message),
+  })
 
   // 查询
   const logsQuery = useQuery({

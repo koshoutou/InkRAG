@@ -539,6 +539,21 @@ export const ragApi = {
     )
   },
 
+  // -- §35 扩展 程序日志定时清理（/api/system/oplogs/schedule） ----------------
+  async getOplogCleanSchedule(): Promise<{ schedule: import('./types').OplogCleanSchedule }> {
+    return asJson(await req('/api/system/oplogs/schedule', { cache: 'no-store' }))
+  },
+
+  async updateOplogCleanSchedule(body: { enabled?: boolean; olderThanHours?: number; maxLevel?: string }): Promise<{ schedule: import('./types').OplogCleanSchedule }> {
+    return asJson(
+      await req('/api/system/oplogs/schedule', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }),
+    )
+  },
+
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------
   async listDocVersions(docId: string): Promise<{ versions: DocVersionInfo[] }> {
     return asJson(await req(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))

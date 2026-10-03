@@ -492,6 +492,24 @@ export interface ChunkBatchResult {
 // §15 备份定时任务配置（/api/system/backups/schedule）
 // ---------------------------------------------------------------------------
 
+/** 程序日志定时清理配置 + 调度器状态（GET/PUT /api/system/oplogs/schedule，§35 扩展） */
+export interface OplogCleanSchedule {
+  enabled: boolean
+  /** 清理多久以前的日志（小时，1-8760） */
+  olderThanHours: number
+  /** 清理级别上限：info=仅 info / warn=info+warn / error=全部（含错误） */
+  maxLevel: 'info' | 'warn' | 'error'
+  /** 清理执行间隔（固定 1h） */
+  intervalHours: number
+  nextRunAt: string | null
+  lastRunAt: string | null
+  lastDeleted: number | null
+  schedulerRunning: boolean
+  totalDeleted: number
+  runCount: number
+  failCount: number
+}
+
 export interface BackupSchedule {
   enabled: boolean
   intervalHours: number

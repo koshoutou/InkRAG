@@ -64,6 +64,14 @@ model QdrantSetting {
   /// 保留最近 N 份自动备份（轮转清理，2-50）
   autoBackupKeep          Int     @default(5)
 
+  // ---- 程序日志定时清理（进程内调度器，globalThis 单例；默认关闭） ----
+  /// 是否启用定时清理（false = 不清理，日志无限累积）
+  oplogAutoCleanEnabled    Boolean @default(false)
+  /// 清理多久以前的日志（小时，1-8760；默认 720 = 30 天）
+  oplogCleanOlderThanHours Int     @default(720)
+  /// 清理级别上限：info = 仅 info；warn = info+warn；error = 全部（含错误）
+  oplogCleanMaxLevel       String  @default("warn")
+
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
