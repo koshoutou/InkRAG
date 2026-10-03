@@ -334,6 +334,7 @@ export interface ParseArtifacts {
   blockCount: number
   /** MinerU 断点续传（计划书 §10.4）：持久化到 document 记录 */
   mineruJobId?: string
+  mineruUploadId?: string
   mineruFileId?: string
 }
 

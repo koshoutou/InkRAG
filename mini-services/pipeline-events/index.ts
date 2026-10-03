@@ -20,10 +20,22 @@ const SOCKET_PORT = 3003
 const EMIT_PORT = 3004
 
 // ---------------------------------------------------------------------------
+// 0) globalThis 单例守护（Task 16：bun --hot 模块重载时复用既有 server/io 实例）
+//
+// 【根因】热重载会重新执行本模块：旧 server 仍在事件循环里持有全部已连接 socket，
+// 而模块级 io 变量被替换成新实例（未绑定端口）→ emit 端点打到新实例、
+// 前端 socket 连在旧实例 → 事件全部丢失（healthz clients=0 但实际有连接）。
+// 守护后模块重载为幂等 no-op，事件链路永不分裂。
+// ---------------------------------------------------------------------------
+const g = globalThis as unknown as {
+  __pipelineEvents?: { io: Server; started: boolean }
+}
+
+// ---------------------------------------------------------------------------
 // 1) socket.io 服务（3003，前端实时通道）
 // ---------------------------------------------------------------------------
 const socketServer = createServer() // 不挂 request handler，全部交给 socket.io
-const io = new Server(socketServer, {
+const io = g.__pipelineEvents?.io ?? new Server(socketServer, {
   // DO NOT change the path, it is used by Caddy to forward the request to the correct port
   path: '/',
   cors: { origin: '*', methods: ['GET', 'POST'] },
@@ -141,12 +153,19 @@ const emitServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   res.end(JSON.stringify({ error: 'not found' }))
 })
 
-socketServer.listen(SOCKET_PORT, () => {
-  console.log(`[pipeline-events] socket.io listening on :${SOCKET_PORT} (path=/)`)
-})
-emitServer.listen(EMIT_PORT, '127.0.0.1', () => {
-  console.log(`[pipeline-events] emit HTTP listening on 127.0.0.1:${EMIT_PORT} (POST /emit)`)
-})
+// 热重载复用：已启动过则跳过 listen（端口仍由旧实例持有；io 已从 globalThis 取回）
+if (!g.__pipelineEvents?.started) {
+  socketServer.listen(SOCKET_PORT, () => {
+    console.log(`[pipeline-events] socket.io listening on :${SOCKET_PORT} (path=/)`)
+  })
+  emitServer.listen(EMIT_PORT, '127.0.0.1', () => {
+    console.log(`[pipeline-events] emit HTTP listening on 127.0.0.1:${EMIT_PORT} (POST /emit)`)
+  })
+  g.__pipelineEvents = { io, started: true }
+  console.log('[pipeline-events] 实例已登记（globalThis 单例守护）')
+} else {
+  console.log('[pipeline-events] 热重载：复用既有 server/io 实例（不重复 listen）')
+}
 
 process.on('SIGTERM', () => {
   socketServer.close()
