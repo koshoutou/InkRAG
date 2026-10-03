@@ -474,13 +474,13 @@ curl -X POST http://<host>/api/input/documents/<docId>/retry \
 
 > 自部署 MinerU（V1）保守支持 `pdf` + 图片；官方云·精准 v4 支持上表全部 MinerU 类型。实际使用的引擎在文档详情 `parseEngine` 字段回显。
 
-## 9. 与 Dify 兼容层（/v1/datasets）的关系
+## 9. 与 Dify 兼容导出 API（/v1/datasets）的关系
 
-平台另提供 **Dify 兼容数据集 API**（`/v1/datasets/**`，独立于 `/api/input`）：
+平台另提供 **Dify 兼容导出 API**（`/v1/datasets/**`，与 `/api/input` **相互独立、入口分离**）：
 
-- 用途：让 MinerU 官方面板的「导出到 Dify」功能直接对接本平台——在 MinerU 面板填本平台地址 + API Key 即可把解析结果一键导入知识库；
-- 区别：`/v1/datasets` 是 Dify 的数据集协议兼容层（create-by-file / create-by-text 等端点），能力是 `/api/input` 的子集，仅覆盖「建数据集 + 传文档」；完整能力（列表 / 重试 / 删除 / 文档详情轮询）请使用 `/api/input`；
-- 鉴权、流水线语义、秒传规则两层完全一致（同一共享层实现）。详见后续 `dify-compat` 专项文档。
+- 用途：让 MinerU 官方面板的「导出到 Dify」功能直接对接本平台——配置入口在平台「知识库」视图的「Dify 导出对接」按钮（地址 / Key 配置 + 链路自检 + 说明文档），与本文档的入库 API 互不相关；
+- 区别：`/v1/datasets` 是 Dify 的数据集协议兼容层（create-by-file / create-by-text 等端点），能力是 `/api/input` 的子集，仅覆盖「建数据集 + 传文档」；
+- 鉴权、流水线语义、秒传规则两层完全一致（同一共享层实现）。详见 `dify-compat` 专项文档。
 
 ## 10. MCP Server（预告）
 

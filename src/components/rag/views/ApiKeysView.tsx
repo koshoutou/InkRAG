@@ -1,13 +1,13 @@
 'use client'
 
-// Agent API：入库 API 文档卡 + Dify 兼容占位卡 + Key 管理（创建一次性展示 / 启停 / 删除）
+// Agent API：入库 API（/api/input）文档卡 + Key 管理（创建一次性展示 / 启停 / 删除）
 // §32（Task 17-1）：对外检索 API 已移除——本平台定位为知识库管理（入库 / 切分 / 版本 / 备份），
 // 检索由外部平台承担；/api/input（契约 §33）为对外唯一入库入口。
+// （Dify 兼容导出 API /v1/datasets 的配置入口在「知识库」视图——与本入库 API 相互独立）
 
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
-  Blocks,
   BookOpen,
   Copy,
   KeyRound,
@@ -86,7 +86,6 @@ export function ApiKeysView() {
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [deleteKey, setDeleteKey] = useState<ApiKeyItem | null>(null)
   const [docsOpen, setDocsOpen] = useState(false)
-  const [difyDocsOpen, setDifyDocsOpen] = useState(false)
 
   const keysQuery = useQuery({ queryKey: ['keys'], queryFn: () => ragApi.listKeys() })
 
@@ -142,73 +141,47 @@ export function ApiKeysView() {
         </Button>
       </div>
 
-      {/* 入库 API 文档卡 + Dify 兼容占位卡（§33；Dify 卡由 17-3 接管） */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-5">
-        <Card className="border-border/60 lg:col-span-3">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
-              <UploadCloud className="h-4 w-4 text-emerald-500" />
-              入库 API
-              <PathBadge>/api/input</PathBadge>
-              <Badge variant="secondary" className="ml-auto text-[10px]">供 AI Agent 调用</Badge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-                <div className="mb-1 font-medium">鉴权 Bearer</div>
-                <p className="leading-relaxed text-muted-foreground">
-                  所有端点（除文档）需 <code className="rounded bg-muted px-1 font-mono text-[10.5px]">Authorization: Bearer &lt;ApiKey&gt;</code>；readonly 角色仅可读，写入 403。
-                </p>
-              </div>
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-                <div className="mb-1 font-medium">并发语义</div>
-                <p className="leading-relaxed text-muted-foreground">
-                  多文件并发入库互不影响；流水线并发 2、MinerU 等待不占槽；同内容（sha256）秒传去重；失败自动重试 3 次。
-                </p>
-              </div>
-              <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-                <div className="mb-1 font-medium">引擎与文件类型</div>
-                <p className="leading-relaxed text-muted-foreground">
-                  <code className="rounded bg-muted px-1 font-mono text-[10.5px]">engine</code> 可选 mineru / node / 智能路由；30 种扩展名（pdf · docx · md · 图片…），单文件 200MB。
-                </p>
-              </div>
+      {/* 入库 API 文档卡（§33；Dify 导出对接配置入口在「知识库」视图） */}
+      <Card className="border-border/60">
+        <CardHeader className="pb-3">
+          <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
+            <UploadCloud className="h-4 w-4 text-emerald-500" />
+            入库 API
+            <PathBadge>/api/input</PathBadge>
+            <Badge variant="secondary" className="ml-auto text-[10px]">供 AI Agent 调用</Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 text-xs sm:grid-cols-3">
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+              <div className="mb-1 font-medium">鉴权 Bearer</div>
+              <p className="leading-relaxed text-muted-foreground">
+                所有端点（除文档）需 <code className="rounded bg-muted px-1 font-mono text-[10.5px]">Authorization: Bearer &lt;ApiKey&gt;</code>；readonly 角色仅可读，写入 403。
+              </p>
             </div>
-            <div className="flex flex-wrap items-center gap-2">
-              <Button size="sm" className="gap-1.5" onClick={() => setDocsOpen(true)}>
-                <BookOpen className="h-3.5 w-3.5" />
-                查看完整 API 文档
-              </Button>
-              <PathBadge className="text-[10.5px]">GET /api/input/docs</PathBadge>
-              <span className="text-[11px] text-muted-foreground">建库 · 上传 · 文本入库 · 状态轮询 · 重试 · 删除</span>
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+              <div className="mb-1 font-medium">并发语义</div>
+              <p className="leading-relaxed text-muted-foreground">
+                多文件并发入库互不影响；流水线并发 2、MinerU 等待不占槽；同内容（sha256）秒传去重；失败自动重试 3 次。
+              </p>
             </div>
-          </CardContent>
-        </Card>
-
-        <Card className="border-border/60 lg:col-span-2">
-          <CardHeader className="pb-3">
-            <CardTitle className="flex flex-wrap items-center gap-2 text-sm">
-              <Blocks className="h-4 w-4 text-teal-500" />
-              Dify 兼容数据集 API
-              <PathBadge>/v1/datasets</PathBadge>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="flex h-full flex-col gap-3">
-            <p className="text-xs leading-relaxed text-muted-foreground">
-              对接 MinerU 面板「导出到 Dify」：API 服务器地址填本平台根地址（勿带 /v1）、API 密钥填平台 API Key——检查链接 / 选择导出位置 / 高级配置（段落分隔符 + 每段最大 token）全部原生兼容。
-            </p>
-            <div className="mt-auto flex flex-wrap items-center gap-2">
-              <Button size="sm" variant="outline" className="gap-1.5" onClick={() => setDifyDocsOpen(true)}>
-                <BookOpen className="h-3.5 w-3.5" />
-                查看对接文档
-              </Button>
-              <Badge variant="outline" className="border-teal-500/40 bg-teal-500/10 text-[10px] text-teal-600 dark:text-teal-300">
-                MinerU 面板可用
-              </Badge>
+            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
+              <div className="mb-1 font-medium">引擎与文件类型</div>
+              <p className="leading-relaxed text-muted-foreground">
+                <code className="rounded bg-muted px-1 font-mono text-[10.5px]">engine</code> 可选 mineru / node / 智能路由；30 种扩展名（pdf · docx · md · 图片…），单文件 200MB。
+              </p>
             </div>
-          </CardContent>
-        </Card>
-      </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" className="gap-1.5" onClick={() => setDocsOpen(true)}>
+              <BookOpen className="h-3.5 w-3.5" />
+              查看完整 API 文档
+            </Button>
+            <PathBadge className="text-[10.5px]">GET /api/input/docs</PathBadge>
+            <span className="text-[11px] text-muted-foreground">建库 · 上传 · 文本入库 · 状态轮询 · 重试 · 删除</span>
+          </div>
+        </CardContent>
+      </Card>
 
       {/* Key 管理表 */}
       <Card className="border-border/60">
@@ -299,15 +272,6 @@ export function ApiKeysView() {
         title="入库 API 文档"
         description="POST /api/input/** · 鉴权 Bearer · 建库 / 上传 / 轮询 / 重试 / 删除"
         src="/api/input/docs"
-      />
-
-      {/* Dify 兼容层对接文档（数据源 /api/input/docs?file=dify-compat，Task 17-3） */}
-      <ApiDocsDialog
-        open={difyDocsOpen}
-        onOpenChange={setDifyDocsOpen}
-        title="Dify 兼容数据集 API · 对接文档"
-        description="/v1/datasets/** · MinerU 面板「导出到 Dify」直接填本平台地址与 Key"
-        src="/api/input/docs?file=dify-compat"
       />
 
       {/* 新建 Key Dialog */}

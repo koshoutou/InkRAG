@@ -21,7 +21,7 @@ export const runtime = 'nodejs'
  * → { ok, url, direct{...}, external{...}, verdict: 'ok'|'external-unreachable'|'unreachable', advice }
  */
 
-const PROBE_TIMEOUT_MS = 20_000
+const PROBE_TIMEOUT_MS = 35_000
 
 interface ProbeResult {
   reachable: boolean
@@ -58,16 +58,28 @@ async function probeDirect(base: string): Promise<ProbeResult> {
 /**
  * 外部网络探测（z-ai page_reader）：预期返回 401 JSON（未带合法 Bearer），
  * 拿到任何 HTTP 状态（含 401/403/404）都证明「公网 → 平台」链路通；
- * 仅 DNS/超时/连接失败才算不可达。
+ * 仅 DNS/超时/连接失败才算不可达。首次超时自动重试一次。
  */
 async function probeExternal(base: string): Promise<ProbeResult> {
   const t0 = Date.now()
+  let last: ProbeResult | null = null
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const r = await probeExternalOnce(base, t0)
+    if (r.reachable) return r
+    last = r
+    // 仅对「超时/网络失败」重试；拿到明确不可达结论直接返回
+    if (attempt === 0) await new Promise((res) => setTimeout(res, 1500))
+  }
+  return last!
+}
+
+async function probeExternalOnce(base: string, t0: number): Promise<ProbeResult> {
   try {
     const { default: ZAI } = await import('z-ai-web-dev-sdk')
     const zai = await ZAI.create()
     const r: any = await Promise.race([
       zai.functions.invoke('page_reader', { url: base + '/v1/datasets?page=1&limit=1' }),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('外部探测超时（20s）')), PROBE_TIMEOUT_MS)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error(`外部探测超时（${Math.round(PROBE_TIMEOUT_MS / 1000)}s）`)), PROBE_TIMEOUT_MS)),
     ])
     const status = Number(r?.data?.httpStatus ?? r?.httpStatus ?? 0)
     const ms = Date.now() - t0

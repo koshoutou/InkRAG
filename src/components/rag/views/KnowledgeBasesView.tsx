@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
+  Blocks,
   ChevronRight,
   Database,
   FileText,
@@ -62,6 +63,7 @@ import { useQuickAction } from '../useQuickAction'
 import { useRealtime } from '../useRealtime'
 import type { ChunkConfig, ChunkStrategy, KbSummary } from '../types'
 import { BoolBadge, ErrorCard, VectorModeBadge, ViewPage, formatNumber, timeAgo } from '../ui'
+import { DifyExportDialog } from './DifyExportDialog'
 
 const PROTECT_OPTIONS = [
   { value: 'code', label: '代码块 code' },
@@ -94,6 +96,7 @@ export function KnowledgeBasesView() {
   const [createOpen, setCreateOpen] = useState(false)
   const [editKb, setEditKb] = useState<KbSummary | null>(null)
   const [deleteKb, setDeleteKb] = useState<KbSummary | null>(null)
+  const [difyOpen, setDifyOpen] = useState(false)
 
   // 命令面板快捷动作（契约 §19）：rag:quick-create-kb → 自动打开「新建知识库」Dialog
   // （Dialog 已开则忽略；跨视图派发时由 useQuickAction 桥回放）
@@ -151,6 +154,19 @@ export function KnowledgeBasesView() {
             <Search className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input value={q} onChange={(e) => setQ(e.target.value)} placeholder="搜索知识库…" className="h-8 w-44 pl-7 text-xs" />
           </div>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button variant="outline" size="sm" className="gap-1.5" onClick={() => setDifyOpen(true)}>
+                  <Blocks className="h-3.5 w-3.5 text-teal-500" />
+                  Dify 导出对接
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom" className="text-xs">
+                MinerU 面板「导出到 Dify」直接对接本平台（Dify 兼容模式）：地址 / Key 配置与链路自检
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
           <Button size="sm" className="gap-1.5" onClick={() => setCreateOpen(true)}>
             <Plus className="h-3.5 w-3.5" />
             新建知识库
@@ -220,6 +236,9 @@ export function KnowledgeBasesView() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/* Dify 导出对接配置（MinerU 面板「导出到 Dify」· Dify 兼容模式） */}
+      <DifyExportDialog open={difyOpen} onOpenChange={setDifyOpen} />
     </ViewPage>
   )
 }
