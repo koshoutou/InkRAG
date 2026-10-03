@@ -4,11 +4,11 @@ import { db } from '@/lib/db'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-/** POST /api/system/jobs/clean Body: { status?='completed', olderThanHours?=24 } → { cleaned } */
+/** POST /api/system/jobs/clean Body: { status?='completed', olderThanHours?=24 } → { cleaned }（status 亦支持 failed/cancelled） */
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json().catch(() => ({}))
-    const status = ['completed', 'failed'].includes(body.status) ? body.status : 'completed'
+    const status = ['completed', 'failed', 'cancelled'].includes(body.status) ? body.status : 'completed'
     // olderThanHours 显式传 0 = 清理该状态全部任务（仅缺省/非法值才回退 24h）
     const rawHours = Number(body.olderThanHours)
     const olderThanHours =

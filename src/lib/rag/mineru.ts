@@ -13,9 +13,15 @@
  *
  * 【并发与循环】用户强调：
  *   - 模块级信号量（globalThis 单例）限制同时进行的 MinerU 解析数 = 2（流水线引擎并发也是 2，
- *     此处防 UI 触发的直跑/重试等并发叠加打爆服务）
+ *     此处防 UI 触发的直跑/重试等并发叠加打爆服务）；审计#P1-4：检查与占座同同步段完成 +
+ *     队列 30 分钟超时（详见 withMineruSlot 注释）
  *   - 轮询一律有界循环 + jitter 退避（cloud/cloud-agent：3s 起步 ×1.5 max 20s ≤200 次；
  *     selfhost 保留原 2s ×1.6 max 30s ≤600 次）
+ *
+ * 【分阶段 API（Task 15-c 审计#P1-1/P1-3）】resolveDocEngine / submitMineruJob /
+ *   probeMineruJob / finishMineruArtifact：流水线把「上传+提交」与「轮询等待」拆开，
+ *   MinerU 等待期不占流水线并发槽（PipelineJob.status='waiting_mineru' + 独立轮询器），
+ *   远端 jobId 持久化到 Document 实现断点续传（重试不再重新上传）。
  *
  * 【错误分类】沿用 StoreError retryable/nonRetryable（云错误码：A0202 Token 错误→nonRetryable；
  *   -30001/-30002/-30003 轻量限制→nonRetryable 带清晰中文提示；-10001 服务异常→retryable）
@@ -50,7 +56,7 @@ import { ofdToMarkdown } from './parsers/ofd'
 import { mhtmlToMarkdown } from './parsers/mhtml'
 import { isImageExt, isMineruExt } from './parsers/formats'
 import { ensureDocDir, markdownPath, middleJsonPath } from './artifacts'
-import { StoreError } from './vectorstore'
+import { StoreError, isNonRetryable } from './vectorstore'
 import type { RagSettings, MinerUProviderKind } from './settings'
 import type { LayoutBlock, MiddleJson, ParseArtifacts, ParseProgressEvent } from './types'
 
@@ -107,32 +113,74 @@ export async function parseDocument(input: ParseDocumentInput): Promise<ParseArt
 // MinerU 并发闸门（globalThis 信号量，同时进行的 MinerU 解析 ≤ 2）
 // ---------------------------------------------------------------------------
 
+interface MinerUGateWaiter {
+  /** 队首唤醒：同步占座（active++）+ resolve（无 await 间隙） */
+  enter: () => void
+  /** 排队超时：从队列摘除自己 + reject 可重试错误 */
+  abort: () => void
+}
+
 interface MinerUGate {
   active: number
-  queue: Array<() => void>
+  queue: Array<MinerUGateWaiter>
 }
 
 const gateG = globalThis as unknown as { __ragMinerUGate?: MinerUGate }
 const MINERU_MAX_CONCURRENT = 2
+/** 排队超时（审计#P1-4：持有者泄漏时防后续请求永久饥饿） */
+const MINERU_QUEUE_TIMEOUT_MS = 30 * 60_000
 
 function getGate(): MinerUGate {
   if (!gateG.__ragMinerUGate) gateG.__ragMinerUGate = { active: 0, queue: [] }
   return gateG.__ragMinerUGate
 }
 
-/** 有界并发闸门：超出上限的解析请求排队等待（防 UI 直跑与流水线并发叠加） */
+/**
+ * 有界并发闸门（防 UI 直跑与流水线并发叠加）。
+ *
+ * 审计#P1-4 竞态修复：原实现「await 让出 → active++」之间存在窗口，两个协程可同时通过
+ * 导致限流失效。现改为检查与占座在同一同步段完成（JS 单线程内不可分割）；
+ * 释放者同步把座位交给队首（enter 内含 active++），全程无让出间隙。
+ * 队列增加 30 分钟超时 → reject 可重试错误（原实现持有者卡 600 次轮询后续永久饥饿）。
+ */
 async function withMineruSlot<T>(fn: () => Promise<T>): Promise<T> {
   const gate = getGate()
-  if (gate.active >= MINERU_MAX_CONCURRENT) {
-    await new Promise<void>((resolve) => gate.queue.push(resolve))
-  }
-  gate.active++
+  await new Promise<void>((resolve, reject) => {
+    if (gate.active < MINERU_MAX_CONCURRENT) {
+      gate.active++ // 同步段完成检查+占座（无 await 间隙 → 无竞态）
+      resolve()
+      return
+    }
+    let settled = false
+    const waiter: MinerUGateWaiter = {
+      enter: () => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        gate.active++
+        resolve()
+      },
+      abort: () => {
+        if (settled) return
+        settled = true
+        const idx = gate.queue.indexOf(waiter)
+        if (idx >= 0) gate.queue.splice(idx, 1)
+        reject(
+          retryable(
+            `MinerU 并发闸门排队超时（${Math.round(MINERU_QUEUE_TIMEOUT_MS / 60_000)} 分钟）——请稍后重试`
+          )
+        )
+      },
+    }
+    const timer = setTimeout(() => waiter.abort(), MINERU_QUEUE_TIMEOUT_MS)
+    gate.queue.push(waiter)
+  })
   try {
     return await fn()
   } finally {
     gate.active--
     const next = gate.queue.shift()
-    if (next) next()
+    next?.enter()
   }
 }
 
@@ -192,10 +240,14 @@ function classifyCloudError(code: number | string | undefined, msg: string, pref
   const num = Number(code)
   if (Number.isInteger(num) && num > 0) {
     if (num === 400 || num === 403 || num === 404) {
-      return nonRetryable('MINERU_API', `${prefix} (HTTP ${num}): ${m}`)
+      const e = nonRetryable('MINERU_API', `${prefix} (HTTP ${num}): ${m}`)
+      e.status = num // 审计#P1-3：404 需被上层识别为远端任务不存在（gone）
+      return e
     }
     if (num === 429 || num >= 500) {
-      return retryable(`${prefix} (HTTP ${num}): ${m}`)
+      const e = retryable(`${prefix} (HTTP ${num}): ${m}`)
+      e.status = num
+      return e
     }
   }
   return retryable(`${prefix}: ${m}`)
@@ -293,8 +345,8 @@ class MinerUClient {
     return json as T
   }
 
-  /** ① 创建上传会话 + ② 流式上传（无 Authorization）+ ③ 完成上传 → fileId */
-  async uploadFile(localPath: string, filename: string): Promise<string> {
+  /** ① 创建上传会话 + ② 流式上传（无 Authorization）+ ③ 完成上传 → { uploadId, fileId } */
+  async uploadFile(localPath: string, filename: string): Promise<{ uploadId: string; fileId: string }> {
     const stat = await fs.stat(localPath)
     // ①
     const createRes = await this.fetchJson<any>('/v1/uploads', {
@@ -336,7 +388,7 @@ class MinerUClient {
     if (!cParsed.success) {
       throw nonRetryable('MINERU_BAD_RESPONSE', `complete 响应结构非法: ${JSON.stringify(completeRes).slice(0, 200)}`)
     }
-    return cParsed.data.id
+    return { uploadId, fileId: cParsed.data.id }
   }
 
   /** ④ 提交解析任务 */
@@ -358,6 +410,11 @@ class MinerUClient {
     return parsed.data.id
   }
 
+  /** ⑤-0 单次任务状态查询（轮询器每轮调用一次；不循环不等待） */
+  async getJob(jobId: string): Promise<MinerUJob> {
+    return this.fetchJson<MinerUJob>(`/v1/parse/jobs/${encodeURIComponent(jobId)}`)
+  }
+
   /** ⑤ 有界轮询（初始 2s，×1.6 退避 + 20% jitter，max 30s，maxAttempts 600） */
   async pollJob(
     jobId: string,
@@ -368,7 +425,7 @@ class MinerUClient {
     for (let i = 0; i < maxAttempts; i++) {
       let job: MinerUJob
       try {
-        job = await this.fetchJson<MinerUJob>(`/v1/parse/jobs/${encodeURIComponent(jobId)}`)
+        job = await this.getJob(jobId)
       } catch (e) {
         // 轮询期间任务被清理（坑#8）→ 可重试（重试时重新提交）
         if (e instanceof StoreError && e.status === 404) throw retryable(`MinerU job ${jobId} 已不存在（服务可能重启）`)
@@ -459,7 +516,7 @@ class MinerUSelfhostProvider implements MinerUProvider {
   async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
     const { localPath, filename, outDir, onProgress } = input
     onProgress?.({ progress: 5, message: '上传文件至 MinerU（自部署）' })
-    const fileId = await this.client.uploadFile(localPath, filename)
+    const { fileId } = await this.client.uploadFile(localPath, filename)
     onProgress?.({ progress: 20, message: '提交解析任务' })
     const jobId = await this.client.submitJob(fileId)
 
@@ -548,9 +605,8 @@ class MinerUCloudProvider implements MinerUProvider {
     return json as T
   }
 
-  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
-    const { localPath, filename, outDir, onProgress } = input
-
+  /** ①+② 申请云上传链接 + PUT 字节（签名上传无鉴权；上传完成即自动提交解析）→ batchId */
+  async submitBatch(localPath: string, filename: string, onProgress?: (e: ParseProgressEvent) => void): Promise<string> {
     // ① 申请批量上传链接（本地文件必须走 file-urls/batch 签名上传，指南 §2.4.1）
     onProgress?.({ progress: 5, message: '申请云上传链接（精准 API）' })
     const dataId = randomUUID().replace(/-/g, '').slice(0, 24)
@@ -587,57 +643,83 @@ class MinerUCloudProvider implements MinerUProvider {
         retryable: putRes.status >= 500 || putRes.status === 429,
       })
     }
+    return batchId
+  }
+
+  /** ③-0 单次批量结果查询（轮询器用，不循环；state/下载直链/错误码原样返回） */
+  async probeBatch(batchId: string): Promise<{
+    state: string
+    fullZipUrl?: string
+    errCode?: number | string
+    errMsg: string
+  }> {
+    const res = await this.apiJson<any>(`/api/v4/extract-results/batch/${encodeURIComponent(batchId)}`)
+    const item = res?.data?.extract_result?.[0]
+    if (!item || typeof item.state !== 'string') {
+      throw nonRetryable(
+        'MINERU_BAD_RESPONSE',
+        `extract-results 响应结构非法: ${JSON.stringify(res).slice(0, 200)}`
+      )
+    }
+    return {
+      state: item.state,
+      fullZipUrl: typeof item.full_zip_url === 'string' ? item.full_zip_url : undefined,
+      errCode: item.err_code,
+      errMsg: String(item.err_msg ?? ''),
+    }
+  }
+
+  /** ④-0 下载 zip 产物（CDN 直链，无鉴权） */
+  async downloadZip(zipUrl: string, outDir: string): Promise<{ markdownPath: string; middleJsonPath: string }> {
+    let zipRes: Response
+    try {
+      zipRes = await fetch(zipUrl, { signal: AbortSignal.timeout(MINERU_TIMEOUT_MS) })
+    } catch (e) {
+      throw retryable(`MinerU 云产物下载失败: ${(e as Error).message}`)
+    }
+    if (!zipRes.ok) {
+      throw new StoreError(`MinerU 云产物下载失败 (${zipRes.status})`, {
+        status: zipRes.status,
+        retryable: zipRes.status >= 500 || zipRes.status === 429,
+      })
+    }
+    const zipBuf = Buffer.from(await zipRes.arrayBuffer())
+    if (zipBuf.length === 0) throw retryable('MinerU 云产物为空')
+    return writeArtifactFromBytes(zipBuf, outDir)
+  }
+
+  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
+    const { localPath, filename, outDir, onProgress } = input
+
+    const batchId = await this.submitBatch(localPath, filename, onProgress)
 
     // ③ 有界轮询批量结果（上传完成后系统自动提交解析，无需再调提交接口）
     onProgress?.({ progress: 25, message: 'MinerU 云解析中' })
     let delay = CLOUD_POLL_INITIAL_MS
     let lastState = ''
     for (let attempt = 1; attempt <= CLOUD_POLL_MAX_ATTEMPTS; attempt++) {
-      const res = await this.apiJson<any>(`/api/v4/extract-results/batch/${encodeURIComponent(batchId)}`)
-      const item = res?.data?.extract_result?.[0]
-      if (!item || typeof item.state !== 'string') {
-        throw nonRetryable(
-          'MINERU_BAD_RESPONSE',
-          `extract-results 响应结构非法: ${JSON.stringify(res).slice(0, 200)}`
-        )
-      }
-      lastState = item.state
-      if (item.state === 'done') {
-        const zipUrl = item.full_zip_url
-        if (typeof zipUrl !== 'string' || !zipUrl) {
+      const r = await this.probeBatch(batchId)
+      lastState = r.state
+      if (r.state === 'done') {
+        if (!r.fullZipUrl) {
           throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 full_zip_url')
         }
-        // ④ 下载 zip 产物（CDN 直链，无鉴权）
+        // ④ 下载 zip 产物
         onProgress?.({ progress: 90, message: '下载解析产物' })
-        let zipRes: Response
-        try {
-          zipRes = await fetch(zipUrl, { signal: AbortSignal.timeout(MINERU_TIMEOUT_MS) })
-        } catch (e) {
-          throw retryable(`MinerU 云产物下载失败: ${(e as Error).message}`)
-        }
-        if (!zipRes.ok) {
-          throw new StoreError(`MinerU 云产物下载失败 (${zipRes.status})`, {
-            status: zipRes.status,
-            retryable: zipRes.status >= 500 || zipRes.status === 429,
-          })
-        }
-        const zipBuf = Buffer.from(await zipRes.arrayBuffer())
-        if (zipBuf.length === 0) throw retryable('MinerU 云产物为空')
-        const { markdownPath: mdPath, middleJsonPath: midPath } = await writeArtifactFromBytes(zipBuf, outDir)
+        const { markdownPath: mdPath, middleJsonPath: midPath } = await this.downloadZip(r.fullZipUrl, outDir)
         return { markdownPath: mdPath, middleJsonPath: midPath, jobId: batchId }
       }
-      if (item.state === 'failed') {
-        const errMsg = String(item.err_msg ?? '')
-        if (item.err_code !== undefined) {
-          throw classifyCloudError(item.err_code, errMsg, 'MinerU 云解析失败')
+      if (r.state === 'failed') {
+        if (r.errCode !== undefined) {
+          throw classifyCloudError(r.errCode, r.errMsg, 'MinerU 云解析失败')
         }
         // 结果项仅有 err_msg：文案级硬失败识别（大小/页数/类型/额度等不重试）
-        if (CLOUD_FAIL_HARD_RE.test(errMsg)) {
-          throw nonRetryable('MINERU_CLOUD_FAILED', `MinerU 云解析失败: ${errMsg.slice(0, 200)}`)
+        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
+          throw nonRetryable('MINERU_CLOUD_FAILED', `MinerU 云解析失败: ${r.errMsg.slice(0, 200)}`)
         }
-        throw retryable(`MINERU_CLOUD_FAILED: ${errMsg.slice(0, 200) || 'MinerU 云解析失败'}`)
+        throw retryable(`MINERU_CLOUD_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云解析失败'}`)
       }
-      const label = CLOUD_STATE_LABELS[item.state] ?? item.state
+      const label = CLOUD_STATE_LABELS[r.state] ?? r.state
       onProgress?.({ progress: Math.min(88, 25 + attempt * 0.3), message: `MinerU 云解析中（${label}）` })
       await sleepJitter(delay)
       delay = Math.min(delay * 1.5, CLOUD_POLL_MAX_MS)
@@ -695,9 +777,8 @@ class MinerUAgentProvider implements MinerUProvider {
     return json as T
   }
 
-  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
-    const { localPath, filename, outDir, onProgress } = input
-
+  /** ①+② 签名上传（免 Token；单文件不支持批量；上传完成即自动提交解析）→ taskId */
+  async submitFile(localPath: string, filename: string, onProgress?: (e: ParseProgressEvent) => void): Promise<string> {
     // ① 签名上传（免 Token；单文件，不支持批量）
     onProgress?.({ progress: 5, message: '申请上传链接（Agent 轻量）' })
     const createRes = await this.apiJson<any>('/api/v1/agent/parse/file', {
@@ -733,59 +814,86 @@ class MinerUAgentProvider implements MinerUProvider {
         retryable: putRes.status >= 500 || putRes.status === 429,
       })
     }
+    return taskId
+  }
+
+  /** ③-0 单次任务状态查询（轮询器用，不循环；state/下载直链/错误码原样返回） */
+  async probeTask(taskId: string): Promise<{
+    state: string
+    markdownUrl?: string
+    errCode?: number | string
+    errMsg: string
+  }> {
+    const res = await this.apiJson<any>(`/api/v1/agent/parse/${encodeURIComponent(taskId)}`)
+    const data = res?.data
+    if (!data || typeof data.state !== 'string') {
+      throw nonRetryable(
+        'MINERU_BAD_RESPONSE',
+        `agent/parse 轮询响应结构非法: ${JSON.stringify(res).slice(0, 200)}`
+      )
+    }
+    return {
+      state: data.state,
+      markdownUrl: typeof data.markdown_url === 'string' ? data.markdown_url : undefined,
+      errCode: data.err_code,
+      errMsg: String(data.err_msg ?? ''),
+    }
+  }
+
+  /** ④-0 下载 markdown 产物（仅 Markdown 输出，无 middle → 合成空） */
+  async downloadMarkdown(mdUrl: string, outDir: string): Promise<{ markdownPath: string; middleJsonPath: string }> {
+    let mdRes: Response
+    try {
+      mdRes = await fetch(mdUrl, { signal: AbortSignal.timeout(MINERU_TIMEOUT_MS) })
+    } catch (e) {
+      throw retryable(`MinerU 云（Agent）产物下载失败: ${(e as Error).message}`)
+    }
+    if (!mdRes.ok) {
+      throw new StoreError(`MinerU 云（Agent）产物下载失败 (${mdRes.status})`, {
+        status: mdRes.status,
+        retryable: mdRes.status >= 500 || mdRes.status === 429,
+      })
+    }
+    const mdBuf = Buffer.from(await mdRes.arrayBuffer())
+    if (mdBuf.length === 0) throw retryable('MinerU 云（Agent）产物为空')
+    const mdPath = path.join(outDir, 'full.md')
+    const midPath = path.join(outDir, 'middle.json')
+    await fs.writeFile(mdPath, mdBuf)
+    await fs.writeFile(midPath, JSON.stringify({ pages: [], blocks: [] }))
+    return { markdownPath: mdPath, middleJsonPath: midPath }
+  }
+
+  async parseFile(input: MinerUParseInput): Promise<MinerUParseOutput> {
+    const { localPath, filename, outDir, onProgress } = input
+
+    const taskId = await this.submitFile(localPath, filename, onProgress)
 
     // ③ 有界轮询（3s 起步 ×1.5 max 20s ≤200 次）
     onProgress?.({ progress: 25, message: 'MinerU 云解析中（Agent）' })
     let delay = CLOUD_POLL_INITIAL_MS
     let lastState = ''
     for (let attempt = 1; attempt <= CLOUD_POLL_MAX_ATTEMPTS; attempt++) {
-      const res = await this.apiJson<any>(`/api/v1/agent/parse/${encodeURIComponent(taskId as string)}`)
-      const data = res?.data
-      if (!data || typeof data.state !== 'string') {
-        throw nonRetryable(
-          'MINERU_BAD_RESPONSE',
-          `agent/parse 轮询响应结构非法: ${JSON.stringify(res).slice(0, 200)}`
-        )
-      }
-      lastState = data.state
-      if (data.state === 'done') {
-        const mdUrl = data.markdown_url
-        if (typeof mdUrl !== 'string' || !mdUrl) {
+      const r = await this.probeTask(taskId)
+      lastState = r.state
+      if (r.state === 'done') {
+        if (!r.markdownUrl) {
           throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 markdown_url')
         }
         // ④ 下载 markdown（仅 Markdown 输出，无 middle → 合成空）
         onProgress?.({ progress: 90, message: '下载解析产物' })
-        let mdRes: Response
-        try {
-          mdRes = await fetch(mdUrl, { signal: AbortSignal.timeout(MINERU_TIMEOUT_MS) })
-        } catch (e) {
-          throw retryable(`MinerU 云（Agent）产物下载失败: ${(e as Error).message}`)
-        }
-        if (!mdRes.ok) {
-          throw new StoreError(`MinerU 云（Agent）产物下载失败 (${mdRes.status})`, {
-            status: mdRes.status,
-            retryable: mdRes.status >= 500 || mdRes.status === 429,
-          })
-        }
-        const mdBuf = Buffer.from(await mdRes.arrayBuffer())
-        if (mdBuf.length === 0) throw retryable('MinerU 云（Agent）产物为空')
-        const mdPath = path.join(outDir, 'full.md')
-        const midPath = path.join(outDir, 'middle.json')
-        await fs.writeFile(mdPath, mdBuf)
-        await fs.writeFile(midPath, JSON.stringify({ pages: [], blocks: [] }))
-        return { markdownPath: mdPath, middleJsonPath: midPath, jobId: taskId as string }
+        const { markdownPath: mdPath, middleJsonPath: midPath } = await this.downloadMarkdown(r.markdownUrl, outDir)
+        return { markdownPath: mdPath, middleJsonPath: midPath, jobId: taskId }
       }
-      if (data.state === 'failed') {
-        const errMsg = String(data.err_msg ?? '')
-        if (data.err_code !== undefined) {
-          throw classifyCloudError(data.err_code, errMsg, 'MinerU 云（Agent）解析失败')
+      if (r.state === 'failed') {
+        if (r.errCode !== undefined) {
+          throw classifyCloudError(r.errCode, r.errMsg, 'MinerU 云（Agent）解析失败')
         }
-        if (CLOUD_FAIL_HARD_RE.test(errMsg)) {
-          throw nonRetryable('MINERU_AGENT_FAILED', `MinerU 云（Agent）解析失败: ${errMsg.slice(0, 200)}`)
+        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
+          throw nonRetryable('MINERU_AGENT_FAILED', `MinerU 云（Agent）解析失败: ${r.errMsg.slice(0, 200)}`)
         }
-        throw retryable(`MINERU_AGENT_FAILED: ${errMsg.slice(0, 200) || 'MinerU 云（Agent）解析失败'}`)
+        throw retryable(`MINERU_AGENT_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云（Agent）解析失败'}`)
       }
-      const label = CLOUD_STATE_LABELS[data.state] ?? data.state
+      const label = CLOUD_STATE_LABELS[r.state] ?? r.state
       onProgress?.({ progress: Math.min(88, 25 + attempt * 0.3), message: `MinerU 云解析中（${label}）` })
       await sleepJitter(delay)
       delay = Math.min(delay * 1.5, CLOUD_POLL_MAX_MS)
@@ -904,6 +1012,226 @@ async function parseWithMineru(input: ParseDocumentInput): Promise<ParseArtifact
     mineruJobId: out.jobId,
     mineruFileId: out.fileId,
   }
+}
+
+// ---------------------------------------------------------------------------
+// 分阶段 MinerU API（Task 15-c 审计#P1-1/P1-3：等待移出并发槽 + 断点续传）
+//
+// 流水线 execParse 只做「上传+提交」（占 MinerU 信号量、占流水线槽位的都是短 IO），
+// 拿到远端 jobId 后持久化到 Document.mineruJobId/mineruUploadId/mineruFileId 并把
+// PipelineJob 置为 waiting_mineru（不占 active 槽）；独立轮询器（pipeline.ts，5s 一轮）
+// 用 probeMineruJob 单次查状态，done 后用 finishMineruArtifact 下载产物并回置 pending
+// 带 payloadJson 阶段游标，正常槽位竞争继续跑 parse 尾部（doc 字段回写 + 入队 chunk）。
+// ---------------------------------------------------------------------------
+
+/** 远端任务句柄（与 Document.mineruJobId/mineruUploadId/mineruFileId 一一对应） */
+export interface MinerUHandle {
+  /** selfhost: parse job id；cloud: batch_id；cloud-agent: task_id */
+  jobId: string
+  uploadId?: string
+  fileId?: string
+}
+
+/** 单次状态探测结果（绝不内部循环等待） */
+export type MinerUProbeResult =
+  | { state: 'running'; label?: string }
+  /** done：cloud/cloud-agent 携带产物直链（selfhost 用 handle.fileId 下载） */
+  | { state: 'done'; downloadUrl?: string }
+  /** 远端明确失败（终态 failed / 不可重试业务错误） */
+  | { state: 'failed'; error: StoreError }
+  /** 远端任务不存在（404：服务重启/过期清理）→ 调用方清字段重新提交 */
+  | { state: 'gone' }
+  /** 瞬时错误（网络/5xx/429）→ 轮询器下轮再查，不计失败 */
+  | { state: 'error'; error: StoreError }
+
+/** 判定文档将使用的解析引擎（per-doc engineChoice > 全局 parseMode；均未配置 → 硬失败） */
+export function resolveDocEngine(
+  settings: RagSettings,
+  engineChoice?: 'mineru' | 'node'
+): 'mineru' | 'node' {
+  if (engineChoice === 'node') return 'node'
+  if (engineChoice === 'mineru') return 'mineru'
+  if (settings.parseMode === 'mineru') return 'mineru'
+  if (settings.parseMode === 'fallback') return 'node'
+  throw nonRetryable(
+    'PARSE_NOT_CONFIGURED',
+    '未配置 MinerU API 且未启用降级解析器，无法解析文档（请在设置中配置 MinerU 或开启 useFallbackParser）'
+  )
+}
+
+/** MinerU 配置完备性（与 parseWithMineru 同文案） */
+function assertMineruConfigured(s: RagSettings['mineru']): void {
+  if (s.provider === 'selfhost' && !s.url) {
+    throw nonRetryable(
+      'MINERU_NOT_CONFIGURED',
+      'MinerU 引擎已选定（自部署 V1），但服务地址未配置——请在「设置 → MinerU」填写 API 地址，或将该文档改用 Node 引擎解析'
+    )
+  }
+  if (s.provider === 'cloud' && !s.apiKey) {
+    throw nonRetryable(
+      'MINERU_NOT_CONFIGURED',
+      'MinerU 引擎已选定（官方云·精准 API），但 API Token 未配置——请在「设置 → MinerU」填写 Token，或将该文档改用 Node 引擎解析'
+    )
+  }
+  // cloud-agent：免凭据，恒可用
+}
+
+/**
+ * 阶段一：上传 + 提交（占 MinerU 信号量；短 IO，不含轮询等待）。
+ * 返回远端任务句柄，由调用方持久化后转入 waiting_mineru 等待轮询器接管。
+ */
+export async function submitMineruJob(input: {
+  docId: string
+  kbId: string
+  filename: string
+  localPath: string
+  settings: RagSettings
+  onProgress?: (e: ParseProgressEvent) => void
+}): Promise<MinerUHandle> {
+  const s = input.settings.mineru
+  assertMineruConfigured(s)
+
+  if (s.provider === 'cloud') {
+    const p = new MinerUCloudProvider(s.apiKey)
+    const batchId = await withMineruSlot(() => p.submitBatch(input.localPath, input.filename, input.onProgress))
+    return { jobId: batchId }
+  }
+  if (s.provider === 'cloud-agent') {
+    const p = new MinerUAgentProvider()
+    const taskId = await withMineruSlot(() => p.submitFile(input.localPath, input.filename, input.onProgress))
+    return { jobId: taskId }
+  }
+  const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
+  return withMineruSlot(async () => {
+    input.onProgress?.({ progress: 5, message: '上传文件至 MinerU（自部署）' })
+    const { uploadId, fileId } = await client.uploadFile(input.localPath, input.filename)
+    input.onProgress?.({ progress: 20, message: '提交解析任务' })
+    const jobId = await client.submitJob(fileId)
+    return { jobId, uploadId, fileId }
+  })
+}
+
+/** 阶段二：单次状态查询（不占任何信号量/槽位；网络瞬时错误 → state='error'） */
+export async function probeMineruJob(
+  handle: MinerUHandle,
+  settings: RagSettings
+): Promise<MinerUProbeResult> {
+  const s = settings.mineru
+  try {
+    if (s.provider === 'cloud') {
+      const p = new MinerUCloudProvider(s.apiKey)
+      const r = await p.probeBatch(handle.jobId)
+      if (r.state === 'done') return { state: 'done', downloadUrl: r.fullZipUrl }
+      if (r.state === 'failed') {
+        if (r.errCode !== undefined) {
+          return { state: 'failed', error: classifyCloudError(r.errCode, r.errMsg, 'MinerU 云解析失败') }
+        }
+        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
+          return {
+            state: 'failed',
+            error: nonRetryable('MINERU_CLOUD_FAILED', `MinerU 云解析失败: ${r.errMsg.slice(0, 200)}`),
+          }
+        }
+        return {
+          state: 'failed',
+          error: retryable(`MINERU_CLOUD_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云解析失败'}`),
+        }
+      }
+      return { state: 'running', label: CLOUD_STATE_LABELS[r.state] ?? r.state }
+    }
+    if (s.provider === 'cloud-agent') {
+      const p = new MinerUAgentProvider()
+      const r = await p.probeTask(handle.jobId)
+      if (r.state === 'done') return { state: 'done', downloadUrl: r.markdownUrl }
+      if (r.state === 'failed') {
+        if (r.errCode !== undefined) {
+          return { state: 'failed', error: classifyCloudError(r.errCode, r.errMsg, 'MinerU 云（Agent）解析失败') }
+        }
+        if (CLOUD_FAIL_HARD_RE.test(r.errMsg)) {
+          return {
+            state: 'failed',
+            error: nonRetryable('MINERU_AGENT_FAILED', `MinerU 云（Agent）解析失败: ${r.errMsg.slice(0, 200)}`),
+          }
+        }
+        return {
+          state: 'failed',
+          error: retryable(`MINERU_AGENT_FAILED: ${r.errMsg.slice(0, 200) || 'MinerU 云（Agent）解析失败'}`),
+        }
+      }
+      return { state: 'running', label: CLOUD_STATE_LABELS[r.state] ?? r.state }
+    }
+    const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
+    const job = await client.getJob(handle.jobId)
+    if (TERMINAL_STATES.has(job.status)) {
+      // §5.4 状态映射（与同步链路 parseWithMineru 同口径）
+      if (job.status === 'completed') return { state: 'done' }
+      if (job.status === 'partial') {
+        return {
+          state: 'failed',
+          error: nonRetryable('MINERU_PARTIAL', `MinerU 任务部分完成（单文件任务不应出现）: ${job.error ?? ''}`),
+        }
+      }
+      if (job.status === 'failed') {
+        return { state: 'failed', error: retryable(`MINERU_FAILED: ${job.error ?? 'MinerU 解析失败'}`) }
+      }
+      return { state: 'failed', error: nonRetryable('MINERU_CANCELED', 'MinerU 任务已取消') }
+    }
+    return { state: 'running', label: job.status }
+  } catch (e) {
+    const err = e instanceof StoreError ? e : retryable(String((e as Error)?.message ?? e))
+    // 远端任务不存在（服务重启/过期清理；selfhost fetchJson 与云 classifyCloudError 均携带 status=404）
+    // → gone（调用方清字段重新提交）
+    if (err instanceof StoreError && err.status === 404) return { state: 'gone' }
+    if (isNonRetryable(err)) return { state: 'failed', error: err }
+    return { state: 'error', error: err }
+  }
+}
+
+/**
+ * 阶段三：下载 + 解压 + middle.json 归一化（复用同步链路产物处理逻辑）。
+ * 产物写入 {kbId}/{docId}/full.md + middle.json，返回页数与布局块数。
+ */
+export async function finishMineruArtifact(
+  handle: MinerUHandle,
+  probe: { state: 'done'; downloadUrl?: string },
+  input: { docId: string; kbId: string },
+  settings: RagSettings,
+  onProgress?: (e: ParseProgressEvent) => void
+): Promise<{ pages: number; blockCount: number }> {
+  const s = settings.mineru
+  const outDir = await ensureDocDir(input.kbId, input.docId)
+  onProgress?.({ progress: 92, message: '下载解析产物' })
+  let mdPath: string
+  let midPath: string
+  if (s.provider === 'cloud') {
+    if (!probe.downloadUrl) {
+      throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 full_zip_url')
+    }
+    const p = new MinerUCloudProvider(s.apiKey)
+    ;({ markdownPath: mdPath, middleJsonPath: midPath } = await p.downloadZip(probe.downloadUrl, outDir))
+  } else if (s.provider === 'cloud-agent') {
+    if (!probe.downloadUrl) {
+      throw nonRetryable('MINERU_BAD_RESPONSE', '任务 done 但缺少 markdown_url')
+    }
+    const p = new MinerUAgentProvider()
+    ;({ markdownPath: mdPath, middleJsonPath: midPath } = await p.downloadMarkdown(probe.downloadUrl, outDir))
+  } else {
+    if (!handle.fileId) {
+      throw nonRetryable('MINERU_BAD_RESPONSE', '自部署任务缺少 file_id，无法下载产物（将重新提交）')
+    }
+    const client = new MinerUClient(s.url, s.apiKey, s.tier, s.ocrMode)
+    ;({ markdownPath: mdPath, middleJsonPath: midPath } = await client.downloadArtifact(handle.fileId, outDir))
+  }
+  // middle.json 归一化（与 parseWithMineru 同口径）
+  onProgress?.({ progress: 95, message: '归一化布局元数据' })
+  const markdown = await fs.readFile(mdPath, 'utf-8')
+  let rawMiddle: unknown = {}
+  try {
+    rawMiddle = JSON.parse(await fs.readFile(midPath, 'utf-8'))
+  } catch {}
+  const middle = normalizeMiddleJson(rawMiddle, markdown)
+  await fs.writeFile(midPath, JSON.stringify(middle))
+  return { pages: middle.pages.length, blockCount: middle.blocks.length }
 }
 
 // ---------------------------------------------------------------------------

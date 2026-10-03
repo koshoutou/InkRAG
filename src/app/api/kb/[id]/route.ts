@@ -5,6 +5,7 @@ import { getVectorStore } from '@/lib/rag/vectorstore'
 import { kbSummaryWithCounts } from '@/lib/rag/kb'
 import { parseChunkConfig, toDocSummary } from '@/lib/rag/serialize'
 import { ARTIFACTS_ROOT } from '@/lib/rag/artifacts'
+import { cancelKbJobs } from '@/lib/rag/pipeline'
 import path from 'node:path'
 
 export const dynamic = 'force-dynamic'
@@ -88,6 +89,11 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     const docs = await db.document.findMany({ where: { kbId: id }, select: { id: true } })
     const chunkCount = await db.chunk.count({ where: { kbId: id } })
 
+    // 0) 先取消该 KB 全部在途任务（pending/active/waiting_mineru → cancelled + abort）。
+    // 审计#N13：原先不取消 → 删除后 runJob 下轮查 kb=null 抛「知识库不存在」+ 产物目录已删 → 半写状态。
+    // 必须先取消再删向量/行/目录。
+    const cancelledJobs = await cancelKbJobs(id)
+
     // 1) 向量集合整体删除（Qdrant deleteCollection；不可达时跳过并告警，行数据仍级联删除）
     let pointsDeleted = 0
     try {
@@ -113,7 +119,7 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
 
     return NextResponse.json({
       ok: true,
-      deleted: { docs: docs.length, chunks: chunkCount, points: pointsDeleted },
+      deleted: { docs: docs.length, chunks: chunkCount, points: pointsDeleted, cancelledJobs },
     })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })

@@ -5,7 +5,7 @@ import { db } from '@/lib/db'
 import { getVectorStore } from '@/lib/rag/vectorstore'
 import { markdownPath, middleJsonPath, removeDocDir, sourcePath } from '@/lib/rag/artifacts'
 import { toDocSummary } from '@/lib/rag/serialize'
-import { updateKbStats } from '@/lib/rag/pipeline'
+import { cancelDocumentJobs, updateKbStats } from '@/lib/rag/pipeline'
 import type { Document, KnowledgeBase } from '@prisma/client'
 
 export const dynamic = 'force-dynamic'
@@ -71,6 +71,9 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     const loaded = await loadDoc(id)
     if (!loaded) return NextResponse.json({ error: '文档不存在' }, { status: 404 })
     const { doc, kb } = loaded
+
+    // 0) 先取消该文档全部在途任务（pending/active/waiting_mineru → cancelled + abort；审计#N13 同 KB 删除）
+    await cancelDocumentJobs(id)
 
     // 1) 向量 delete(filter doc_id)
     try {

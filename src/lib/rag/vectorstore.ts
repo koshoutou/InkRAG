@@ -628,8 +628,10 @@ interface ProbeResult {
 const gProbe = globalThis as unknown as { __ragQdrantProbe?: Map<string, ProbeResult> }
 const probeCache: Map<string, ProbeResult> = (gProbe.__ragQdrantProbe ??= new Map())
 const PROBE_TTL_MS = 30_000
+/** 失败探测短缓存：链路抖动时让重试尽快重新探测（审计实测发现） */
+const PROBE_FAIL_TTL_MS = 5_000
 
-/** Qdrant 健康探测（3s 超时；默认 30s 缓存，noCache 强制实时） */
+/** Qdrant 健康探测（默认 10s 超时——远程高延迟实例实测 3s 过紧导致误判不可达；30s 缓存，noCache 强制实时） */
 export async function isQdrantReachable(
   conn: QdrantConn,
   opts: { timeoutMs?: number; noCache?: boolean } = {}
@@ -637,7 +639,11 @@ export async function isQdrantReachable(
   const key = conn.url
   if (!opts.noCache) {
     const cached = probeCache.get(key)
-    if (cached && Date.now() - cached.at < PROBE_TTL_MS) return cached
+    // 成功探测缓存 30s；失败探测只缓存 5s——链路抖动时 job 的重试不应
+    // 全部落在同一个“不可达”缓存窗口内瞬败（否则 3 次重试形同虚设）
+    if (cached && Date.now() - cached.at < (cached.ok ? PROBE_TTL_MS : PROBE_FAIL_TTL_MS)) {
+      return cached
+    }
   }
   let result: ProbeResult
   try {
@@ -647,7 +653,7 @@ export async function isQdrantReachable(
     const res = await fetch(base + '/readyz', {
       headers,
       cache: 'no-store',
-      signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000),
+      signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
     })
     if (!res.ok) {
       result = { ok: false, message: `连接失败：HTTP ${res.status}`, at: Date.now() }
@@ -657,7 +663,7 @@ export async function isQdrantReachable(
         const vRes = await fetch(base + '/', {
           headers,
           cache: 'no-store',
-          signal: AbortSignal.timeout(opts.timeoutMs ?? 3_000),
+          signal: AbortSignal.timeout(opts.timeoutMs ?? 10_000),
         })
         if (vRes.ok) version = (await vRes.json())?.version
       } catch {}

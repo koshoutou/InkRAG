@@ -128,7 +128,8 @@ export async function renderPrometheus(): Promise<string> {
   lines.push('# HELP rag_pipeline_jobs_total 流水线任务数（按状态与类型，持久）')
   lines.push('# TYPE rag_pipeline_jobs_total gauge')
   const jobSet = new Set(jobsByStatusType.map((r) => `${r.status}|${r.type}`))
-  for (const status of ['pending', 'active', 'completed', 'failed']) {
+  // Task 15-c：新增 waiting_mineru（MinerU 等待期）/ cancelled（取消终态）两状态
+  for (const status of ['pending', 'active', 'waiting_mineru', 'completed', 'failed', 'cancelled']) {
     for (const type of JOB_TYPES) {
       const key = `${status}|${type}`
       if (jobSet.has(key)) {
@@ -142,6 +143,7 @@ export async function renderPrometheus(): Promise<string> {
   lines.push('# TYPE rag_pipeline_queue_depth gauge')
   lines.push(`rag_pipeline_queue_depth{status="pending"} ${pipe.pending}`)
   lines.push(`rag_pipeline_queue_depth{status="active"} ${pipe.active}`)
+  lines.push(`rag_pipeline_queue_depth{status="waiting_mineru"} ${pipe.waiting}`)
   lines.push(`rag_pipeline_queue_depth{status="failed"} ${pipe.failed}`)
   lines.push('# HELP rag_pipeline_uptime_seconds 流水线引擎运行时长')
   lines.push('# TYPE rag_pipeline_uptime_seconds gauge')

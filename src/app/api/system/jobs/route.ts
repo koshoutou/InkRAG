@@ -19,10 +19,12 @@ export async function GET(req: NextRequest) {
     if (status) where.status = status
     if (type) where.type = type
 
-    const [jobs, pending, active, completed, failed, byTypeRows] = await Promise.all([
+    const [jobs, pending, active, waiting, cancelled, completed, failed, byTypeRows] = await Promise.all([
       db.pipelineJob.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit }),
       db.pipelineJob.count({ where: { status: 'pending' } }),
       db.pipelineJob.count({ where: { status: 'active' } }),
+      db.pipelineJob.count({ where: { status: 'waiting_mineru' } }),
+      db.pipelineJob.count({ where: { status: 'cancelled' } }),
       db.pipelineJob.count({ where: { status: 'completed' } }),
       db.pipelineJob.count({ where: { status: 'failed' } }),
       db.pipelineJob.groupBy({ by: ['type'], _count: { _all: true } }),
@@ -40,7 +42,7 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({
       jobs: jobs.map((j) => toJobItem(j, nameMap.get(j.documentId))),
-      stats: { pending, active, completed, failed, byType },
+      stats: { pending, active, waiting, cancelled, completed, failed, byType },
     })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
