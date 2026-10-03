@@ -170,86 +170,6 @@ export interface ChunkPreview {
 }
 
 // ---------------------------------------------------------------------------
-// §3 检索
-// ---------------------------------------------------------------------------
-
-export interface SearchDebugBody {
-  kbId: string
-  query: string
-  topK?: number
-  mode?: SearchMode
-  rerank?: boolean
-  prefetchLimit?: number
-  filter?: { docIds?: string[]; pageRange?: [number, number] }
-  withParentContext?: boolean
-  debug?: { fusion?: FusionMode; rrfK?: number; rrfWeights?: [number, number] }
-}
-
-export interface DebugRankItem {
-  chunkId: string
-  score: number
-  page: number
-  preview: string
-}
-
-export interface FusedRankItem {
-  chunkId: string
-  score: number
-  denseRank?: number
-  sparseRank?: number
-}
-
-export interface RerankRankItem {
-  chunkId: string
-  rerankScore: number
-  prevRank: number
-}
-
-export interface SearchHit {
-  chunkId: string
-  score: number
-  rerankScore?: number | null
-  text: string
-  parentText?: string | null
-  source: {
-    docId: string
-    filename: string
-    page: number
-    bbox: number[] | null
-    seq: number
-    docType: string
-  }
-}
-
-export interface SearchResponse {
-  tookMs: number
-  stages: {
-    embedMs: number
-    recallMs: number
-    fusionMs: number
-    rerankMs: number
-    contextMs: number
-  }
-  results: SearchHit[]
-  debug: {
-    embed: {
-      dim: number
-      denseHash: string
-      denseFirst8: number[]
-      sparseNnz: number
-      provider: string
-    }
-    denseTop: DebugRankItem[]
-    sparseTop: DebugRankItem[]
-    fusedTop: FusedRankItem[]
-    rerankTop?: RerankRankItem[]
-    fusion: string
-    rrfK?: number
-    mode: string
-  }
-}
-
-// ---------------------------------------------------------------------------
 // §4 API Keys
 // ---------------------------------------------------------------------------
 
@@ -281,7 +201,6 @@ export interface HealthInfo {
 /** /api/system/metrics-summary（Prometheus 指标 JSON 摘要） */
 export interface MetricsSummary {
   process: { uptimeSec: number }
-  search: { total: number; errors: number; avgMs: number | null; maxMs: number; byMode: Record<string, number> }
   store: { kbs: number; documents: Record<string, number>; chunks: number; enabledChunks: number; points: number }
   api: { calls: number }
   pipeline: { pending: number; active: number; failed: number; completed: number; uptimeSec: number }
@@ -328,16 +247,6 @@ export interface DashboardData {
     docsProcessing: number
   }
   recentDocs: (DocSummary & { kbName: string })[]
-  recentLogs: {
-    id: string
-    query: string
-    collection: string
-    mode: string
-    tookMs: number
-    resultCount: number
-    source: string
-    createdAt: string
-  }[]
   jobs: { pending: number; active: number; failed: number }
   statusFlow: Record<string, number>
 }
@@ -575,49 +484,6 @@ export interface ChunkBatchResult {
   updated: number
   /** 向量 payload 同步失败的 chunk 数（非致命，DB 已更新） */
   payloadSyncFailed: number
-}
-
-// ---------------------------------------------------------------------------
-// §14 仪表盘检索质量趋势（/api/dashboard/trends，数据源 QdrantCallLog）
-// ---------------------------------------------------------------------------
-
-export interface TrendDay {
-  /** yyyy-MM-dd */
-  date: string
-  /** 当日检索次数 */
-  searches: number
-  /** 平均耗时 ms */
-  avgMs: number
-  /** P95 耗时 ms */
-  p95Ms: number
-  /** 平均结果数 */
-  avgResults: number
-  /** 空结果次数（resultCount=0） */
-  zeroResults: number
-}
-
-export interface TopQueryItem {
-  query: string
-  count: number
-  avgMs: number
-  avgResults: number
-  lastAt: string
-  /** 主要来源：debug-console | external | web-ui */
-  source: string
-}
-
-export interface ModeBreakdownItem {
-  mode: string
-  count: number
-  avgMs: number
-}
-
-export interface DashboardTrends {
-  /** 最近 N 天（含空日补零），倒序→正序由前端决定 */
-  days: TrendDay[]
-  topQueries: TopQueryItem[]
-  modeBreakdown: ModeBreakdownItem[]
-  totals: { searches: number; avgMs: number; p95Ms: number; zeroRate: number }
 }
 
 // ---------------------------------------------------------------------------

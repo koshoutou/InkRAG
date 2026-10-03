@@ -31,7 +31,6 @@ const KnowledgeBasesView = dynamic(() => import('./views/KnowledgeBasesView').th
 const DocumentsView = dynamic(() => import('./views/DocumentsView').then((m) => m.DocumentsView), { loading: ViewLoading })
 const ViewerView = dynamic(() => import('./views/ViewerView').then((m) => m.ViewerView), { loading: ViewLoading })
 const SandboxView = dynamic(() => import('./views/SandboxView').then((m) => m.SandboxView), { loading: ViewLoading })
-const RetrievalDebugView = dynamic(() => import('./views/RetrievalDebugView').then((m) => m.RetrievalDebugView), { loading: ViewLoading })
 const TestSetsView = dynamic(() => import('./views/TestSetsView').then((m) => m.TestSetsView), { loading: ViewLoading })
 const ApiKeysView = dynamic(() => import('./views/ApiKeysView').then((m) => m.ApiKeysView), { loading: ViewLoading })
 const OpsView = dynamic(() => import('./views/OpsView').then((m) => m.OpsView), { loading: ViewLoading })
@@ -107,7 +106,6 @@ function Inner() {
         {activeView === 'docs' && <DocumentsView key="docs" />}
         {activeView === 'viewer' && <ViewerView key="viewer" />}
         {activeView === 'sandbox' && <SandboxView key="sandbox" />}
-        {activeView === 'retrieval' && <RetrievalDebugView key="retrieval" />}
         {activeView === 'testsets' && <TestSetsView key="testsets" />}
         {activeView === 'apikeys' && <ApiKeysView key="apikeys" />}
         {activeView === 'ops' && <OpsView key="ops" />}

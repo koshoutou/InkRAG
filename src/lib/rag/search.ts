@@ -1,24 +1,24 @@
 /**
- * 检索管线（计划书 §12.1 六阶段，生产 API 与调试台共用一条代码路径）
+ * 检索管线（计划书 §12.1 六阶段；§32 后仅供内部质量回归/运维排障使用）
  *
  * Stage A · Embedding: query → dense + sparse（耗时/向量摘要）
  * Stage B · 双路召回: dense/sparse 各自 Top prefetchLimit（各路分数保留展示）
  * Stage C · 融合: RRF（默认 k=60, w=[0.5,0.5]）| DBSF → fusedTop
  * Stage D · Rerank（可选）: fused Top → rerank → Top-N
  * Stage E · 上下文回填: parent_text 冗余直用；缺失则按 parent_id 读父 chunk 全文
- * Stage F · 组装: 结果 + 坐标溯源 + stages 耗时 + 调试信息 + 检索日志
+ * Stage F · 组装: 结果 + 坐标溯源 + stages 耗时 + 调试信息
  *
- * 说明：为给调试台提供 dense/sparse 分路原始分，Stage B 固定分两路查询
- * （local/qdrant 同一路径），融合在进程内完成（RRF/DBSF 与 Qdrant 语义一致）。
+ * 说明：对外检索 API（/api/v1/knowledge-bases/…/search 与 /api/search/debug）与检索日志记录
+ * 已按「平台只做知识库管理」定位移除（Task 17-1 / 契约 §32）；runSearch 仅由
+ * 测试集质量回归（testset.ts）与内部排障调用，不产生任何检索日志。
  */
 import { createHash } from 'node:crypto'
 import { db } from '@/lib/db'
 import { embedQuery } from './embed'
-import { rerankDocs, rerankProviderLabel } from './rerank'
+import { rerankDocs } from './rerank'
 import { chunkPath, resolveStorageKey } from './artifacts'
 import { promises as fs } from 'node:fs'
 import { buildSearchFilter, dbsfFuse, getVectorStore, rrfFuse, StoreError } from './vectorstore'
-import { recordSearch } from './metrics'
 import type {
   DebugTopItem,
   FusedTopItem,
@@ -300,61 +300,7 @@ export async function runSearch(opts: RunSearchOpts): Promise<SearchResponse> {
     },
   }
 
-  // ---- Stage F · 检索日志（回放/审计）+ 指标埋点 ----
-  // 重排 provider（real 携带真实模型名，mock 为 'mock-bm25'）→ 写入调用日志 debugJson
-  const rerankProvider = wantRerank ? await rerankProviderLabel().catch(() => 'unknown') : undefined
-  void writeSearchLog(opts, kb.collection, response, finalIds, { rerankProvider }).catch(() => {})
-  recordSearch(mode, tookMs, true)
-
+  // §32（Task 17-1）：对外检索 API 与检索日志记录已随「平台只做知识库管理」定位移除；
+  // runSearch 仅保留内部质量回归（测试集）与运维排障用途，不再写 QdrantCallLog。
   return response
-}
-
-async function writeSearchLog(
-  opts: RunSearchOpts,
-  collection: string,
-  response: SearchResponse,
-  finalIds: string[],
-  extra: { rerankProvider?: string } = {}
-): Promise<void> {
-  try {
-    await db.qdrantCallLog.create({
-      data: {
-        source: opts.source,
-        collection,
-        query: opts.query,
-        mode: opts.mode ?? 'hybrid',
-        topK: opts.topK ?? DEFAULT_TOP_K,
-        scoreThreshold: 0,
-        reranked: opts.rerank ?? false,
-        tookMs: response.tookMs,
-        resultCount: response.results.length,
-        paramsJson: JSON.stringify({
-          kbId: opts.kbId,
-          filter: opts.filter ?? null,
-          withParentContext: opts.withParentContext ?? true,
-          debug: opts.debug ?? null,
-          prefetchLimit: opts.debug?.prefetchLimit ?? opts.prefetchLimit ?? DEFAULT_PREFETCH,
-        }),
-        resultsJson: JSON.stringify(
-          response.results.map((r) => ({
-            id: r.chunkId,
-            score: r.score,
-            doc: r.source.docId,
-            filename: r.source.filename,
-            page: r.source.page,
-            preview: r.text.slice(0, 120),
-          }))
-        ),
-        debugJson: JSON.stringify({
-          stages: response.stages,
-          embed: response.debug.embed,
-          fusedTopCount: response.debug.fusedTop.length,
-          finalIds,
-          ...(extra.rerankProvider ? { rerankProvider: extra.rerankProvider } : {}),
-        }),
-      },
-    })
-  } catch {
-    // 日志失败不影响检索
-  }
 }

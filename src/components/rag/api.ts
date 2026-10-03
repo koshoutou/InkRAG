@@ -11,7 +11,6 @@ import type {
   ChunkItem,
   ChunkPreview,
   DashboardData,
-  DashboardTrends,
   DocVersionInfo,
   ActivityResponse,
   ResourceUsage,
@@ -28,8 +27,6 @@ import type {
   MetricsSummary,
   RagSettings,
   RestoreResult,
-  SearchDebugBody,
-  SearchResponse,
   TestCaseItem,
   TestCaseParams,
   QdrantSnapshotItem,
@@ -305,17 +302,6 @@ export const ragApi = {
     )
   },
 
-  // -- §3 检索调试 ----------------------------------------------------------
-  async searchDebug(body: SearchDebugBody): Promise<{ result: SearchResponse }> {
-    return asJson(
-      await req('/api/search/debug', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      }),
-    )
-  },
-
   // -- §4 API Keys ----------------------------------------------------------
   async listKeys(): Promise<{ keys: ApiKeyItem[] }> {
     return asJson(await req('/api/apikeys', { cache: 'no-store' }))
@@ -532,13 +518,6 @@ export const ragApi = {
   // -- §7 仪表盘 ------------------------------------------------------------
   async getDashboard(): Promise<{ dashboard: DashboardData }> {
     return asJson(await req('/api/dashboard', { cache: 'no-store' }))
-  },
-  async getDashboardTrends(days = 14, kbId?: string): Promise<{ trends: DashboardTrends }> {
-    return asJson(
-      await req(`/api/dashboard/trends${qs({ days, kbId: kbId || undefined })}`, {
-        cache: 'no-store',
-      }),
-    )
   },
 
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------

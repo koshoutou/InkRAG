@@ -653,23 +653,15 @@ export function OpsView() {
                 const modeRows = Object.entries(m.modes).filter(([, v]) => v)
                 return (
                   <>
-                    <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-6">
+                    <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
                       <div className="rounded-lg border border-border/60 bg-muted/20 p-2 text-center">
                         <p className="flex items-center justify-center gap-1 text-[9px] text-muted-foreground"><Timer className="h-2.5 w-2.5" />进程运行</p>
                         <p className="font-mono text-sm font-semibold tabular-nums">{formatUptime(m.process.uptimeSec)}</p>
                       </div>
                       <div className="rounded-lg border border-border/60 bg-muted/20 p-2 text-center">
-                        <p className="text-[9px] text-muted-foreground">检索次数</p>
-                        <p className="font-mono text-sm font-semibold tabular-nums">{formatNumber(m.search.total)}</p>
-                        <p className="text-[8px] text-muted-foreground">avg {m.search.avgMs ?? '—'}ms · max {m.search.maxMs}ms</p>
-                      </div>
-                      <div className="rounded-lg border border-border/60 bg-muted/20 p-2 text-center">
-                        <p className="text-[9px] text-muted-foreground">检索错误</p>
-                        <p className={cn('font-mono text-sm font-semibold tabular-nums', m.search.errors > 0 && 'text-rose-600 dark:text-rose-400')}>{m.search.errors}</p>
-                      </div>
-                      <div className="rounded-lg border border-border/60 bg-muted/20 p-2 text-center">
                         <p className="text-[9px] text-muted-foreground">API 调用（累计）</p>
                         <p className="font-mono text-sm font-semibold tabular-nums">{formatNumber(m.api.calls)}</p>
+                        <p className="text-[8px] text-muted-foreground">对外入库 API / Dify 兼容层</p>
                       </div>
                       <div className="rounded-lg border border-border/60 bg-muted/20 p-2 text-center">
                         <p className="text-[9px] text-muted-foreground">启用 chunk / 总数</p>
@@ -681,13 +673,7 @@ export function OpsView() {
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-1.5">
-                      {Object.entries(m.search.byMode).length > 0 ? (
-                        Object.entries(m.search.byMode).map(([mode, n]) => (
-                          <Badge key={mode} variant="secondary" className="font-mono text-[10px]">{mode}×{n}</Badge>
-                        ))
-                      ) : (
-                        <span className="text-[10px] text-muted-foreground">暂无检索记录</span>
-                      )}
+                      <span className="text-[10px] text-muted-foreground">§32：检索指标已随对外检索 API 移除（平台只做知识库管理）</span>
                       <span className="ml-auto flex items-center gap-1 text-[10px] text-muted-foreground">
                         {modeRows.map(([k, v]) => (
                           <Badge key={k} variant="outline" className="text-[9px] font-mono">{k}={v}</Badge>

@@ -144,7 +144,12 @@ interface LayoutBlock {
 }
 ```
 
-## 3. 检索（生产 API + 调试台同路径）
+## 3. 检索（§32 已移除——2026-10-03 Task 17-1）
+
+> **本节端点已全部移除**：`POST /api/search/debug` 与 `POST /api/v1/knowledge-bases/[kbId]/search`
+> 已下线（404）。平台定位收敛为「知识库管理」；检索调用与审计由用户独立的 API 审计平台承担。
+> 内部 `runSearch`（lib/rag/search.ts）保留，仅供测试集质量回归（§12）与排障使用，不再写任何检索日志。
+> 历史内容（六阶段语义/参数）迁移至测试集文档；对外检索协议请参考独立审计平台的文档。
 
 ### POST /api/search/debug  （Web 调试台用，无需 API Key）
 Body:
@@ -343,7 +348,10 @@ TestRunCaseResult = { caseId; name; query; pass; hitRate; mrr; tookMs; hits: str
   - csv：UTF-8 BOM，列 seq,isParent,docType,tokenCount,pageFrom,pageTo,enabled,editedAt,text（text 内换行/引号 CSV 转义）
   - md：按 seq 重组 markdown（`## chunk {seq} · {docType}` 分节）
 
-## 14. 仪表盘检索质量趋势 `/api/dashboard/trends`（数据源 QdrantCallLog）
+## 14. 检索质量趋势（§32 已移除——2026-10-03 Task 17-1）
+
+> **本节端点已移除**：`GET /api/dashboard/trends` 与 `GET /api/dashboard` 的 `recentLogs` 字段已下线；
+> 检索指标（Prometheus rag_search_*、metricsSummary.search）同步移除。检索趋势统计请到独立审计平台查看。
 
 - `GET /api/dashboard/trends?days=14` → `{ trends: DashboardTrends }`
   - days：1-90，默认 14；返回按日聚合（空日补零）+ 热门查询 Top 10 + 模式分布 + 全期汇总
@@ -679,3 +687,27 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 - 版本快照（§27）新增 `fullMd` 字段（≤8MB）：恢复时直接回写 full.md + middle.json 重对齐；
   旧快照无 fullMd → 按子 chunk 全文从后往前 splice 到当前 full.md（降级 best-effort）
 - 响应新增 `docPatch: { patched, note }`（编辑/删除）与 `mdRestored: boolean`（版本恢复）
+
+## §32 对外检索 API 与检索日志移除（Task 17-1，2026-10-03）
+
+**背景**：平台定位收敛为「知识库管理」（入库 / 解析 / 切分 / 版本 / 备份 / 导出）；
+检索调用与审计由用户自建的独立 API 审计平台承担。本节记录本轮移除的完整清单与保留边界。
+
+**移除的端点与功能**：
+- `POST /api/v1/knowledge-bases/[kbId]/search`（对外 Agent 检索 API）→ 404
+- `POST /api/search/debug`（检索调试台后端）→ 404
+- `GET /api/dashboard/trends`（检索质量趋势）→ 404
+- `GET /api/dashboard` 响应不再含 `recentLogs`
+- Prometheus 指标 `rag_search_*` 全系列与 `metricsSummary().search` 字段
+- 前端「检索调试台」视图（含检索历史回放 / 下钻事件）、仪表盘「检索质量趋势卡」与「最近检索日志」表
+- runSearch 不再写 QdrantCallLog 检索日志（writeSearchLog 已删）；既有存量检索日志记录已清空
+
+**保留边界（与移除不冲突的内部能力）**：
+- `runSearch`（src/lib/rag/search.ts）：仅供测试集质量回归（§12/§16/§21/§24）与内部排障调用
+- `/api/qdrant/collections/[name]/search`（§6 基座工作台召回测试）：Qdrant 原生调试工具，属基座能力
+- 测试集相关端点（§12/§16/§21/§24）不变——切分/入库质量回归属于知识库管理域
+- QdrantCallLog 表保留（基座工作台「调用日志」面板读写；§6 基座检索测试仍会写入，与 RAG 检索日志无关）
+
+**新增（后续版本内嵌到 Agent API 视图，另见 §33/§34）**：
+- `/api/input/**`：入库 API（供 AI 上传文件入库 / 建库 / 配置切分与解析模式）
+- `/v1/datasets/**`：Dify 兼容数据集 API（对接 MinerU 面板「导出到 Dify」）

@@ -2,8 +2,8 @@
  * Prometheus 指标（计划书 §14 运维观测）
  *
  * 两类指标来源：
- * 1. 进程内计数器（globalThis 单例，dev/prod 均随进程重启清零）：
- *    检索请求数 / 耗时直方图（sum+count） / 错误数 —— recordSearch() 在检索路径埋点
+ * 1. 进程内计数器（globalThis 单例，dev/prod 均随进程重启清零）：进程启动时间
+ *    （§32：检索计数器已随对外检索 API 移除，Task 17-1）
  * 2. DB 聚合（持久）：KB/文档（按状态）/chunk/向量点/流水线任务（按状态与类型）/ApiKey 调用
  *
  * 输出 Prometheus 文本格式（text/plain; version=0.0.4），GET /api/metrics 供抓取。
@@ -15,12 +15,6 @@ import { pipelineStats } from './pipeline'
 
 export interface RagCounters {
   startedAt: number
-  searchTotal: number
-  searchErrors: number
-  searchDurSumMs: number
-  searchDurCount: number
-  searchByMode: Record<string, number>
-  searchMaxMs: number
 }
 
 const g = globalThis as unknown as { __ragMetrics?: RagCounters }
@@ -29,32 +23,13 @@ function counters(): RagCounters {
   if (!g.__ragMetrics) {
     g.__ragMetrics = {
       startedAt: Date.now(),
-      searchTotal: 0,
-      searchErrors: 0,
-      searchDurSumMs: 0,
-      searchDurCount: 0,
-      searchByMode: {},
-      searchMaxMs: 0,
     }
   }
   return g.__ragMetrics
 }
 
-/** 检索埋点：search/debug 与 v1 search 均调用（含失败，tookMs 尽力提供） */
-export function recordSearch(mode: string, tookMs: number | null, ok: boolean): void {
-  const c = counters()
-  c.searchTotal++
-  c.searchByMode[mode] = (c.searchByMode[mode] ?? 0) + 1
-  if (!ok) c.searchErrors++
-  if (tookMs != null && tookMs >= 0) {
-    c.searchDurSumMs += tookMs
-    c.searchDurCount++
-    if (tookMs > c.searchMaxMs) c.searchMaxMs = tookMs
-  }
-}
-
 export function getCounters(): RagCounters {
-  return { ...counters(), searchByMode: { ...counters().searchByMode } }
+  return { ...counters() }
 }
 
 const DOC_STATUSES = ['queued', 'parsing', 'chunking', 'embedding', 'upserting', 'ready', 'failed'] as const
@@ -69,22 +44,6 @@ export async function renderPrometheus(): Promise<string> {
   lines.push('# HELP rag_process_uptime_seconds 平台进程运行时长（计数器归属进程，重启清零）')
   lines.push('# TYPE rag_process_uptime_seconds gauge')
   lines.push(`rag_process_uptime_seconds ${Math.floor((Date.now() - c.startedAt) / 1000)}`)
-
-  // ---- 检索（进程内计数器）----
-  lines.push('# HELP rag_search_requests_total 检索请求总数（进程内计数）')
-  lines.push('# TYPE rag_search_requests_total counter')
-  for (const [mode, n] of Object.entries(c.searchByMode)) {
-    lines.push(`rag_search_requests_total{mode="${mode}"} ${n}`)
-  }
-  if (Object.keys(c.searchByMode).length === 0) lines.push('rag_search_requests_total 0')
-  lines.push('# HELP rag_search_errors_total 检索失败总数')
-  lines.push('# TYPE rag_search_errors_total counter')
-  lines.push(`rag_search_errors_total ${c.searchErrors}`)
-  lines.push('# HELP rag_search_duration_ms 检索耗时（sum/count/max，毫秒）')
-  lines.push('# TYPE rag_search_duration_ms summary')
-  lines.push(`rag_search_duration_ms_sum ${c.searchDurSumMs}`)
-  lines.push(`rag_search_duration_ms_count ${c.searchDurCount}`)
-  lines.push(`rag_search_duration_ms_max ${c.searchMaxMs}`)
 
   // ---- DB 聚合 ----
   const [kbs, docsByStatus, chunks, enabledChunks, pointAgg, apiCalls, jobsByStatusType, pipe, settings] =
@@ -168,7 +127,6 @@ export async function renderPrometheus(): Promise<string> {
 /** 摘要（OpsView 指标卡用，JSON 友好格式） */
 export async function metricsSummary(): Promise<{
   process: { uptimeSec: number }
-  search: { total: number; errors: number; avgMs: number | null; maxMs: number; byMode: Record<string, number> }
   store: { kbs: number; documents: Record<string, number>; chunks: number; enabledChunks: number; points: number }
   api: { calls: number }
   pipeline: { pending: number; active: number; failed: number; completed: number; uptimeSec: number }
@@ -190,13 +148,6 @@ export async function metricsSummary(): Promise<{
   for (const r of docsByStatus) documents[r.status] = r._count._all
   return {
     process: { uptimeSec: Math.floor((Date.now() - c.startedAt) / 1000) },
-    search: {
-      total: c.searchTotal,
-      errors: c.searchErrors,
-      avgMs: c.searchDurCount > 0 ? Math.round(c.searchDurSumMs / c.searchDurCount) : null,
-      maxMs: c.searchMaxMs,
-      byMode: { ...c.searchByMode },
-    },
     store: { kbs, documents, chunks, enabledChunks, points },
     api: { calls: apiCalls._sum.callCount ?? 0 },
     pipeline: {

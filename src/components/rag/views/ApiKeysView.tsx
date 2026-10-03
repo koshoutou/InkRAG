@@ -1,8 +1,10 @@
 'use client'
 
-// Agent API：API 使用文档卡（curl/python）+ Key 管理（创建一次性展示 / 启停 / 删除）
+// Agent API：Key 管理（创建一次性展示 / 启停 / 删除）+ API 入口说明
+// §32（Task 17-1）：对外检索 API 文档卡已随检索 API 一并移除；
+// 入库 API（/api/input，供 AI 上传文件入库）与 Dify 兼容层文档将在后续版本内嵌到本视图
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Copy,
@@ -47,7 +49,6 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { cn } from '@/lib/utils'
 import { ragApi } from '../api'
 import { useQuickAction } from '../useQuickAction'
@@ -55,32 +56,9 @@ import type { ApiKeyItem, ApiKeyRole } from '../types'
 import { ErrorCard, ViewPage, formatDateTime, timeAgo } from '../ui'
 
 const ROLE_META: Record<ApiKeyRole, { label: string; badge: string; desc: string }> = {
-  admin: { label: 'admin', badge: 'border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-300', desc: '全部权限：检索 + debug 参数 + 管理' },
-  operator: { label: 'operator', badge: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300', desc: '检索 + debug 调试参数' },
-  readonly: { label: 'readonly', badge: 'border-stone-400/40 bg-stone-500/10 text-stone-600 dark:text-stone-300', desc: '仅基础检索（传 debug 返回 400）' },
-}
-
-function CodeBlock({ code, lang }: { code: string; lang: string }) {
-  const copy = () => {
-    navigator.clipboard.writeText(code).then(
-      () => toast.success('已复制到剪贴板'),
-      () => toast.error('复制失败'),
-    )
-  }
-  return (
-    <div className="group relative rounded-lg border border-border/60 bg-stone-950">
-      <div className="flex items-center justify-between border-b border-border/60 px-3 py-1.5">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-stone-400">{lang}</span>
-        <Button variant="ghost" size="sm" className="h-6 gap-1 px-2 text-[10px] text-stone-400 hover:text-stone-200" onClick={copy}>
-          <Copy className="h-3 w-3" />
-          复制
-        </Button>
-      </div>
-      <pre className="overflow-x-auto p-3 font-mono text-[11px] leading-relaxed text-stone-200 [&::-webkit-scrollbar]:h-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-stone-600">
-        {code}
-      </pre>
-    </div>
-  )
+  admin: { label: 'admin', badge: 'border-violet-500/40 bg-violet-500/10 text-violet-600 dark:text-violet-300', desc: '全部权限：入库 / 管理 / 高级参数' },
+  operator: { label: 'operator', badge: 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300', desc: '入库 + 高级参数' },
+  readonly: { label: 'readonly', badge: 'border-stone-400/40 bg-stone-500/10 text-stone-600 dark:text-stone-300', desc: '只读（不允许写入操作）' },
 }
 
 export function ApiKeysView() {
@@ -130,63 +108,13 @@ export function ApiKeysView() {
 
   const keys = keysQuery.data?.keys ?? []
 
-  const curlSample = useMemo(
-    () => `curl -X POST "{BASE_URL}/api/v1/knowledge-bases/{kbId}/search" \\
-  -H "Authorization: Bearer rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \\
-  -H "Content-Type: application/json" \\
-  -d '{
-    "query": "什么是 RAG？",
-    "topK": 5,
-    "mode": "hybrid",
-    "rerank": true,
-    "withParentContext": true
-  }'`,
-    [],
-  )
-
-  const pythonSample = useMemo(
-    () => `import requests
-
-resp = requests.post(
-    "{BASE_URL}/api/v1/knowledge-bases/{kbId}/search",
-    headers={"Authorization": "Bearer rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"},
-    json={
-        "query": "什么是 RAG？",
-        "topK": 5,
-        "mode": "hybrid",
-        "rerank": True,
-        "withParentContext": True,
-    },
-    timeout=30,
-)
-data = resp.json()
-for hit in data["results"]:
-    print(hit["score"], hit["source"]["filename"], hit["text"][:80])`,
-    [],
-  )
-
-  const responseSample = `{
-  "tookMs": 42,
-  "stages": { "embedMs": 8, "recallMs": 12, "fusionMs": 3, "rerankMs": 15, "contextMs": 4 },
-  "results": [
-    {
-      "chunkId": "a1b2c3…",
-      "score": 0.83,
-      "rerankScore": 0.95,
-      "text": "chunk 文本…",
-      "parentText": "父 chunk 上下文…",
-      "source": { "docId": "…", "filename": "manual.pdf", "page": 12, "seq": 34, "docType": "text" }
-    }
-  ]
-}`
-
   return (
     <ViewPage wide>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold tracking-tight">Agent API</h2>
           <p className="text-xs text-muted-foreground">
-            为外部系统与 Agent 提供 Bearer 鉴权的检索 API；调试台与生产同一条检索路径。
+            API Key 管理与对外接口入口；本平台定位为知识库管理（入库 / 切分 / 版本 / 备份）。
           </p>
         </div>
         <Button size="sm" className="gap-1.5" onClick={() => setCreateOpen(true)}>
@@ -195,77 +123,31 @@ for hit in data["results"]:
         </Button>
       </div>
 
-      {/* API 使用文档卡 */}
+      {/* API 入口说明（§32：检索 API 已移除；入库 API / Dify 兼容层文档即将内嵌） */}
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-sm">
             <Plug className="h-4 w-4 text-primary" />
-            检索 API
-            <code className="rounded bg-muted px-2 py-0.5 font-mono text-[11px] text-muted-foreground">POST /api/v1/knowledge-bases/{'{kbId}'}/search</code>
+            对外接口
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
+        <CardContent className="space-y-3">
           <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-3">
-            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-              <div className="mb-1 font-medium">鉴权</div>
-              <code className="font-mono text-[11px] text-muted-foreground">Authorization: Bearer rag-…</code>
+            <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 p-3">
+              <div className="mb-1 font-medium text-emerald-700 dark:text-emerald-300">入库 API（规划中）</div>
+              <code className="font-mono text-[11px] text-muted-foreground">POST /api/input/…</code>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">供 AI / Agent 上传文件入库：建库、多模式解析、切分配置、并发处理。详细文档即将内嵌到本视图。</p>
+            </div>
+            <div className="rounded-lg border border-teal-500/30 bg-teal-500/5 p-3">
+              <div className="mb-1 font-medium text-teal-700 dark:text-teal-300">Dify 兼容数据集 API（规划中）</div>
+              <code className="font-mono text-[11px] text-muted-foreground">/v1/datasets/…</code>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">对接 MinerU 面板「导出到 Dify」：填本平台地址与 API Key 即可直接导出。</p>
             </div>
             <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-              <div className="mb-1 font-medium">debug 参数</div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">需 operator 及以上角色；readonly 传入返回 400。</p>
+              <div className="mb-1 font-medium">检索 API（已移除）</div>
+              <code className="font-mono text-[11px] text-muted-foreground line-through">/api/v1/knowledge-bases/…/search</code>
+              <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground">检索调用与审计已由独立的 API 审计平台承担（§32）；本平台不再提供对外检索。</p>
             </div>
-            <div className="rounded-lg border border-border/60 bg-muted/20 p-3">
-              <div className="mb-1 font-medium">withParentContext</div>
-              <p className="text-[11px] leading-relaxed text-muted-foreground">默认 true，命中结果附带父 chunk 上下文。</p>
-            </div>
-          </div>
-
-          <Tabs defaultValue="curl">
-            <TabsList className="h-8">
-              <TabsTrigger value="curl" className="text-xs">curl</TabsTrigger>
-              <TabsTrigger value="python" className="text-xs">Python (requests)</TabsTrigger>
-            </TabsList>
-            <TabsContent value="curl" className="mt-3">
-              <CodeBlock code={curlSample} lang="bash" />
-            </TabsContent>
-            <TabsContent value="python" className="mt-3">
-              <CodeBlock code={pythonSample} lang="python" />
-            </TabsContent>
-          </Tabs>
-
-          <div>
-            <div className="mb-1.5 text-xs font-medium">响应结构</div>
-            <CodeBlock code={responseSample} lang="json" />
-          </div>
-
-          <div>
-            <div className="mb-1.5 text-xs font-medium">错误码</div>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="h-8 text-[11px]">状态码</TableHead>
-                  <TableHead className="h-8 text-[11px]">含义</TableHead>
-                  <TableHead className="h-8 text-[11px]">处理建议</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                <TableRow>
-                  <TableCell className="py-1.5 font-mono text-xs">401</TableCell>
-                  <TableCell className="py-1.5 text-xs">未提供 API Key 或 Key 无效</TableCell>
-                  <TableCell className="py-1.5 text-xs text-muted-foreground">检查 Authorization 头格式与 Key 是否被删除</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="py-1.5 font-mono text-xs">403</TableCell>
-                  <TableCell className="py-1.5 text-xs">Key 无权限（如 readonly 传 debug）</TableCell>
-                  <TableCell className="py-1.5 text-xs text-muted-foreground">升级 Key 角色或去掉 debug 参数</TableCell>
-                </TableRow>
-                <TableRow>
-                  <TableCell className="py-1.5 font-mono text-xs">404</TableCell>
-                  <TableCell className="py-1.5 text-xs">kbId 不存在</TableCell>
-                  <TableCell className="py-1.5 text-xs text-muted-foreground">确认知识库 ID（GET /api/kb 查询列表）</TableCell>
-                </TableRow>
-              </TableBody>
-            </Table>
           </div>
         </CardContent>
       </Card>

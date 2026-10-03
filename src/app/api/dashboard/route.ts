@@ -54,24 +54,10 @@ export async function GET() {
       })
     )
 
-    // 最近 10 检索日志
-    const logRows = await db.qdrantCallLog.findMany({
-      orderBy: { createdAt: 'desc' },
-      take: 10,
-    })
-    const recentLogs = logRows.map((l) => ({
-      id: l.id,
-      query: l.query,
-      collection: l.collection,
-      mode: l.mode,
-      tookMs: l.tookMs,
-      resultCount: l.resultCount,
-      source: l.source,
-      createdAt: l.createdAt.toISOString(),
-    }))
-
     const stats = await pipelineStats()
 
+    // §32（Task 17-1）：recentLogs（最近检索日志）已随对外检索 API 一同移除——
+    // 平台定位收敛为「知识库管理」，检索调用与审计由外部独立平台承担
     return NextResponse.json({
       dashboard: {
         totals: {
@@ -85,7 +71,6 @@ export async function GET() {
           docsProcessing,
         },
         recentDocs,
-        recentLogs,
         jobs: { pending: stats.pending, active: stats.active, failed: stats.failed },
         statusFlow,
       },

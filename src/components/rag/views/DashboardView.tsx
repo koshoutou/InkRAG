@@ -1,8 +1,8 @@
 'use client'
 
-// 仪表盘：统计卡 / 状态机分布 / 检索质量趋势 / 最近文档 / 最近检索日志 / 队列概况
-// 数据：GET /api/dashboard + GET /api/dashboard/trends；socket global 房间事件触发自动刷新
-// 检索质量趋势卡已提取为独立组件 ./TrendsCard（Task 11-b：KB 维度过滤 + 下钻扩展）
+// 仪表盘：统计卡 / 状态机分布 / 最近文档 / 队列概况
+// 数据：GET /api/dashboard；socket global 房间事件触发自动刷新
+// §32（Task 17-1）：检索质量趋势卡与最近检索日志已随对外检索 API 一并移除（平台定位收敛为知识库管理）
 
 import { useEffect } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -15,10 +15,8 @@ import {
   Layers,
   Library,
   ListChecks,
-  Search,
   Sparkles,
 } from 'lucide-react'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
@@ -27,7 +25,6 @@ import { ragApi } from '../api'
 import { usePlatformStore } from '../store'
 import { ensureQuickActionBridge } from '../useQuickAction'
 import { useRealtime } from '../useRealtime'
-import { TrendsCard } from './TrendsCard'
 import {
   DOC_STATUSES,
   STATUS_META,
@@ -35,9 +32,7 @@ import {
   StatCard,
   StatusBadge,
   ViewPage,
-  formatDateTime,
   formatNumber,
-  shortCode,
   timeAgo,
 } from '../ui'
 
@@ -56,10 +51,7 @@ function DashboardSkeleton() {
         ))}
       </div>
       <Skeleton className="h-24 rounded-xl" />
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <Skeleton className="h-72 rounded-xl" />
-        <Skeleton className="h-72 rounded-xl" />
-      </div>
+      <Skeleton className="h-72 rounded-xl" />
     </ViewPage>
   )
 }
@@ -122,10 +114,7 @@ export function DashboardView() {
         <StatCard icon={<AlertTriangle className="h-4 w-4" />} label="失败文档" value={d.totals.docsFailed} accent="rose" />
       </div>
 
-      {/* 检索质量趋势（统计卡与最近文档表之间） */}
-      <TrendsCard />
-
-      {/* 状态机分布条 */}
+      {/* 状态机分布条（统计卡与最近文档之间） */}
       <div className="rounded-xl border border-border/60 bg-card p-4">
         <div className="mb-2 flex items-center justify-between">
           <span className="text-sm font-medium">文档状态机分布</span>
@@ -167,101 +156,45 @@ export function DashboardView() {
         )}
       </div>
 
-      {/* grid-cols-1 = minmax(0,1fr)：防 auto 轨道被表格/长文本 max-content 撑爆 375px（与 TrendsCard 同类修复） */}
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {/* 最近文档 */}
-        <div className="rounded-xl border border-border/60 bg-card">
-          <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-            <span className="text-sm font-medium">最近文档</span>
-            <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={() => setView('docs')}>
-              <FileText className="h-3 w-3" />
-              文档中心
-            </Button>
-          </div>
-          {d.recentDocs.length === 0 ? (
-            <p className="py-10 text-center text-xs text-muted-foreground">暂无文档</p>
-          ) : (
-            <div className="max-h-96 overflow-auto">
-              <Table>
-                <TableHeader className="sticky top-0 z-10 bg-card">
-                  <TableRow>
-                    <TableHead className="h-8 text-[11px]">文件名</TableHead>
-                    <TableHead className="h-8 text-[11px]">知识库</TableHead>
-                    <TableHead className="h-8 text-[11px]">状态</TableHead>
-                    <TableHead className="h-8 text-[11px] text-right">时间</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {d.recentDocs.map((doc) => (
-                    <TableRow key={doc.id} className="cursor-pointer" onClick={() => {
-                      usePlatformStore.getState().setKb(doc.kbId)
-                      usePlatformStore.getState().setDoc(doc.id)
-                      setView('viewer')
-                    }}>
-                      <TableCell className="max-w-[220px] truncate py-2 text-xs font-medium">{doc.filename}</TableCell>
-                      <TableCell className="max-w-[120px] truncate py-2 text-xs text-muted-foreground">{doc.kbName}</TableCell>
-                      <TableCell className="py-2"><StatusBadge status={doc.status} /></TableCell>
-                      <TableCell className="py-2 text-right text-[11px] text-muted-foreground">{timeAgo(doc.updatedAt)}</TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
+      {/* 最近文档（全宽；原第二列「最近检索日志」已随 §32 移除） */}
+      <div className="rounded-xl border border-border/60 bg-card">
+        <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
+          <span className="text-sm font-medium">最近文档</span>
+          <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={() => setView('docs')}>
+            <FileText className="h-3 w-3" />
+            文档中心
+          </Button>
         </div>
-
-        {/* 最近检索日志 */}
-        <div className="rounded-xl border border-border/60 bg-card">
-          <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">
-            <span className="text-sm font-medium">最近检索日志</span>
-            <Button variant="ghost" size="sm" className="h-7 gap-1 text-xs" onClick={() => setView('retrieval')}>
-              <Search className="h-3 w-3" />
-              检索调试台
-            </Button>
-          </div>
-          {d.recentLogs.length === 0 ? (
-            <p className="py-10 text-center text-xs text-muted-foreground">暂无检索记录</p>
-          ) : (
-            <div className="max-h-96 overflow-auto">
-              <Table>
-                <TableHeader className="sticky top-0 z-10 bg-card">
-                  <TableRow>
-                    <TableHead className="h-8 text-[11px]">Query</TableHead>
-                    <TableHead className="h-8 text-[11px]">模式</TableHead>
-                    <TableHead className="h-8 text-[11px] text-right">耗时</TableHead>
-                    <TableHead className="h-8 text-[11px] text-right">来源</TableHead>
+        {d.recentDocs.length === 0 ? (
+          <p className="py-10 text-center text-xs text-muted-foreground">暂无文档</p>
+        ) : (
+          <div className="max-h-96 overflow-auto">
+            <Table>
+              <TableHeader className="sticky top-0 z-10 bg-card">
+                <TableRow>
+                  <TableHead className="h-8 text-[11px]">文件名</TableHead>
+                  <TableHead className="h-8 text-[11px]">知识库</TableHead>
+                  <TableHead className="h-8 text-[11px]">状态</TableHead>
+                  <TableHead className="h-8 text-[11px] text-right">时间</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {d.recentDocs.map((doc) => (
+                  <TableRow key={doc.id} className="cursor-pointer" onClick={() => {
+                    usePlatformStore.getState().setKb(doc.kbId)
+                    usePlatformStore.getState().setDoc(doc.id)
+                    setView('viewer')
+                  }}>
+                    <TableCell className="max-w-[320px] truncate py-2 text-xs font-medium">{doc.filename}</TableCell>
+                    <TableCell className="max-w-[160px] truncate py-2 text-xs text-muted-foreground">{doc.kbName}</TableCell>
+                    <TableCell className="py-2"><StatusBadge status={doc.status} /></TableCell>
+                    <TableCell className="py-2 text-right text-[11px] text-muted-foreground">{timeAgo(doc.updatedAt)}</TableCell>
                   </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {d.recentLogs.map((log) => (
-                    <TableRow key={log.id}>
-                      <TableCell className="max-w-[260px] truncate py-2 text-xs">{log.query}</TableCell>
-                      <TableCell className="py-2">
-                        <Badge variant="secondary" className="text-[10px] font-mono">{log.mode}</Badge>
-                      </TableCell>
-                      <TableCell className="py-2 text-right text-[11px] tabular-nums text-muted-foreground">
-                        {log.tookMs}ms · {log.resultCount} 条
-                      </TableCell>
-                      <TableCell className="py-2 text-right">
-                        <TooltipProvider>
-                          <Tooltip>
-                            <TooltipTrigger asChild>
-                              <Badge variant="outline" className="text-[10px]">{log.source === 'external' ? 'API' : '调试台'}</Badge>
-                            </TooltipTrigger>
-                            <TooltipContent className="text-xs">
-                              <div className="font-mono">{shortCode(log.collection, 12)}</div>
-                              <div className="text-muted-foreground">{formatDateTime(log.createdAt)}</div>
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                      </TableCell>
-                    </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
-            </div>
-          )}
-        </div>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )}
       </div>
 
       {/* 队列概况 */}

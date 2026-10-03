@@ -11,7 +11,6 @@ export type ViewId =
   | 'docs'
   | 'viewer'
   | 'sandbox'
-  | 'retrieval'
   | 'testsets'
   | 'apikeys'
   | 'ops'
@@ -30,8 +29,6 @@ interface PlatformStore {
   connectionStatus: ConnectionState
   connectionMessage: string
   vectorMode: VectorMode | null
-  /** 跨视图下钻：趋势图点击某天 → 检索调试台按日期过滤历史（'YYYY-MM-DD'，消费后由目标视图清除） */
-  retrievalDateFilter: string | null
 
   setView: (v: ViewId) => void
   setKb: (id: string | null) => void
@@ -40,7 +37,6 @@ interface PlatformStore {
   setSettings: (s: RagSettings | null) => void
   setConnection: (s: ConnectionState, msg?: string) => void
   setVectorMode: (m: VectorMode | null) => void
-  setRetrievalDateFilter: (d: string | null) => void
 }
 
 export const usePlatformStore = create<PlatformStore>((set) => ({
@@ -52,7 +48,6 @@ export const usePlatformStore = create<PlatformStore>((set) => ({
   connectionStatus: 'unknown',
   connectionMessage: '',
   vectorMode: null,
-  retrievalDateFilter: null,
 
   setView: (v) => set({ activeView: v }),
   setKb: (id) => set({ activeKbId: id }),
@@ -61,7 +56,6 @@ export const usePlatformStore = create<PlatformStore>((set) => ({
   setSettings: (s) => set({ settings: s }),
   setConnection: (s, msg = '') => set({ connectionStatus: s, connectionMessage: msg }),
   setVectorMode: (m) => set({ vectorMode: m }),
-  setRetrievalDateFilter: (d) => set({ retrievalDateFilter: d }),
 }))
 
 /** 跨视图快捷跳转：进入某知识库的文档中心 */
