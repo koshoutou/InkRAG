@@ -2,12 +2,15 @@
 
 > **一句话定位**：本平台在 `/v1` 前缀实现了 Dify「知识库 API（Datasets）」的兼容子集。
 > 在 **MinerU 面板「导出到 Dify」** 中填**本平台的访问地址**与**平台 API Key**，即可把解析结果直接导出到本平台入库——不需要部署 Dify。
+>
+> ⚠️ **先看 §2 导出链路架构**：「检查链接」是浏览器直连，而「导出」由 **mineru.net 服务器转发**——
+> 平台地址必须**公网可达**（内网/临时预览域名可能出现「检查链接成功但导出失败」）。
 
 ---
 
 ## 1. 快速开始（30 秒）
 
-1. 在平台 **Agent API** 视图创建一把 API Key（建议 `operator` 或 `admin` 角色；`readonly` 无法写入）
+1. 在平台 **知识库视图 → Dify 导出对接**（配置按钮）中创建或选择一把 API Key（建议 `operator` 或 `admin` 角色；`readonly` 无法写入）
 2. 在 MinerU 面板打开 **导出 → Dify**：
    - **API 服务器地址**：填本平台地址（如 `https://your-domain`，**不要带 `/v1`**——面板会自动拼接，与 Dify 官方 `https://api.dify.ai` 的填法一致）
    - **API 密钥**：填平台 API Key（`rag-` 开头；Dify 官方为 `dataset-` 开头，本平台按 Bearer 原样校验，前缀不限）
@@ -17,9 +20,32 @@
 
 导出完成后，文档进入平台流水线（解析 → 切分 → 向量化 → 写入 Qdrant），可在平台「文档中心」查看实时进度，用「三屏联动」核对解析产物。
 
+平台「知识库视图 → Dify 导出对接」弹窗内置三个诊断按钮：**检查链接（模拟 MinerU）**、**模拟导出**（真实走一遍 create-by-text 并自动清理测试文档）、**公网可达性检测**（§9）。
+
 ---
 
-## 2. 端点总表（Dify Service API 兼容子集）
+## 2. 导出链路架构（必读：为什么检查链接成功、导出却失败）
+
+对 MinerU 面板前端（mineru-desktop bundle）分析实证的调用架构：
+
+| MinerU 面板动作 | 实际调用方 | 调用路径 | 网络要求 |
+|---|---|---|---|
+| 检查链接 | **用户浏览器**（跨域 CORS） | `GET {平台地址}/v1/datasets` | 浏览器 → 平台可达 |
+| 选择导出位置（列表/新建） | **用户浏览器** | `GET/POST {平台地址}/v1/datasets…` | 同上 |
+| **导出** | **mineru.net 服务器**（服务器端转发） | 浏览器 → `POST mineru.net/api/v4/tasks/{taskId}/dify`（携带 app_key/dataset_id/host/content）→ mineru.net 服务器 → `POST {平台地址}/v1/datasets/{id}/document/create-by-text` | **mineru.net 服务器 → 平台公网可达** |
+
+导出时浏览器把 `app_key / dataset_id / host(平台地址) / content(导出参数)` 提交给 mineru.net 后端，由**mineru.net 的服务器**从它自己的网络向平台发起 `create-by-text`。因此：
+
+- **检查链接通过**：只证明「你的浏览器 → 平台」通（比如平台就跑在你本机/内网/临时预览域名，浏览器自然能访问）。
+- **导出失败（“糟糕，操作失败，请稍后再试 / 导出失败”）**：mineru.net 服务器访问不到你填的平台地址（内网地址、localhost、临时预览域名、或被 mineru.net 出站网络阻断）。此时平台侧不会收到任何请求（日志无 create-by-text 记录）。
+
+**解决**：把平台部署在**公网稳定可达的域名**上（自有服务器 + 域名 + 反向代理 HTTPS，README 有反代加固指引），然后在平台「知识库 → Dify 导出对接」里用**公网可达性检测**复测，通过后再到 MinerU 面板导出。
+
+> 附：MinerU 导出载荷实测兼容——`{ name, text, indexing_technique: "high_quality", process_rule: { mode, rules: { pre_processing_rules[], segmentation: { separator, max_tokens } } }, doc_form: "text_model", created_from: "api" }`，平台的 `create-by-text` 已按该精确载荷联调通过（含 automatic/custom 两种 mode、分隔符与 max_tokens 映射）。
+
+---
+
+## 3. 端点总表（Dify Service API 兼容子集）
 
 | 方法 | 路径 | 平台语义 | 说明 |
 |---|---|---|---|
@@ -55,7 +81,7 @@
 
 ---
 
-## 3. 状态映射（平台状态机 → Dify indexing_status）
+## 4. 状态映射（平台状态机 → Dify indexing_status）
 
 | 平台状态 | Dify indexing_status | 备注 |
 |---|---|---|
@@ -70,7 +96,7 @@
 
 ---
 
-## 4. process_rule（高级配置）映射
+## 5. process_rule（高级配置）映射
 
 MinerU 导出面板的高级配置对应 Dify 的 `data.process_rule`。本平台的映射策略：
 
@@ -88,7 +114,7 @@ MinerU 导出面板的高级配置对应 Dify 的 `data.process_rule`。本平�
 
 ---
 
-## 5. 与 /api/input 的关系
+## 6. 与 /api/input 的关系
 
 | 维度 | /api/input（入库 API） | /v1/datasets（Dify 兼容层） |
 |---|---|---|
@@ -102,7 +128,7 @@ MinerU 导出面板的高级配置对应 Dify 的 `data.process_rule`。本平�
 
 ---
 
-## 6. 字段近似说明（诚实披露）
+## 7. 字段近似说明（诚实披露）
 
 - `word_count`：平台无逐文档词数统计，以 chunk 数近似（Dify 面板展示用途）
 - `words_count`（文档级）：同上，以 chunk 计数近似
@@ -112,7 +138,7 @@ MinerU 导出面板的高级配置对应 Dify 的 `data.process_rule`。本平�
 
 ---
 
-## 7. curl 示例
+## 8. curl 示例
 
 ```bash
 # 列出数据集（= 检查链接）
@@ -144,20 +170,41 @@ curl -s -X POST "https://your-domain/v1/datasets/{dataset_id}/document/create-by
 
 ---
 
-## 8. 故障排查
+## 9. 公网可达性检测（导出失败自检工具）
+
+平台内置 `POST /api/dify/reachability`（知识库视图「Dify 导出对接」弹窗的**公网可达性检测**按钮同源）：
+
+```bash
+curl -s -X POST "https://your-domain/api/dify/reachability" \
+  -H "Content-Type: application/json" \
+  -d '{ "url": "https://your-domain" }'
+```
+
+两路探测，返回结论：
+
+- `direct`：平台进程自身 fetch `/v1/datasets`（预期 401 JSON = 端点活着，参考值）
+- `external`：从**外部网络**抓取同一 URL（预期 401 = 公网可达；DNS 失败/超时 = 不可达）
+- `verdict`：`ok`（端点正常且公网可达）/ `external-unreachable`（端点活着但公网访问不到 → 这就是「检查链接成功但导出失败」的原因）/ `unreachable`（地址或服务本身有问题）
+
+---
+
+## 10. 故障排查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| 检查链接失败 401 | Key 错误/被删 | 在平台 Agent API 视图重建 Key |
+| **检查链接成功但导出失败（“操作失败/导出失败”）** | 导出由 mineru.net 服务器转发调用 `create-by-text`，你的平台地址对它不可达（内网/localhost/临时预览域名）；平台侧日志无任何请求记录即此症状 | 平台部署到公网域名（自有服务器 + 反代），用「公网可达性检测」复测通过后再导出（详见 §2） |
+| 检查链接失败 401 | Key 错误/被删 | 在平台知识库视图「Dify 导出对接」或 Agent API 视图重建 Key |
 | 检查链接 404 HTML | 填了带 `/v1` 的地址或平台未部署 | 地址只填根（如 `https://your-domain`） |
 | 建库 500 +「未配置 Qdrant/Embedding」 | 平台设置缺连接 | 平台「设置」里配置并测试通过 Qdrant 与 Embedding |
 | 导出长时间 parsing | MinerU 云排队 / 大 PDF 拆段中 | 平台「实时活动」看进度；6h 上限自动失败可重试 |
 | 413 file_too_large | 单文件 >200MB | 拆分后导出 |
 | 删除数据集 204 但面板仍显示 | 面板缓存 | 刷新列表 |
 
+**区分「平台端点问题」与「网络问题」**：在「Dify 导出对接」弹窗依次点 **检查链接（模拟 MinerU）** → **模拟导出** → **公网可达性检测**。前两个全过而第三个失败 = 网络/部署问题（§2）；模拟导出直接报错 = 把错误信息发回来排查。 |
+
 ---
 
-## 9. 安全注意
+## 11. 安全注意
 
 - API Key 通过 MinerU 面板传输到本平台——与 Dify 官方行为一致（密钥只进你自己的平台）；请为 MinerU 导出使用**专用、可随时吊销**的 Key
 - `readonly` Key 只能读列表/进度，不能导出（403）
