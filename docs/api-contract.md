@@ -661,3 +661,21 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 - `mineruPdfAutoSplit: boolean`（缺省保留现值）、`mineruPdfPartPages: number`（0-10000，0=Provider 默认；缺省保留现值）
 - PUT 缺省语义（16-b）：**所有非密钥字段未携带时保留现值**（此前部分 PUT 会清空未携带字段——已修复）；显式传空串仍可清空
 
+## §31 引擎智能路由 / chunk 编辑同步文档产物（Task 16-c/16-d，2026-10-03）
+
+### 31.1 全局解析引擎按扩展名路由（16-c）
+
+- `resolveDocEngine(settings, engineChoice?, ext?)`：per-doc engineChoice 优先；全局模式下按扩展名路由——
+  - 全局 mineru 模式：仅 Node 类型（md/txt/csv/epub/ofd/odt 等）→ **node**（本地直解省额度，此前会整包提交 MinerU 被拒）；
+    仅 MinerU 类型（图片/ppt/xls）与双引擎类型（pdf/doc/docx/pptx/xlsx）→ **mineru**
+  - 全局 fallback 模式：一律 node（仅 MinerU 类型在 Node 解析器内给出明确报错与配置指引）
+
+### 31.2 chunk 编辑 / 还原 / 删除 → 文档产物同步（16-d）
+
+- 新模块 `src/lib/rag/docpatch.ts`：`spliceDocMarkdown`（full.md 区间替换/删除 + 后续 chunk 偏移平移
+  + 父 chunk 重切片 + middle.json 块偏移重对齐）；偏移失配时按旧全文回退定位，仍失败则跳过修补（chunk 层照常生效）
+- `PATCH .../chunk/[id] {text}` / `{revert}`：先 splice 产物再写 chunk 新文本；chunk 行 `charEnd` 随新文本长度同步
+- `DELETE .../chunk/[id]`：子 chunk 删除同步删除 full.md 对应区间（防重切复活）；父 chunk 删除不动 full.md
+- 版本快照（§27）新增 `fullMd` 字段（≤8MB）：恢复时直接回写 full.md + middle.json 重对齐；
+  旧快照无 fullMd → 按子 chunk 全文从后往前 splice 到当前 full.md（降级 best-effort）
+- 响应新增 `docPatch: { patched, note }`（编辑/删除）与 `mdRestored: boolean`（版本恢复）

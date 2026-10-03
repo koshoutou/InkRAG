@@ -12,11 +12,12 @@ import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import { db } from '@/lib/db'
-import { docDir, chunksDir, resolveStorageKey } from './artifacts'
+import { docDir, chunksDir, resolveStorageKey, markdownPath, middleJsonPath } from './artifacts'
 import { getVectorStore } from './vectorstore'
 import { enqueueDocument } from './pipeline'
 import { assertEmbedScheme, embedTexts } from './embed'
 import { emitToRoom } from './events'
+import { realignMiddleBlocks, readMiddleJson } from './docpatch'
 
 export const CURRENT_VERSION = 'current'
 
@@ -55,6 +56,9 @@ export interface VersionSnapshotFile {
     totalTokens: number
   }
   chunks: VersionChunkSnapshot[]
+  /** 16-d：快照时点的 full.md 全文（≤ 8MB；恢复时回写，保证重切不再回到旧文本）。
+  * 旧快照无此字段 → 恢复时按子 chunk 全文降级拼接 */
+  fullMd?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -133,6 +137,13 @@ export async function snapshotDocVersion(docId: string): Promise<boolean> {
         totalTokens: chunks.reduce((acc, c) => acc + c.tokenCount, 0),
       },
       chunks: snapshotChunks,
+    }
+    // 16-d：快照携带 full.md 全文（≤ 8MB；恢复时回写，重切不再回到旧文本）
+    try {
+      const md = await fs.readFile(markdownPath(doc.kbId, docId), 'utf-8')
+      if (md.length <= 8 * 1024 * 1024) file.fullMd = md
+    } catch {
+      /* full.md 缺失（产物被清理）→ 快照不带，恢复走降级 */
     }
     await fs.mkdir(versionsDir(doc.kbId, docId), { recursive: true })
     await fs.writeFile(target, JSON.stringify(file), 'utf-8')
@@ -653,6 +664,8 @@ export interface RestoreVersionResult {
   fromVersion: string
   chunkCount: number
   degradedChunks: number // 缺 fullText 降级用 textPreview 的 chunk 数
+  /** 16-d：full.md 是否已随版本回写（false = 产物保留当前文本，重切会回到新文本） */
+  mdRestored?: boolean
 }
 
 /**
@@ -744,6 +757,43 @@ export async function restoreDocVersion(docId: string, version: string): Promise
     await db.$transaction(rows.slice(i, i + TX).map((r) => db.chunk.create({ data: r })))
   }
 
+  // 3.5)【16-d】文档产物回写：恢复版本后 full.md 也要回到该版本文本，
+  //      否则下次重切/重新入库时又回到当前（新）文本，恢复失去意义。
+  let mdRestored = false
+  try {
+    if (typeof file.fullMd === 'string' && file.fullMd.length > 0) {
+      // 新快照：直接回写快照携带的 full.md
+      await fs.writeFile(markdownPath(doc.kbId, docId), file.fullMd, 'utf-8')
+      mdRestored = true
+    } else {
+      // 旧快照降级：按子 chunk 全文（快照偏移）从后往前 splice 到当前 full.md
+      // —— 未覆盖区间（标题/分隔等）保留当前文本，属于 best-effort
+      let md = await fs.readFile(markdownPath(doc.kbId, docId), 'utf-8').catch(() => '')
+      if (md.length > 0) {
+        const children = snapChunks
+          .filter((c) => !c.isParent && typeof c.fullText === 'string' && c.fullText.length > 0 && c.charEnd > c.charStart)
+          .sort((a, b) => b.charStart - a.charStart) // 从后往前，偏移不失效
+        for (const c of children) {
+          if (c.charEnd <= md.length) {
+            md = md.slice(0, c.charStart) + c.fullText! + md.slice(c.charEnd)
+          }
+        }
+        await fs.writeFile(markdownPath(doc.kbId, docId), md, 'utf-8')
+        mdRestored = children.length > 0
+      }
+    }
+    // middle.json 块偏移按回写后的 full.md 重对齐
+    if (mdRestored) {
+      const md = await fs.readFile(markdownPath(doc.kbId, docId), 'utf-8')
+      const middle = await readMiddleJson(doc.kbId, docId)
+      if (middle.blocks.length > 0) {
+        await fs.writeFile(middleJsonPath(doc.kbId, docId), JSON.stringify(realignMiddleBlocks(middle, md)), 'utf-8')
+      }
+    }
+  } catch (e) {
+    console.warn('[versions] 恢复回写 full.md 失败（chunk 层已恢复）:', (e as Error).message)
+  }
+
   // 4) 状态回写 + 入队 embed（重嵌入 + 向量库重写）
   const meta = safeMeta(doc.metaJson)
   await db.document.update({
@@ -768,7 +818,7 @@ export async function restoreDocVersion(docId: string, version: string): Promise
     message: `版本恢复：${doc.filename} → v${version}（新版本 v${restoredVersion}，${snapChunks.length} chunks 重新向量化中）`,
   })
 
-  return { ok: true, restoredVersion, fromVersion: version, chunkCount: snapChunks.length, degradedChunks: degraded }
+  return { ok: true, restoredVersion, fromVersion: version, chunkCount: snapChunks.length, degradedChunks: degraded, mdRestored }
 }
 
 /** 删除历史版本快照（§27）：'current' 无文件不可删 */

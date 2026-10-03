@@ -7,6 +7,7 @@ import { chunksDir } from '@/lib/rag/artifacts'
 import { updateKbStats } from '@/lib/rag/pipeline'
 import { toChunkItem } from '@/lib/rag/serialize'
 import { editChunkText, revertChunkText } from '@/lib/rag/chunkedit'
+import { spliceDocMarkdown } from '@/lib/rag/docpatch'
 import { bumpDocVersion } from '@/lib/rag/versions'
 
 export const dynamic = 'force-dynamic'
@@ -162,6 +163,29 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     // §27：先归档 + 版本号递增（流水线中会抛错 → 409）
     const newVersion = await bumpDocVersion(id)
 
+    // 16-d：子 chunk 删除 → 同步从 full.md 删除对应文本区间（含父 chunk 重切片/偏移平移），
+    // 避免下次重切/重新入库时被删内容复活；父 chunk 删除仅移除父层分组，full.md 不动
+    let docPatch: { patched: boolean; note: string } | undefined
+    if (!chunk.isParent && chunk.charEnd > chunk.charStart) {
+      let currentText = ''
+      try {
+        currentText = await fs.readFile(path.join(chunksDir(doc.kbId, doc.id), `${chunkId}.txt`), 'utf-8')
+      } catch {
+        currentText = chunk.textPreview
+      }
+      if (currentText.trim().length > 0) {
+        const r = await spliceDocMarkdown({
+          kbId: doc.kbId,
+          docId: doc.id,
+          currentText,
+          charStart: chunk.charStart,
+          charEnd: chunk.charEnd,
+          replacement: null,
+        })
+        docPatch = { patched: r.patched, note: r.note }
+      }
+    }
+
     // 1) 向量点
     try {
       const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
@@ -183,7 +207,7 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     await fs.rm(path.join(chunksDir(doc.kbId, doc.id), `${chunkId}.orig.txt`), { force: true })
 
     await updateKbStats(doc.kbId)
-    return NextResponse.json({ ok: true, version: newVersion })
+    return NextResponse.json({ ok: true, version: newVersion, docPatch })
   } catch (e: any) {
     const status = /流水线中/.test(String(e?.message)) ? 409 : 500
     return NextResponse.json({ error: e?.message ?? String(e) }, { status })
