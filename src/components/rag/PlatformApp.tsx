@@ -41,7 +41,8 @@ const TaskCenterView = dynamic(() => import('./views/TaskCenterView').then((m) =
 
 const queryClient = new QueryClient({
   defaultOptions: {
-    queries: { refetchOnWindowFocus: false, retry: 1, staleTime: 15_000 },
+    // 16-a：retry 2（api.ts 内 req() 已对瞬态 HTML 404/网关错误自动重试，这里兜底 JSON 错误的偶发失败）
+    queries: { refetchOnWindowFocus: false, retry: 2, staleTime: 15_000 },
   },
 })
 

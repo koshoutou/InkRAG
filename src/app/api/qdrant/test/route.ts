@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { getSettingsRow, normalizeMinerUProvider } from '@/lib/rag/settings'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -15,6 +16,11 @@ export const runtime = 'nodejs'
  *   - cloud：GET https://mineru.net/api/v4/extract-results/batch/nonexistent（Bearer Token）
  *     401/A0202 → Token 无效；404/400 → 服务可达且 Token 有效（探测性 404 属预期）
  *   - cloud-agent：POST https://mineru.net/api/v1/agent/parse/url 空 body 期待 400（证明可达，免 Token）
+ *
+ * 【Task 16-a 探测同源】kind='mineru' 时：未显式传 provider/apiKey/url（上传对话框
+ * useMineruStatus 只传 {kind:'mineru'}），或 apiKey 为掩码/空（设置弹窗重开后未重输密钥）
+ * → 回退读 DB 已存设置补全，保证与「设置 → 测试连接」同源同果，杜绝
+ * 「设置里测试 200、上传时却提示未连接」的掩码值探测不一致问题。
  */
 
 const TEST_TIMEOUT_MS = 10_000
@@ -225,6 +231,15 @@ async function testMineruCloud(apiKey: string): Promise<TestResult> {
         detail: `探测方式：查询不存在的 batch（HTTP ${res.status} 属预期，鉴权已通过）`,
       }
     }
+    // 200 + 业务码 -60012（task not found）：同 404 —— 探测性 batch 不存在，鉴权已通过
+    if (res.status === 200 && String(json?.code) === '-60012') {
+      return {
+        ok: true,
+        provider: 'cloud',
+        message: '连接成功 · 官方云·精准 API 可达，Token 有效',
+        detail: '探测方式：查询不存在的 batch（code -60012 属预期，鉴权已通过）',
+      }
+    }
     if (res.status === 429 || res.status >= 500) {
       return {
         ok: false,
@@ -313,15 +328,46 @@ export async function POST(req: NextRequest) {
     ocrMode?: string
   }
   const kind = String(body.kind ?? '').trim()
-  const url = trimBase(body.url)
-  const apiKey = String(body.apiKey ?? '')
-  const model = String(body.model ?? '').trim()
+  let url = trimBase(body.url)
+  let apiKey = String(body.apiKey ?? '')
+  let model = String(body.model ?? '').trim()
   void body.tier
   void body.ocrMode
 
-  const mineruProvider: MineruProvider = MINERU_PROVIDERS.includes(body.provider as MineruProvider)
+  let mineruProvider: MineruProvider = MINERU_PROVIDERS.includes(body.provider as MineruProvider)
     ? (body.provider as MineruProvider)
     : 'selfhost'
+
+  // 【Task 16-a】探测参数回退：未显式传参（上传对话框探测）或密钥为掩码/空
+  // （设置弹窗重开后表单密钥已按掩码约定清空）→ 读 DB 已存设置补全，两处探测同源同果。
+  // mineru/qdrant/embed/rerank 四类均适用（无参 = 测已存配置）。
+  const explicitMissing =
+    kind === 'mineru'
+      ? !body.provider || !apiKey || apiKey.startsWith('***') || !url
+      : !url || (kind !== 'qdrant' && (!apiKey || apiKey.startsWith('***')))
+  if (kind && explicitMissing) {
+    try {
+      const row = await getSettingsRow()
+      if (kind === 'mineru') {
+        if (!body.provider) mineruProvider = normalizeMinerUProvider(row.mineruProvider)
+        if (!apiKey || apiKey.startsWith('***')) apiKey = row.mineruApiKey
+        if (!url) url = trimBase(row.mineruApiUrl)
+      } else if (kind === 'qdrant') {
+        if (!url) url = trimBase(row.url)
+        if (!apiKey || apiKey.startsWith('***')) apiKey = row.apiKey
+      } else if (kind === 'embed') {
+        if (!url) url = trimBase(row.embedApiBase)
+        if (!apiKey || apiKey.startsWith('***')) apiKey = row.embedApiKey
+        if (!model) model = row.embedModel
+      } else if (kind === 'rerank') {
+        if (!url) url = trimBase(row.rerankApiBase)
+        if (!apiKey || apiKey.startsWith('***')) apiKey = row.rerankApiKey
+        if (!model) model = row.rerankModel
+      }
+    } catch {
+      /* DB 读失败按显式参数探测（下游给出明确错误） */
+    }
+  }
 
   // url 必要性按 kind/provider 区分：cloud / cloud-agent 固定 mineru.net，无需本地 url
   const needsUrl =

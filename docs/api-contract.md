@@ -47,7 +47,7 @@ v1.6 建库强校验（均为 400）：
 
 建库时后端通过 `probeEmbedding()` 实测一条探测文本：
 - `kb.dim` = 实测维度（如 1024）；`kb.embeddingModel` = 设置中真实模型名（不再回退 mock 兜底）
-- `kb.sparseScheme`：provider 有原生稀疏输出（如 BGE-M3 `lexical_weights`）→ `native`（后续入库断言稀疏非空）；无稀疏输出（如 edgefn dense-only 网关）→ `none`（检索强制 dense，入库允许空稀疏点）
+- `kb.sparseScheme`：provider 有原生稀疏输出（如 BGE-M3 `lexical_weights`）→ `native`（后续入库断言稀疏非空）；无稀疏输出（如部分 OpenAI 兼容网关仅输出 dense）→ `none`（检索强制 dense，入库允许空稀疏点）
 - Qdrant 不可达时建集合硬失败（503），不落库行
 
 中途更换嵌入模型/配置会被入库前断言（errorCode=EMBED_SCHEME_MISMATCH）与版本恢复前置校验拦截（换模型 = 新建库重导）。

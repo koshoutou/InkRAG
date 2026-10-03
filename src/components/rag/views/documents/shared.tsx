@@ -26,7 +26,6 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { ragApi } from '../../api'
 import type { DocStatus } from '../../types'
 
 /** 流水线五个过程阶段（终态另算） */
@@ -232,22 +231,13 @@ export function useMineruStatus(): MineruStatus {
     let cancelled = false
     ;(async () => {
       try {
-        // 1) 读全局设置拿 mineru 地址/Key（14-e 契约：{kind:'mineru'} 不带 url 时后端读全局设置，
-        //    过渡期旧实现需显式 url——带上设置值两头兼容；读失败按未配置处理）
-        let url = ''
-        let apiKey = ''
-        try {
-          const s = await ragApi.getSettings()
-          url = (s.mineruApiUrl || '').trim()
-          apiKey = s.mineruApiKey || ''
-        } catch {
-          /* 设置读取失败不阻塞探测 */
-        }
-        // 2) POST /api/qdrant/test {kind:'mineru'}（客户端 10s 超时）
+        // 16-a 探测同源：只传 {kind:'mineru'}，后端回退读 DB 已存设置（provider/真实密钥/地址），
+        // 与「设置 → MinerU → 测试连接」同源同果。此前实现把 GET 设置返回的掩码密钥（***xxxx）
+        // 当真实 Key 传给探测接口，且不传 provider（默认 selfhost）→ 设置里 200、上传时却「未连接」。
         const res = await fetch('/api/qdrant/test', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind: 'mineru', ...(url ? { url, apiKey } : {}) }),
+          body: JSON.stringify({ kind: 'mineru' }),
           signal: AbortSignal.timeout(10_000),
           cache: 'no-store',
         })

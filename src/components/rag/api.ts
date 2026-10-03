@@ -56,6 +56,40 @@ async function asJson<T = any>(res: Response): Promise<T> {
   return json as T
 }
 
+/**
+ * 【Task 16-a】fetch 包装：dev server 重启 / 网关闪断窗口的瞬态失败自动重试。
+ * 判定「瞬态」：网络异常（fetch 抛错），或响应状态 404/502/503/504 且 body 非 JSON
+ * （Next.js 404 HTML 页 / 网关错误页特征——正常 API 错误返回 JSON 4xx/5xx 不重试）。
+ * 重试 2 次（600ms / 1500ms 退避）后仍瞬态 → 抛友好错误（此前表现为
+ * 「调度状态加载失败：Non-JSON response: 404 <!DOCTYPE html>…」）。
+ */
+async function req(url: string, init?: RequestInit): Promise<Response> {
+  const isTransient = (r: Response | null): boolean => {
+    if (!r) return true
+    if (![404, 502, 503, 504].includes(r.status)) return false
+    return !(r.headers.get('content-type') ?? '').includes('application/json')
+  }
+  let res: Response | null = null
+  try {
+    res = await fetch(url, init)
+  } catch {
+    res = null
+  }
+  if (isTransient(res)) {
+    for (const delay of [600, 1500]) {
+      await new Promise((r) => setTimeout(r, delay))
+      try {
+        res = await fetch(url, init)
+      } catch {
+        res = null
+      }
+      if (!isTransient(res)) break
+    }
+  }
+  if (!res) throw new Error('网络请求失败（服务可能正在重启，请稍后刷新重试）')
+  return res
+}
+
 function qs(params: Record<string, string | number | undefined | null>): string {
   const sp = new URLSearchParams()
   for (const [k, v] of Object.entries(params)) {
@@ -113,7 +147,7 @@ export function uploadDocument(
 export const ragApi = {
   // -- §1 知识库 ------------------------------------------------------------
   async listKbs(): Promise<{ kbs: KbSummary[] }> {
-    return asJson(await fetch('/api/kb', { cache: 'no-store' }))
+    return asJson(await req('/api/kb', { cache: 'no-store' }))
   },
   async createKb(body: {
     name: string
@@ -124,7 +158,7 @@ export const ragApi = {
     rerankEnabled?: boolean
   }): Promise<{ kb: KbSummary }> {
     return asJson(
-      await fetch('/api/kb', {
+      await req('/api/kb', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -132,14 +166,14 @@ export const ragApi = {
     )
   },
   async getKb(id: string): Promise<{ kb: KbSummary }> {
-    return asJson(await fetch(`/api/kb/${encodeURIComponent(id)}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/kb/${encodeURIComponent(id)}`, { cache: 'no-store' }))
   },
   async updateKb(
     id: string,
     body: { name?: string; description?: string; chunkConfig?: ChunkConfig; rerankEnabled?: boolean },
   ): Promise<{ kb: KbSummary }> {
     return asJson(
-      await fetch(`/api/kb/${encodeURIComponent(id)}`, {
+      await req(`/api/kb/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -147,7 +181,7 @@ export const ragApi = {
     )
   },
   async deleteKb(id: string): Promise<{ ok: true; deleted: Record<string, unknown> }> {
-    return asJson(await fetch(`/api/kb/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/kb/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
 
   // -- §2 文档 --------------------------------------------------------------
@@ -155,10 +189,10 @@ export const ragApi = {
     kbId: string,
     opts: { status?: string; q?: string; limit?: number; offset?: number } = {},
   ): Promise<{ docs: DocSummary[]; total: number }> {
-    return asJson(await fetch(`/api/kb/${encodeURIComponent(kbId)}/documents${qs(opts)}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/kb/${encodeURIComponent(kbId)}/documents${qs(opts)}`, { cache: 'no-store' }))
   },
   async getDoc(id: string): Promise<{ doc: DocDetail }> {
-    return asJson(await fetch(`/api/documents/${encodeURIComponent(id)}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/documents/${encodeURIComponent(id)}`, { cache: 'no-store' }))
   },
   async docAction(
     id: string,
@@ -166,7 +200,7 @@ export const ragApi = {
     chunkConfig?: ChunkConfig,
   ): Promise<{ ok: true }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(id)}/action`, {
+      await req(`/api/documents/${encodeURIComponent(id)}/action`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action, ...(chunkConfig ? { chunkConfig } : {}) }),
@@ -174,11 +208,11 @@ export const ragApi = {
     )
   },
   async deleteDoc(id: string): Promise<{ ok: true; deletedChunks: number }> {
-    return asJson(await fetch(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
   /** 原始字节（PDF 等） */
   async fetchDocBytes(id: string, kind: 'source' | 'markdown' = 'source'): Promise<ArrayBuffer> {
-    const res = await fetch(`/api/documents/${encodeURIComponent(id)}/file${qs({ kind })}`, { cache: 'force-cache' })
+    const res = await req(`/api/documents/${encodeURIComponent(id)}/file${qs({ kind })}`, { cache: 'force-cache' })
     if (!res.ok) {
       let msg = `HTTP ${res.status}`
       try {
@@ -190,7 +224,7 @@ export const ragApi = {
     return res.arrayBuffer()
   },
   async fetchDocText(id: string, kind: 'source' | 'markdown' = 'markdown'): Promise<string> {
-    const res = await fetch(`/api/documents/${encodeURIComponent(id)}/file${qs({ kind })}`, { cache: 'force-cache' })
+    const res = await req(`/api/documents/${encodeURIComponent(id)}/file${qs({ kind })}`, { cache: 'force-cache' })
     if (!res.ok) {
       let msg = `HTTP ${res.status}`
       try {
@@ -202,14 +236,14 @@ export const ragApi = {
     return res.text()
   },
   async getLayout(id: string): Promise<LayoutData> {
-    return asJson(await fetch(`/api/documents/${encodeURIComponent(id)}/layout`, { cache: 'no-store' }))
+    return asJson(await req(`/api/documents/${encodeURIComponent(id)}/layout`, { cache: 'no-store' }))
   },
   async listChunks(
     id: string,
     opts: { limit?: number; offset?: number; parentOnly?: boolean; q?: string } = {},
   ): Promise<{ chunks: ChunkItem[]; total: number }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(id)}/chunks${qs({
+      await req(`/api/documents/${encodeURIComponent(id)}/chunks${qs({
         limit: opts.limit,
         offset: opts.offset,
         parentOnly: opts.parentOnly ? 1 : undefined,
@@ -219,7 +253,7 @@ export const ragApi = {
   },
   async getChunk(docId: string, chunkId: string, full = false): Promise<{ chunk: ChunkFull }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}${qs({ full: full ? 1 : undefined })}`, {
+      await req(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}${qs({ full: full ? 1 : undefined })}`, {
         cache: 'no-store',
       }),
     )
@@ -230,7 +264,7 @@ export const ragApi = {
     body: { enabled?: boolean; text?: string; revert?: boolean },
   ): Promise<{ chunk: ChunkItem; result?: { chunkId: string; oldTokens: number; newTokens: number; embedMode: string; tookMs: number } }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}`, {
+      await req(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -239,12 +273,12 @@ export const ragApi = {
   },
   async deleteChunk(docId: string, chunkId: string): Promise<{ ok: true }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}`, { method: 'DELETE' }),
+      await req(`/api/documents/${encodeURIComponent(docId)}/chunk/${encodeURIComponent(chunkId)}`, { method: 'DELETE' }),
     )
   },
   async chunkPreview(id: string, chunkConfig: ChunkConfig): Promise<{ preview: ChunkPreview }> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(id)}/chunk-preview`, {
+      await req(`/api/documents/${encodeURIComponent(id)}/chunk-preview`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ chunkConfig }),
@@ -259,7 +293,7 @@ export const ragApi = {
     opts?: { filename?: string; engine?: 'mineru' | 'node' },
   ): Promise<{ doc?: DocSummary; deduplicated?: boolean }> {
     return asJson(
-      await fetch(`/api/kb/${encodeURIComponent(kbId)}/import-url`, {
+      await req(`/api/kb/${encodeURIComponent(kbId)}/import-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -274,7 +308,7 @@ export const ragApi = {
   // -- §3 检索调试 ----------------------------------------------------------
   async searchDebug(body: SearchDebugBody): Promise<{ result: SearchResponse }> {
     return asJson(
-      await fetch('/api/search/debug', {
+      await req('/api/search/debug', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -284,11 +318,11 @@ export const ragApi = {
 
   // -- §4 API Keys ----------------------------------------------------------
   async listKeys(): Promise<{ keys: ApiKeyItem[] }> {
-    return asJson(await fetch('/api/apikeys', { cache: 'no-store' }))
+    return asJson(await req('/api/apikeys', { cache: 'no-store' }))
   },
   async createKey(body: { name: string; role?: string }): Promise<{ key: ApiKeyItem }> {
     return asJson(
-      await fetch('/api/apikeys', {
+      await req('/api/apikeys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -297,7 +331,7 @@ export const ragApi = {
   },
   async patchKey(id: string, body: { enabled?: boolean }): Promise<{ key: ApiKeyItem }> {
     return asJson(
-      await fetch(`/api/apikeys/${encodeURIComponent(id)}`, {
+      await req(`/api/apikeys/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -305,34 +339,34 @@ export const ragApi = {
     )
   },
   async deleteKey(id: string): Promise<{ ok: true }> {
-    return asJson(await fetch(`/api/apikeys/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/apikeys/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
 
   // -- §5 系统 --------------------------------------------------------------
   async getHealth(): Promise<{ health: HealthInfo }> {
-    return asJson(await fetch('/api/system/health', { cache: 'no-store' }))
+    return asJson(await req('/api/system/health', { cache: 'no-store' }))
   },
   async getMetricsSummary(): Promise<{ summary: MetricsSummary }> {
-    return asJson(await fetch('/api/system/metrics-summary', { cache: 'no-store' }))
+    return asJson(await req('/api/system/metrics-summary', { cache: 'no-store' }))
   },
   async getPrometheusText(): Promise<string> {
-    return await (await fetch('/api/metrics', { cache: 'no-store' })).text()
+    return await (await req('/api/metrics', { cache: 'no-store' })).text()
   },
   /** §29-A 平台资源占用（进程 / 系统 / 磁盘，OpsView 资源卡 5s 轮询） */
   async getResources(): Promise<ResourceUsage> {
-    return asJson(await fetch('/api/system/resources', { cache: 'no-store' }))
+    return asJson(await req('/api/system/resources', { cache: 'no-store' }))
   },
   async listJobs(
     opts: { status?: string; type?: string; limit?: number } = {},
   ): Promise<{ jobs: JobItem[]; stats: JobsStats }> {
-    return asJson(await fetch(`/api/system/jobs${qs(opts)}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/system/jobs${qs(opts)}`, { cache: 'no-store' }))
   },
   async retryJob(id: string): Promise<{ ok: true }> {
-    return asJson(await fetch(`/api/system/jobs/${encodeURIComponent(id)}/retry`, { method: 'POST' }))
+    return asJson(await req(`/api/system/jobs/${encodeURIComponent(id)}/retry`, { method: 'POST' }))
   },
   async cleanJobs(body: { status?: string; olderThanHours?: number }): Promise<{ cleaned: number }> {
     return asJson(
-      await fetch('/api/system/jobs/clean', {
+      await req('/api/system/jobs/clean', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -342,14 +376,14 @@ export const ragApi = {
 
   // -- §10 备份与恢复 --------------------------------------------------------
   async listBackups(): Promise<{ backups: BackupItem[] }> {
-    return asJson(await fetch('/api/system/backups', { cache: 'no-store' }))
+    return asJson(await req('/api/system/backups', { cache: 'no-store' }))
   },
   /** §29：includeQdrantSnapshot 缺省 true（qdrant 模式连同 Qdrant 快照；local 模式自动跳过） */
   async createBackup(
     opts: { includeArtifacts?: boolean; includeQdrantSnapshot?: boolean } = {},
   ): Promise<{ backup: BackupItem }> {
     return asJson(
-      await fetch('/api/system/backups', {
+      await req('/api/system/backups', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(opts),
@@ -357,7 +391,7 @@ export const ragApi = {
     )
   },
   async deleteBackup(id: string): Promise<{ ok: true }> {
-    return asJson(await fetch(`/api/system/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/system/backups/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
   /** §29：includeQdrant 缺省 true（备份含快照时面板数据恢复后逐个上传恢复 Qdrant 集合） */
   async restoreBackup(
@@ -365,7 +399,7 @@ export const ragApi = {
     opts: { includeQdrant?: boolean } = {},
   ): Promise<{ result: RestoreResult }> {
     return asJson(
-      await fetch(`/api/system/backups/${encodeURIComponent(id)}/restore`, {
+      await req(`/api/system/backups/${encodeURIComponent(id)}/restore`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(opts),
@@ -377,13 +411,13 @@ export const ragApi = {
     return `/api/system/backups/${encodeURIComponent(id)}/download`
   },
   async getBackupSchedule(): Promise<{ schedule: BackupSchedule }> {
-    return asJson(await fetch('/api/system/backups/schedule', { cache: 'no-store' }))
+    return asJson(await req('/api/system/backups/schedule', { cache: 'no-store' }))
   },
   async saveBackupSchedule(
     body: { enabled?: boolean; intervalHours?: number; keep?: number },
   ): Promise<{ schedule: BackupSchedule }> {
     return asJson(
-      await fetch('/api/system/backups/schedule', {
+      await req('/api/system/backups/schedule', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -396,15 +430,15 @@ export const ragApi = {
   async uploadBackupArchive(file: File): Promise<BackupUploadResult> {
     const fd = new FormData()
     fd.append('file', file)
-    return asJson(await fetch('/api/system/backups/upload', { method: 'POST', body: fd }))
+    return asJson(await req('/api/system/backups/upload', { method: 'POST', body: fd }))
   },
   /** 已上传 Qdrant 快照清单（含从文件名推断的目标集合） */
   async listUploadedQdrantSnapshots(): Promise<{ uploads: UploadedQdrantSnapshot[] }> {
-    return asJson(await fetch('/api/system/backups/upload', { cache: 'no-store' }))
+    return asJson(await req('/api/system/backups/upload', { cache: 'no-store' }))
   },
   async deleteUploadedQdrantSnapshot(fileName: string): Promise<{ ok: true }> {
     return asJson(
-      await fetch(`/api/system/backups/upload${qs({ fileName })}`, { method: 'DELETE' }),
+      await req(`/api/system/backups/upload${qs({ fileName })}`, { method: 'DELETE' }),
     )
   },
   /** 上传的 .snapshot → 恢复到指定集合（collection 缺省由服务端从文件名推断） */
@@ -413,7 +447,7 @@ export const ragApi = {
     collection?: string,
   ): Promise<{ ok: boolean; message: string; collection: string }> {
     return asJson(
-      await fetch('/api/system/backups/qdrant-restore', {
+      await req('/api/system/backups/qdrant-restore', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fileName, ...(collection ? { collection } : {}) }),
@@ -423,14 +457,14 @@ export const ragApi = {
 
   // -- §11 检索测试集 --------------------------------------------------------
   async listTestCases(kbId: string): Promise<{ cases: TestCaseItem[]; docs: DocSummary[] }> {
-    return asJson(await fetch(`/api/kb/${encodeURIComponent(kbId)}/testcases`, { cache: 'no-store' }))
+    return asJson(await req(`/api/kb/${encodeURIComponent(kbId)}/testcases`, { cache: 'no-store' }))
   },
   async createTestCase(
     kbId: string,
     body: { name: string; query: string; expectDocIds: string[]; params?: TestCaseParams },
   ): Promise<{ testCase: TestCaseItem }> {
     return asJson(
-      await fetch(`/api/kb/${encodeURIComponent(kbId)}/testcases`, {
+      await req(`/api/kb/${encodeURIComponent(kbId)}/testcases`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -442,7 +476,7 @@ export const ragApi = {
     body: { name?: string; query?: string; expectDocIds?: string[]; params?: TestCaseParams; enabled?: boolean },
   ): Promise<{ testCase: TestCaseItem }> {
     return asJson(
-      await fetch(`/api/testcases/${encodeURIComponent(id)}`, {
+      await req(`/api/testcases/${encodeURIComponent(id)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -450,14 +484,14 @@ export const ragApi = {
     )
   },
   async deleteTestCase(id: string): Promise<{ ok: true }> {
-    return asJson(await fetch(`/api/testcases/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/testcases/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
   async runTestCases(
     kbId: string,
     body: { caseIds?: string[]; onlyEnabled?: boolean; async?: boolean } = {},
   ): Promise<{ report?: TestRunReport; run?: TestRunState; note?: string }> {
     return asJson(
-      await fetch(`/api/kb/${encodeURIComponent(kbId)}/testcases/run`, {
+      await req(`/api/kb/${encodeURIComponent(kbId)}/testcases/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -467,7 +501,7 @@ export const ragApi = {
   /** 异步运行状态查询（404 = 不存在或已清理） */
   async getTestRun(kbId: string, runId: string): Promise<{ run: TestRunState }> {
     return asJson(
-      await fetch(
+      await req(
         `/api/kb/${encodeURIComponent(kbId)}/testcases/run/${encodeURIComponent(runId)}`,
         { cache: 'no-store' },
       ),
@@ -480,7 +514,7 @@ export const ragApi = {
     body: { action: 'enable' | 'disable'; chunkIds?: string[]; scope?: 'children' | 'all' },
   ): Promise<ChunkBatchResult> {
     return asJson(
-      await fetch(`/api/documents/${encodeURIComponent(docId)}/chunks/batch`, {
+      await req(`/api/documents/${encodeURIComponent(docId)}/chunks/batch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -497,11 +531,11 @@ export const ragApi = {
 
   // -- §7 仪表盘 ------------------------------------------------------------
   async getDashboard(): Promise<{ dashboard: DashboardData }> {
-    return asJson(await fetch('/api/dashboard', { cache: 'no-store' }))
+    return asJson(await req('/api/dashboard', { cache: 'no-store' }))
   },
   async getDashboardTrends(days = 14, kbId?: string): Promise<{ trends: DashboardTrends }> {
     return asJson(
-      await fetch(`/api/dashboard/trends${qs({ days, kbId: kbId || undefined })}`, {
+      await req(`/api/dashboard/trends${qs({ days, kbId: kbId || undefined })}`, {
         cache: 'no-store',
       }),
     )
@@ -509,16 +543,16 @@ export const ragApi = {
 
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------
   async listDocVersions(docId: string): Promise<{ versions: DocVersionInfo[] }> {
-    return asJson(await fetch(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))
+    return asJson(await req(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))
   },
   /** §28 任务中心：进行中 + 失败文档（完成任务不返回） */
   async getActivity(): Promise<ActivityResponse> {
-    return asJson(await fetch('/api/activity', { cache: 'no-store' }))
+    return asJson(await req('/api/activity', { cache: 'no-store' }))
   },
   /** §27 恢复历史版本（归档当前 → 版本号+1 → 重建 chunks → 入队重嵌入） */
   async restoreDocVersion(docId: string, version: string): Promise<RestoreVersionResult> {
     return asJson(
-      await fetch(
+      await req(
         `/api/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(version)}/restore`,
         { method: 'POST' },
       ),
@@ -527,7 +561,7 @@ export const ragApi = {
   /** §27 删除历史版本快照 */
   async deleteDocVersion(docId: string, version: string): Promise<{ ok: true }> {
     return asJson(
-      await fetch(
+      await req(
         `/api/documents/${encodeURIComponent(docId)}/versions/${encodeURIComponent(version)}`,
         { method: 'DELETE' },
       ),
@@ -535,7 +569,7 @@ export const ragApi = {
   },
   async compareDocVersions(docId: string, v1: string, v2: string): Promise<{ compare: VersionCompareResult }> {
     return asJson(
-      await fetch(
+      await req(
         `/api/documents/${encodeURIComponent(docId)}/versions/compare${qs({ v1, v2 })}`,
         { cache: 'no-store' },
       ),
@@ -552,11 +586,11 @@ export const ragApi = {
 
   // -- §23 Qdrant 快照（契约 §23；qdrant 模式专用） -------------------------
   async listQdrantSnapshots(): Promise<QdrantSnapshotListResult> {
-    return asJson(await fetch('/api/qdrant/snapshots', { cache: 'no-store' }))
+    return asJson(await req('/api/qdrant/snapshots', { cache: 'no-store' }))
   },
   async createQdrantSnapshot(collection: string): Promise<{ snapshot: QdrantSnapshotItem }> {
     return asJson(
-      await fetch('/api/qdrant/snapshots', {
+      await req('/api/qdrant/snapshots', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ collection }),
@@ -565,7 +599,7 @@ export const ragApi = {
   },
   async deleteQdrantSnapshot(collection: string, name: string): Promise<{ ok: boolean }> {
     return asJson(
-      await fetch(
+      await req(
         `/api/qdrant/snapshots/${encodeURIComponent(name)}${qs({ collection })}`,
         { method: 'DELETE' },
       ),
@@ -573,7 +607,7 @@ export const ragApi = {
   },
   async restoreQdrantSnapshot(collection: string, name: string): Promise<{ ok: boolean; message: string }> {
     return asJson(
-      await fetch(
+      await req(
         `/api/qdrant/snapshots/${encodeURIComponent(name)}/restore${qs({ collection })}`,
         { method: 'POST' },
       ),
@@ -582,16 +616,16 @@ export const ragApi = {
 
   // -- §24 测试集运行历史（契约 §24；进程内注册表） --------------------------
   async listTestRuns(kbId: string): Promise<{ runs: TestRunHistoryItem[] }> {
-    return asJson(await fetch(`/api/kb/${encodeURIComponent(kbId)}/testruns`, { cache: 'no-store' }))
+    return asJson(await req(`/api/kb/${encodeURIComponent(kbId)}/testruns`, { cache: 'no-store' }))
   },
 
   // -- §6 设置（基座路由扩展） ----------------------------------------------
   async getSettings(): Promise<RagSettings> {
-    return asJson(await fetch('/api/qdrant/settings', { cache: 'no-store' }))
+    return asJson(await req('/api/qdrant/settings', { cache: 'no-store' }))
   },
   async saveSettings(payload: Partial<RagSettings>): Promise<{ settings: RagSettings }> {
     return asJson(
-      await fetch('/api/qdrant/settings', {
+      await req('/api/qdrant/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -600,7 +634,7 @@ export const ragApi = {
   },
   async testConnection(kind: TestKind, body: Record<string, unknown>): Promise<TestResult> {
     return asJson(
-      await fetch('/api/qdrant/test', {
+      await req('/api/qdrant/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, ...body }),

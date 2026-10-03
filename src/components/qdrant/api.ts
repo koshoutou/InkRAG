@@ -25,13 +25,44 @@ async function asJson(res: Response) {
   return json
 }
 
+/**
+ * 【Task 16-a】fetch 包装：dev server 重启 / 网关闪断窗口的瞬态失败自动重试
+ * （网络异常，或 404/502/503/504 且 body 非 JSON 的错误页）。重试 2 次（600ms/1500ms）。
+ */
+async function req(url: string, init?: RequestInit): Promise<Response> {
+  const isTransient = (r: Response | null): boolean => {
+    if (!r) return true
+    if (![404, 502, 503, 504].includes(r.status)) return false
+    return !(r.headers.get('content-type') ?? '').includes('application/json')
+  }
+  let res: Response | null = null
+  try {
+    res = await fetch(url, init)
+  } catch {
+    res = null
+  }
+  if (isTransient(res)) {
+    for (const delay of [600, 1500]) {
+      await new Promise((r) => setTimeout(r, delay))
+      try {
+        res = await fetch(url, init)
+      } catch {
+        res = null
+      }
+      if (!isTransient(res)) break
+    }
+  }
+  if (!res) throw new Error('网络请求失败（服务可能正在重启，请稍后刷新重试）')
+  return res
+}
+
 export const api = {
   async getSettings(): Promise<QdrantSettings> {
-    return asJson(await fetch('/api/qdrant/settings', { cache: 'no-store' }))
+    return asJson(await req('/api/qdrant/settings', { cache: 'no-store' }))
   },
   async saveSettings(payload: Partial<QdrantSettings> & { test?: boolean }) {
     return asJson(
-      await fetch('/api/qdrant/settings', {
+      await req('/api/qdrant/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
@@ -40,7 +71,7 @@ export const api = {
   },
   async testConnection(kind: 'qdrant' | 'embed' | 'rerank', body: { url: string; apiKey?: string; model?: string }) {
     return asJson(
-      await fetch('/api/qdrant/test', {
+      await req('/api/qdrant/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ kind, ...body }),
@@ -48,10 +79,10 @@ export const api = {
     )
   },
   async listCollections(): Promise<{ collections: CollectionSummary[]; total: number }> {
-    return asJson(await fetch('/api/qdrant/collections', { cache: 'no-store' }))
+    return asJson(await req('/api/qdrant/collections', { cache: 'no-store' }))
   },
   async getCollection(name: string): Promise<CollectionDetail> {
-    return asJson(await fetch(`/api/qdrant/collections/${encodeURIComponent(name)}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/qdrant/collections/${encodeURIComponent(name)}`, { cache: 'no-store' }))
   },
   async scrollPoints(name: string, body: {
     limit?: number
@@ -62,7 +93,7 @@ export const api = {
     order_by?: { key: string; direction: 'asc' | 'desc' } | null
   }): Promise<ScrollResult> {
     return asJson(
-      await fetch(`/api/qdrant/collections/${encodeURIComponent(name)}/points`, {
+      await req(`/api/qdrant/collections/${encodeURIComponent(name)}/points`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -71,7 +102,7 @@ export const api = {
   },
   async getPoint(name: string, id: string, withVector = false): Promise<{ point: QdrantPoint }> {
     const q = withVector ? '?with_vector=1' : ''
-    return asJson(await fetch(`/api/qdrant/collections/${encodeURIComponent(name)}/points/${encodeURIComponent(id)}${q}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/qdrant/collections/${encodeURIComponent(name)}/points/${encodeURIComponent(id)}${q}`, { cache: 'no-store' }))
   },
   async search(name: string, body: {
     query: string
@@ -91,7 +122,7 @@ export const api = {
     save_history?: boolean
   }): Promise<SearchResponse> {
     return asJson(
-      await fetch(`/api/qdrant/collections/${encodeURIComponent(name)}/search`, {
+      await req(`/api/qdrant/collections/${encodeURIComponent(name)}/search`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
@@ -105,13 +136,13 @@ export const api = {
     if (opts.q) params.set('q', opts.q)
     params.set('limit', String(opts.limit ?? 20))
     params.set('offset', String(opts.offset ?? 0))
-    return asJson(await fetch(`/api/qdrant/call-logs?${params.toString()}`, { cache: 'no-store' }))
+    return asJson(await req(`/api/qdrant/call-logs?${params.toString()}`, { cache: 'no-store' }))
   },
   async deleteCallLog(id: string) {
-    return asJson(await fetch(`/api/qdrant/call-logs/${id}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/qdrant/call-logs/${id}`, { method: 'DELETE' }))
   },
   async clearCallLogs() {
-    return asJson(await fetch('/api/qdrant/call-logs?all=1', { method: 'DELETE' }))
+    return asJson(await req('/api/qdrant/call-logs?all=1', { method: 'DELETE' }))
   },
   async cleanupCallLogs(opts: { keep?: number; olderThanDays?: number; before?: string; all?: boolean } = {}) {
     const p = new URLSearchParams()
@@ -119,7 +150,7 @@ export const api = {
     if (typeof opts.keep === 'number') p.set('keep', String(opts.keep))
     if (typeof opts.olderThanDays === 'number') p.set('olderThanDays', String(opts.olderThanDays))
     if (opts.before) p.set('before', opts.before)
-    return asJson(await fetch(`/api/qdrant/call-logs?${p.toString()}`, { method: 'DELETE' }))
+    return asJson(await req(`/api/qdrant/call-logs?${p.toString()}`, { method: 'DELETE' }))
   },
 }
 
