@@ -520,6 +520,25 @@ export const ragApi = {
     return asJson(await req('/api/dashboard', { cache: 'no-store' }))
   },
 
+  // -- §35 程序日志（/api/system/oplogs） ------------------------------------
+  async listOpLogs(params: { level?: string; category?: string; hours?: string | number; q?: string; limit?: number; offset?: number }): Promise<{ logs: import('./views/OpLogsCard').OpLogItem[]; total: number }> {
+    return asJson(
+      await req(`/api/system/oplogs${qs({
+        level: params.level && params.level !== 'all' ? params.level : undefined,
+        category: params.category && params.category !== 'all' ? params.category : undefined,
+        hours: params.hours ?? 24,
+        q: params.q || undefined,
+        limit: params.limit ?? 60,
+        offset: params.offset ?? 0,
+      })}`, { cache: 'no-store' }),
+    )
+  },
+  async cleanOplogs(olderThanHours: number): Promise<{ deleted: number }> {
+    return asJson(
+      await req(`/api/system/oplogs?olderThanHours=${olderThanHours}`, { method: 'DELETE' }),
+    )
+  },
+
   // -- §16 文档文档版本管理（契约 §17） ---------------------------------------
   async listDocVersions(docId: string): Promise<{ versions: DocVersionInfo[] }> {
     return asJson(await req(`/api/documents/${encodeURIComponent(docId)}/versions`, { cache: 'no-store' }))

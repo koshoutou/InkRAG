@@ -5,6 +5,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { db } from '@/lib/db'
+import { recordOp } from './oplog'
 import { getRagSettings } from './settings'
 import { toKbSummary } from './serialize'
 import { getVectorStore } from './vectorstore'
@@ -40,7 +41,7 @@ export type DeleteKbResult =
  * 删除知识库（级联）：取消在途任务 → 删向量集合 → 删行（Chunk/Document/PipelineJob/KB）→ 清磁盘产物 → count 校验。
  * 顺序不可变（审计#N13：先取消再删，避免 runJob 半写状态）。
  */
-export async function deleteKnowledgeBaseCore(id: string): Promise<DeleteKbResult> {
+async function deleteKnowledgeBaseCoreImpl(id: string): Promise<DeleteKbResult> {
   const kb = await db.knowledgeBase.findUnique({ where: { id } })
   if (!kb) return { ok: false, status: 404, error: '知识库不存在' }
 
@@ -88,7 +89,7 @@ export type DeleteDocResult =
   | { ok: false; status: number; error: string }
 
 /** 删除文档（级联）：取消在途 → 向量 delete(filter doc_id) → chunk/任务/文档行 → 磁盘产物 → count 校验 → updateKbStats */
-export async function deleteDocumentCore(docId: string): Promise<DeleteDocResult> {
+async function deleteDocumentCoreImpl(docId: string): Promise<DeleteDocResult> {
   const doc = await db.document.findUnique({ where: { id: docId } })
   if (!doc) return { ok: false, status: 404, error: '文档不存在' }
   const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
@@ -133,7 +134,7 @@ export type RetryDocResult =
  * 失败文档重试：从失败阶段续跑（meta.failedStage 记录，缺省 parse），不产生新版本。
  * 仅 failed 状态可重试（409 流水线保护——重试会取消该文档在途任务后重新入队）。
  */
-export async function retryFailedDocumentCore(docId: string): Promise<RetryDocResult> {
+async function retryFailedDocumentCoreImpl(docId: string): Promise<RetryDocResult> {
   const doc = await db.document.findUnique({ where: { id: docId } })
   if (!doc) return { ok: false, status: 404, error: '文档不存在' }
   const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
@@ -177,4 +178,54 @@ export async function retryFailedDocumentCore(docId: string): Promise<RetryDocRe
   // enqueueDocument 内部会先取消该文档全部在途任务再建新任务（审计#N14，并发保护）
   await enqueueDocument(docId, stage)
   return { ok: true, stage }
+}
+
+
+// ---- Task 17-5：带程序日志的对外入口（三条链路共用一处埋点） ----
+
+export async function deleteKnowledgeBaseCore(id: string): Promise<DeleteKbResult> {
+  const t0 = Date.now()
+  const r = await deleteKnowledgeBaseCoreImpl(id)
+  recordOp({
+    level: r.ok ? 'info' : 'warn',
+    category: 'kb',
+    action: r.ok ? 'kb.delete' : 'kb.delete_failed',
+    message: r.ok
+      ? `删除知识库（级联 ${JSON.stringify(r.deleted)}）`
+      : `删除知识库失败：${r.error}`,
+    durationMs: Date.now() - t0,
+    statusCode: r.ok ? 200 : r.status,
+    kbId: id,
+  })
+  return r
+}
+
+export async function deleteDocumentCore(docId: string): Promise<DeleteDocResult> {
+  const t0 = Date.now()
+  const r = await deleteDocumentCoreImpl(docId)
+  recordOp({
+    level: r.ok ? 'info' : 'warn',
+    category: 'document',
+    action: r.ok ? 'doc.delete' : 'doc.delete_failed',
+    message: r.ok ? `删除文档（级联删除 ${r.deletedChunks} 个 chunk）` : `删除文档失败：${r.error}`,
+    durationMs: Date.now() - t0,
+    statusCode: r.ok ? 200 : r.status,
+    docId,
+  })
+  return r
+}
+
+export async function retryFailedDocumentCore(docId: string): Promise<RetryDocResult> {
+  const t0 = Date.now()
+  const r = await retryFailedDocumentCoreImpl(docId)
+  recordOp({
+    level: r.ok ? 'info' : 'warn',
+    category: 'document',
+    action: r.ok ? 'doc.retry' : 'doc.retry_failed',
+    message: r.ok ? `重试失败文档（从 ${r.stage ?? 'parse'} 阶段续跑）` : `重试被拒绝：${r.error}`,
+    durationMs: Date.now() - t0,
+    statusCode: r.ok ? 200 : r.status,
+    docId,
+  })
+  return r
 }

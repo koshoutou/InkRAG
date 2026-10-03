@@ -304,3 +304,27 @@ model ApiKey {
 // ---------------------------------------------------------------------------
 // （v1.6 移除）VectorPoint：本地向量引擎专用表已随 LocalVectorStore 一并删除
 // 生产向量一律写入 Qdrant；未配置/不可达时写入硬失败，绝不静默降级
+
+// ---------------------------------------------------------------------------
+// 程序日志（Task 17-5：面板操作/运行信息/报错的统一记录与运维管理）
+// level: info | warn | error；category: api | kb | document | chunk | pipeline | auth | backup | system
+// 写入：共享层（ingest/kbcreate/kb cores）+ pipeline 失败 + 设置/APIKey/备份路由
+//       + instrumentation onRequestError 全局兜底（未捕获请求错误）
+// ---------------------------------------------------------------------------
+model ProgramLog {
+  id          String    @id @default(cuid())
+  ts          DateTime  @default(now())
+  level       String
+  category    String
+  action      String
+  message     String
+  detailJson  String?
+  durationMs  Int?
+  statusCode  Int?
+  kbId        String?
+  docId       String?
+
+  @@index([ts])
+  @@index([level])
+  @@index([category])
+}

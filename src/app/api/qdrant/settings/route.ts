@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { recordOp } from '@/lib/rag/oplog'
 import { testConnection } from '@/lib/qdrant'
 import { MINERU_PROVIDERS, normalizeMinerUProvider } from '@/lib/rag/settings'
 
@@ -170,6 +171,15 @@ export async function PUT(req: NextRequest) {
     // 用落库后的真实值测试（掩码值从不落库，row.apiKey 一定是真实密钥或空串）
     testResult = await testConnection(row.url, row.apiKey)
   }
+  recordOp({
+    level: 'info',
+    category: 'system',
+    action: 'settings.update',
+    message: `更新平台设置（${Object.keys(body as object)
+      .filter((k) => !['apiKey', 'embedApiKey', 'rerankApiKey', 'mineruApiKey'].includes(k))
+      .join('、') || '（未携带字段）'}${body.test ? '；保存后附带连接测试' : ''}；密钥类字段仅记字段名不记值）`,
+    detail: { test: testResult ? { ok: testResult.ok } : null },
+  })
   return NextResponse.json({
     ok: true,
     settings: serializeSettings(row),

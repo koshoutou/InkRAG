@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
+import { recordOp } from '@/lib/rag/oplog'
 import { apiKeyPreview } from '@/lib/rag/apikey'
 
 export const dynamic = 'force-dynamic'
@@ -21,6 +22,14 @@ export async function PATCH(req: NextRequest, ctx: Ctx) {
       data.role = body.role
     }
     const updated = await db.apiKey.update({ where: { id }, data })
+    recordOp({
+      level: 'info',
+      category: 'auth',
+      action: 'auth.key_update',
+      message: `更新 API Key「${updated.name}」（${
+        data.enabled !== undefined ? (updated.enabled ? '启用' : '停用') : '改名/改角色'
+      }）`,
+    })
     return NextResponse.json({
       key: {
         id: updated.id,
@@ -46,6 +55,12 @@ export async function DELETE(_req: NextRequest, ctx: Ctx) {
     const key = await db.apiKey.findUnique({ where: { id } })
     if (!key) return NextResponse.json({ error: 'API Key 不存在' }, { status: 404 })
     await db.apiKey.delete({ where: { id } })
+    recordOp({
+      level: 'info',
+      category: 'auth',
+      action: 'auth.key_delete',
+      message: `删除 API Key「${key.name}」（角色 ${key.role}）`,
+    })
     return NextResponse.json({ ok: true })
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })

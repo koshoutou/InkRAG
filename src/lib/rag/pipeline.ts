@@ -25,6 +25,7 @@
 import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { db } from '@/lib/db'
+import { recordOp } from './oplog'
 import { getRagSettings } from './settings'
 import { getVectorStore, isNonRetryable, StoreError } from './vectorstore'
 import { DEFAULT_CHUNK_CONFIG, splitMarkdown, countTokens, type ChunkConfig } from './chunking'
@@ -612,6 +613,16 @@ async function handleJobFailure(job: JobRow, e: unknown, startedAt: number): Pro
   } catch (err) {
     console.error('[pipeline] 失败状态回写异常:', err)
   }
+  // Task 17-5：永久失败落程序日志（重试中的失败在活动流可见，此处只记终态）
+  recordOp({
+    level: 'error',
+    category: 'pipeline',
+    action: 'pipeline.job_failed',
+    message: `流水线任务永久失败（${job.type}，attempts ${job.attempts}/${job.maxAttempts}）：${message}`,
+    detail: { jobId: job.id, type: job.type, code, durationMs },
+    statusCode: 500,
+    docId: job.documentId,
+  })
   await jobUpdate({
     jobId: job.id,
     documentId: job.documentId,

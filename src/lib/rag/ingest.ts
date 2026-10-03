@@ -24,6 +24,7 @@ import { enqueueDocument } from './pipeline'
 import { parseChunkConfig } from './serialize'
 import { ALL_ACCEPTED_EXTS, extToMime } from './parsers/formats'
 import type { Document, KnowledgeBase } from '@prisma/client'
+import { recordOp } from './oplog'
 
 export const INGEST_MAX_FILE_BYTES = 200 * 1024 * 1024 // 单文件 200MB（与 MinerU 云服务一致）
 
@@ -167,7 +168,7 @@ async function persistDocumentRow(
  * 失败抛 IngestError（status 400/404/413/500）；成功返回 { doc, deduplicated }。
  * deduplicated=true 时 tmpPath 已清理、不产生新流水线任务。
  */
-export async function ingestUploadFile(kb: KnowledgeBase, file: File, opts?: IngestOptions): Promise<IngestResult> {
+async function ingestUploadFileImpl(kb: KnowledgeBase, file: File, opts?: IngestOptions): Promise<IngestResult> {
   const filename = file.name || 'untitled'
   const ext = checkFile(filename, file.size)
   const { tmpPath, sizeBytes, contentHash } = await streamToTemp(file, filename)
@@ -202,7 +203,7 @@ export async function ingestUploadFile(kb: KnowledgeBase, file: File, opts?: Ing
  * 文本直接入库：内容写入 .md 产物文件后走同一流水线。
  * name 缺扩展名时自动补 .md；内容以 UTF-8 落盘，sha256 参与秒传语义。
  */
-export async function ingestTextContent(
+async function ingestTextContentImpl(
   kb: KnowledgeBase,
   name: string,
   text: string,
@@ -249,4 +250,71 @@ export async function ingestTextContent(
   })
   await enqueueDocument(doc.id, 'parse')
   return { doc, deduplicated: false }
+}
+
+
+/**
+ * 对外入口（带程序日志，Task 17-5）：三条链路（/api/kb/[id]/documents、/api/input、/v1/datasets）共用。
+ */
+export async function ingestUploadFile(kb: KnowledgeBase, file: File, opts?: IngestOptions): Promise<IngestResult> {
+  const t0 = Date.now()
+  try {
+    const r = await ingestUploadFileImpl(kb, file, opts)
+    recordOp({
+      level: 'info',
+      category: 'document',
+      action: r.deduplicated ? 'doc.upload_dedup' : 'doc.upload',
+      message: r.deduplicated
+        ? `秒传命中：${file.name || 'untitled'}（已存在同内容文档，未新建流水线任务）`
+        : `上传入库：${file.name || 'untitled'}（${(file.size / 1024).toFixed(1)}KB，引擎 ${opts?.engine ?? 'auto'}）`,
+      durationMs: Date.now() - t0,
+      kbId: kb.id,
+      docId: r.doc.id,
+    })
+    return r
+  } catch (e: any) {
+    recordOp({
+      level: e instanceof IngestError && e.status < 500 ? 'warn' : 'error',
+      category: 'document',
+      action: 'doc.upload_failed',
+      message: `上传入库失败：${file.name || 'untitled'}——${e?.message ?? String(e)}`,
+      detail: e instanceof IngestError ? { status: e.status } : e,
+      statusCode: e instanceof IngestError ? e.status : 500,
+      kbId: kb.id,
+    })
+    throw e
+  }
+}
+
+export async function ingestTextContent(
+  kb: KnowledgeBase,
+  name: string,
+  text: string,
+  opts?: IngestOptions,
+): Promise<IngestResult> {
+  const t0 = Date.now()
+  try {
+    const r = await ingestTextContentImpl(kb, name, text, opts)
+    recordOp({
+      level: 'info',
+      category: 'document',
+      action: r.deduplicated ? 'doc.ingest_text_dedup' : 'doc.ingest_text',
+      message: r.deduplicated ? `文本秒传命中：${name}` : `文本入库：${name}（${text.length} 字符）`,
+      durationMs: Date.now() - t0,
+      kbId: kb.id,
+      docId: r.doc.id,
+    })
+    return r
+  } catch (e: any) {
+    recordOp({
+      level: e instanceof IngestError && e.status < 500 ? 'warn' : 'error',
+      category: 'document',
+      action: 'doc.ingest_text_failed',
+      message: `文本入库失败：${name}——${e?.message ?? String(e)}`,
+      detail: e instanceof IngestError ? { status: e.status } : e,
+      statusCode: e instanceof IngestError ? e.status : 500,
+      kbId: kb.id,
+    })
+    throw e
+  }
 }

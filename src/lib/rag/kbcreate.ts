@@ -22,6 +22,7 @@ import { getVectorStore, StoreError } from './vectorstore'
 import { parseChunkConfig } from './serialize'
 import { DEFAULT_CHUNK_CONFIG } from './chunking'
 import { probeEmbedding } from './embed'
+import { recordOp } from './oplog'
 
 export type RetrievalMode = 'hybrid' | 'dense' | 'sparse'
 export const RETRIEVAL_MODES: RetrievalMode[] = ['hybrid', 'dense', 'sparse']
@@ -48,7 +49,7 @@ export function isValidRetrievalMode(v: unknown): v is RetrievalMode {
 }
 
 /** 建库核心：校验 → 建集合 → 落库行。失败返回 { ok:false, status, error }（路由层映射 HTTP） */
-export async function createKnowledgeBaseCore(input: CreateKbInput): Promise<CreateKbResult> {
+async function createKnowledgeBaseCoreImpl(input: CreateKbInput): Promise<CreateKbResult> {
   const name = String(input.name ?? '').trim()
   if (!name) return { ok: false, status: 400, error: '知识库名称不能为空' }
 
@@ -131,4 +132,33 @@ export async function createKnowledgeBaseCore(input: CreateKbInput): Promise<Cre
     },
   })
   return { ok: true, kb }
+}
+
+/**
+ * 对外入口（带程序日志）：成功 info / 失败 warn（Task 17-5）。
+ * 三条链路（/api/kb、/api/input、/v1/datasets）共用，一处埋点全覆盖。
+ */
+export async function createKnowledgeBaseCore(input: CreateKbInput): Promise<CreateKbResult> {
+  const t0 = Date.now()
+  const r = await createKnowledgeBaseCoreImpl(input)
+  if (r.ok) {
+    recordOp({
+      level: 'info',
+      category: 'kb',
+      action: 'kb.create',
+      message: `创建知识库「${r.kb.name}」（集合 ${r.kb.collection}，dim ${r.kb.dim}，retrievalMode ${r.kb.retrievalMode}）`,
+      durationMs: Date.now() - t0,
+      kbId: r.kb.id,
+    })
+  } else {
+    recordOp({
+      level: 'warn',
+      category: 'kb',
+      action: 'kb.create_failed',
+      message: `创建知识库失败（${input.name}）：${r.error}`,
+      detail: { status: r.status },
+      statusCode: r.status,
+    })
+  }
+  return r
 }

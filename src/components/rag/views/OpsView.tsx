@@ -66,6 +66,7 @@ import { ragApi } from '../api'
 import { useQuickAction } from '../useQuickAction'
 import type { BackupItem, BackupSchedule, QdrantSnapshotItem } from '../types'
 import { useRealtime } from '../useRealtime'
+import { OpLogsCard } from './OpLogsCard'
 import { EmptyHint, ErrorCard, JOB_TYPE_META, StatCard, formatBytes, formatDateTime, formatDuration, formatNumber, formatUptime, ragScrollbar, timeAgo } from '../ui'
 
 interface ActivityEntry {
@@ -1874,6 +1875,9 @@ export function OpsView() {
             </CardContent>
           </Card>
         </div>
+
+        {/* 程序日志（Task 17-5：面板操作 / 运行信息 / 报错统一记录与运维管理） */}
+        <OpLogsCard />
       </div>
     </div>
   )

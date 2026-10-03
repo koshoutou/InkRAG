@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { randomBytes } from 'node:crypto'
 import { db } from '@/lib/db'
+import { recordOp } from '@/lib/rag/oplog'
 import { apiKeyColumns, apiKeyPreview } from '@/lib/rag/apikey'
 
 export const dynamic = 'force-dynamic'
@@ -38,6 +39,12 @@ export async function POST(req: NextRequest) {
 
     const key = `rag-${randomBytes(16).toString('hex')}`
     const created = await db.apiKey.create({ data: { name, role, ...apiKeyColumns(key) } })
+    recordOp({
+      level: 'info',
+      category: 'auth',
+      action: 'auth.key_create',
+      message: `创建 API Key「${name}」（角色 ${role}）`,
+    })
     return NextResponse.json(
       {
         key: {
