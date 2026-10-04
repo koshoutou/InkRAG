@@ -1,6 +1,6 @@
 {
   "name": "inkrag",
-  "version": "1.10.0",
+  "version": "1.12.0",
   "private": true,
   "scripts": {
     "dev": "bun run scripts/dev.ts",

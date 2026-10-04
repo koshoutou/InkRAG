@@ -77,6 +77,33 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.12（2026-10 · 运维补全 / 安全加固 / 性能与可靠性增强 13 项）
+
+> 本轮针对运维完整性、安全面、前端渲染性能与后端数据一致性四类审计发现逐条修复：补全 UI 已调用但路由缺失的备份上传 / 日志清理调度端点；加固实时事件 /emit 与 SSRF 防护；前端 PDF 长文档虚拟化与防抖修复；后端秒传去重、版本恢复事务化、备份/恢复期间流水线暂停、优雅关闭、大文件内存保护；部署脚本补全 Prisma 生成与 mini-service 编排；改密轮转密钥。
+
+**运维补全（OPS）**
+- **备份上传路由缺失（OPS-001）**：UI 备份导入调用 `/api/system/backups/upload` 返回 404。新增路由：GET 列出已上传 `.snapshot`、POST 接收 multipart/form-data（`.snapshot` 直接保存为 `uploaded-{ts}-{原名}.snapshot`、`.tar.gz` 走 `importBackupArchive` 解包入库）、DELETE 按 `?file=` 删除。复用 `backup.ts` 的 `listUploadedQdrantSnapshots` / `importBackupArchive` / `deleteUploadedQdrantSnapshot`；文件名白名单 + 2GB 上限 + 目标路径强制落在 `BACKUPS_ROOT` 内防路径穿越。
+- **日志清理调度路由缺失（OPS-002）**：UI 轮询 `/api/system/oplogs/schedule` 404。新增 GET 返回 `{ schedule: OplogCleanSchedule }` 并惰性拉起调度器，PUT 更新 `{ enabled?, olderThanHours?, maxLevel? }` 热重载调度器。复用 `oplog.ts` 的 `ensureOplogCleanScheduler` / `updateOplogCleanConfig`；字段校验 1-8760 小时 / info-warn-error 白名单。
+- **部署脚本不完整（OPS-009/012）**：`build` 缺 `prisma generate`（standalone 缺 Prisma Client 引擎二进制会启动失败）、无 mini-service 启动脚本。修复：`build` 前置 `prisma generate`；新增 `start:events` 脚本；mini-service `pipeline-events` 补 `uncaughtException`/`unhandledRejection` 进程级兜底（致命错误优雅关闭后退出交 supervisor 重启，可忽略 I/O 中断不退出）；新增 `Dockerfile`（多阶段构建 + supervisord 编排两进程 + dumb-init 信号转发 + HEALTHCHECK 走 `/api/system/health/live`）与 `deploy/inkrag.service` / `deploy/inkrag-events.service` systemd unit 示例（含安全加固与 SIGTERM 宽限配合优雅关闭）。
+
+**安全加固（SEC/BE）**
+- **`/emit` 不校验 room/event（BE-001）**：虽有 `x-inkrag-emit-secret` 鉴权，但不校验 room 与 event，存在事件伪造风险。新增 `EMIT_EVENT_RE` 白名单正则仅放行已知事件（`chunk:update`/`document:done`/`document:progress`/`document:status`/`job:update`/`kb:stats`/`pipeline:activity`/`testrun:progress`）；抽出 `isValidRoom()` 与 subscribe 共用；非法 event 或 room 返回 400。
+- **SSRF 防护增强 + 健康探针拆分（SEC-002）**：管理员配置的 `qdrant.url`/`mineruApiUrl`/`embedApiBase`/`rerankApiBase` 无 SSRF 校验；`/api/system/health` 公开暴露内部聚合状态。修复：抽取 `assertPublicHttpUrl()` 到 `src/lib/rag/ssrf.ts` 共享（含 IPv4/IPv6 私网段判定 + 域名 DNS 全量校验），`import-url` 路由改 import 复用，`qdrant/settings` PUT 对四个 URL 字段应用校验；拆分 `/api/system/health/live`（公开仅 `{ok:true}`）与 `/api/system/health`（需面板会话返回详细状态），middleware 公开豁免清单与单元测试同步更新。
+
+**前端性能与正确性（FE）**
+- **PdfViewer 全量渲染长文档崩溃（FE-002）**：同时渲染所有 PDF 页导致长文档 OOM。新增 `LazyPdfPage` 组件用 `IntersectionObserver`（rootMargin 400px 预挂载）只挂载视口附近页面；占位骨架屏保留与真实页面等宽等高的 `data-page` div 保证滚动条高度与页码探测无布局抖动；不可见页卸载释放 canvas；选中 chunk 强制其页范围入可见集确保高亮渲染。
+- **OpLogsCard 防抖失效（FE-004）**：误用 `useMemo` 设 `setTimeout`，但 `useMemo` 不执行返回的 cleanup，每次输入新增未清除定时器导致防抖失效触发多次查询。改用现有 `useDebouncedValue` hook（内部 `useEffect` + `clearTimeout` 正确清理）；分页重置从 effect 内 `setState` 改到搜索框 `onChange` 直接重置（符合 React 规范）。
+
+**后端数据一致性（LOGIC）**
+- **秒传去重硬编码 `parseConfigV: 1`（LOGIC-001）**：编辑后文档 `parseConfigV` 递增，秒传查找只比对 v1 行落空，同一原文重新上传建新行而非去重。`findDuplicated` 与 P2002 处理改为 `orderBy: { parseConfigV: 'desc' }` 取最新版本比对；`import-url` 路由两处秒传判定与 P2002 处理同步修复。
+- **版本恢复非事务化 + 先删后建留空文档（LOGIC-002/003）**：`db.chunk.deleteMany` 与 `createMany` 不在事务中，失败留空文档；先删 Qdrant 旧向量后重建，空窗期向量缺失。重构 `restoreDocVersion`：① 全量子 chunk 同步嵌入前置（失败零副作用）② 磁盘写入在 DB 事务前（失败清理已写文件）③ `db.$transaction([deleteMany, createMany])` 原子提交 ④ Qdrant 先 `upsertPoints` 新向量再 `deletePoints` 仅删不在新 chunk 集合的旧向量（无空窗）⑤ 向量层失败时 chunk 已恢复，状态标记 `failed` + `RESTORE_VECTOR_FAILED` 明确报错而非静默丢失 ⑥ 恢复完成直接置 `ready`（embed+upsert 已同步，无需入队流水线）。
+
+**可靠性与资源控制（BE/PERF）**
+- **备份/恢复期间流水线未暂停（BE-005/OPS-003）**：备份快照与流水线并发写库不一致；恢复期间全表替换与流水线并发数据错乱。`PipelineEngineState` 增加 `paused` 标志，`tick()`/`mineruPollTick()` 顶部检查（活跃任务不中断，仅阻止新任务认领）；导出 `pausePipelineEngine`/`resumePipelineEngine`/`isPipelinePaused`；`backup.ts` 新增 `withPipelinePaused` 辅助（pause → 执行 → finally resume + 30 分钟超时 watchdog 兜底强制恢复），`createBackup`/`restoreBackup` 整体包裹；`pipelineStats` 增加 `paused`/`pausedReason`/`pausedAt` 字段监控可见。
+- **无 SIGTERM 处理（BE-010）**：`docker stop`/k8s rolling update 的 SIGTERM 10s 后被 SIGKILL 强杀，活跃任务被粗暴中断留僵尸任务。新增 `drainForShutdown(timeoutMs=30s)`：暂停新任务 → 遍历 abort 所有活跃 Controller（任务在下一个 `checkAlive` 检查点安静退出）→ 轮询 `active` 至 0 或超时 → 清理引擎定时器；`instrumentation.ts` 注册 SIGTERM/SIGINT 监听器调用后 `process.exit`，二次信号立即强制退出，35s 硬超时兜底。
+- **大 PDF 处理 OOM（PERF-004/005）**：`pdf-split.ts` 与降级解析器把整个 PDF 读入内存，大文件直接 OOM。新增 `FALLBACK_PDF_MAX_BYTES=100MB`（降级解析器上限）与 `PDF_SPLIT_HARD_MAX_BYTES=500MB`（拆分硬上限）；`parseWithFallback` 的 PDF 分支超 100MB 抛 `FALLBACK_PDF_TOO_LARGE` 不可重试错误并提示配置 MinerU；`countPdfPages`/`splitPdfToParts` 入口 `assertSplittable` 校验；>50MB/>200MB 警告日志。
+- **改密不轮转 HMAC 密钥（SEC-008）**：改密仅更新密码哈希，旧会话令牌与 API Key 签名仍有效。新增 `rotatePanelSecret()`：原子覆盖 `db/.panel.secret`（先写 tmp 再 rename）+ 清空进程内缓存；`handlePasswordChange` 改密成功后调用，换发新会话；mini-service `getSecret()` 增加密钥文件 mtime 检测，主服务轮转后自动清缓存重读无需重启；UI 根据轮转结果提示「其他设备会话已失效需重新登录」。
+
 ### v1.11（2026-10 · 一致性审计整改：密钥链路 / 鉴权回归 / 端口串联 / 测试脚手架 18 项）
 
 > 本轮针对一份针对仓库的「AI 修复任务清单」逐条核验并修复：P0 全清（事件链路密钥静默瘫痪、硬编码默认口令）、P1 全清（监控/探活端点鉴权回归、备份端口、env 模板、测试脚手架）、P2 收口（运维页端口、进程退出语义、CORS、版本号）、P3 体验收敛（Qdrant 端口提示、Dify 地址只读、变量命名空间化、API Key 前缀、自定义头命名空间）。误报项（B01-B03）已核实排除，迁移提示项（C01）已补入文档。
