@@ -77,6 +77,18 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.16（2026-10 · 文档解析引擎可见化 2 项）
+
+> 本轮聚焦于让用户直观看到每个文档的解析方式（MinerU 云服务 vs 本地降级解析器），并在文档中心支持按引擎筛选，便于排查 MinerU 故障期间降级重试的文档。
+
+**文档引擎可见化（FE-009/010）**
+- **FE-009 仪表盘「最近文档」表增加解析引擎列**：新增 `ParseEngineBadge` 组件（mineru=蓝色「MinerU」/ fallback=琥珀色「本地引擎」/ 空=灰色「未解析」）；仪表盘最近文档表新增「引擎」列（文件名/知识库/引擎/状态/时间），让用户在仪表盘即可看到每个文档的解析方式。
+- **FE-010 文档中心列表增加解析引擎筛选 + 统一徽章**：`/api/kb/[id]/documents` GET 增加 `engine` 查询参数（mineru 精确匹配 / fallback 匹配 `['fallback','']` 含未解析态 / all 不筛选）；DocumentsView 新增「全部引擎」筛选下拉（全部引擎/MinerU/本地引擎）；DocumentsView 表格引擎列改用统一 `ParseEngineBadge`（原实现只处理两态，新增「未解析」态）。
+
+**E2E 验证**
+- API：engine=mineru 返回 0 文档（无 MinerU 解析的）；engine=fallback 返回 3 文档（含空 parseEngine 的 failed 文档）✓
+- UI：仪表盘最近文档表显示「引擎」列 + 「本地引擎」徽章；文档中心筛选栏显示「全部状态 | 全部引擎」下拉；文档表格引擎列显示 MinerU/本地引擎/未解析三态徽章 ✓
+
 ### v1.15（2026-10 · MinerU 降级重试与 standalone PDF worker 修复 2 项）
 
 > 本轮通过 E2E 测试发现 MinerU 云 CDN 证书过期导致 PDF 解析永久失败的链路问题，补全降级重试机制并修复 standalone 构建下 pdfjs worker 文件缺失。
