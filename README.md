@@ -77,6 +77,19 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.17（2026-10 · 引擎分布可视化与批量降级 3 项）
+
+> 本轮聚焦于让用户在仪表盘直观看到 MinerU vs 本地引擎的文档占比，并在 MinerU 故障期间支持一键批量降级所有失败文档。
+
+**引擎分布可视化与批量降级（FE-011/012/BE-014）**
+- **BE-014 `/api/dashboard` 增加 `engineDistribution` 字段**：按 `parseEngine` groupBy 统计（mineru / fallback / pending 含空 parseEngine），仪表盘 API 响应增加 `engineDistribution: {mineru:N, fallback:N, pending:N}`。
+- **FE-011 仪表盘「解析引擎分布」统计卡**：堆叠条形图展示 MinerU(sky) / 本地引擎(amber) / 未解析(stone) 占比；图例含色点 + 标签 + 数量 + 百分比；与状态机分布条同口径样式。
+- **FE-012 文档中心「批量降级重试」按钮**：DocumentsView 新增 `batchFallbackTargets`（当前 KB 全部 failed 文档）；`runBatchFallback` 循环调用 `retryWithNode`，toast 汇总成功/失败数；蓝色 sky 配色 + 数量 Badge，MinerU 故障期间一键降级所有失败文档；与「批量重解析」并列。
+
+**E2E 验证**
+- API: `engineDistribution={mineru:0,fallback:2,pending:1}` ✓
+- UI: 仪表盘「解析引擎分布」卡渲染 + 文档中心「批量降级重试」按钮渲染 ✓
+
 ### v1.16（2026-10 · 文档解析引擎可见化 2 项）
 
 > 本轮聚焦于让用户直观看到每个文档的解析方式（MinerU 云服务 vs 本地降级解析器），并在文档中心支持按引擎筛选，便于排查 MinerU 故障期间降级重试的文档。
