@@ -16,6 +16,80 @@ import type { EmbedMode, SparseVector } from './types'
 
 const EMBED_TIMEOUT_MS = 30_000
 const EMBED_BATCH = 64
+
+/**
+ * F-EXT-01：体积感知超时——30s 对 64 条长文本一批偏紧。
+ * 基准 30s + 每千字符 40ms（64×2000 字 ≈ +5.1s），封顶 120s；空批回退基准值。
+ */
+function embedTimeoutMs(texts: string[]): number {
+  if (texts.length === 0) return EMBED_TIMEOUT_MS
+  let chars = 0
+  for (const t of texts) chars += t.length
+  return Math.min(120_000, EMBED_TIMEOUT_MS + Math.round((chars / 1000) * 40))
+}
+
+// ---------------------------------------------------------------------------
+// F-EXT-02：嵌入熔断器（进程内，globalThis 单例）——provider 持续 5xx/不可达时
+// 每组仍走完 4 次尝试（最长 ~26s × 组数），失败文档堆积目白白消耗。
+// 连续 N 次可重试失败 → 开路 OPEN_MS（直接抛 retryable 快速失败，不发起请求）；
+// 半开：开路期满后放行一次探测，成功复位 / 失败重新开路（翻倍遇冷，封 10 分钟）。
+// ---------------------------------------------------------------------------
+
+const BREAKER_THRESHOLD = 6
+const BREAKER_OPEN_MS = 60_000
+const BREAKER_OPEN_CAP_MS = 10 * 60_000
+
+interface EmbedBreakerState {
+  consecFails: number
+  openUntil: number
+  openMs: number
+  halfOpenProbe: boolean
+}
+const breakerG = globalThis as unknown as { __ragEmbedBreaker?: EmbedBreakerState }
+
+function breaker(): EmbedBreakerState {
+  if (!breakerG.__ragEmbedBreaker) {
+    breakerG.__ragEmbedBreaker = { consecFails: 0, openUntil: 0, openMs: BREAKER_OPEN_MS, halfOpenProbe: false }
+  }
+  return breakerG.__ragEmbedBreaker
+}
+
+/** 熔断开路中返回剩余毫秒，0 = 放行 */
+function breakerBlockedMs(): number {
+  const b = breaker()
+  if (b.openUntil <= Date.now()) return 0
+  return b.openUntil - Date.now()
+}
+
+function breakerRecord(ok: boolean): void {
+  const b = breaker()
+  if (ok) {
+    b.consecFails = 0
+    b.openUntil = 0
+    b.openMs = BREAKER_OPEN_MS
+    b.halfOpenProbe = false
+    return
+  }
+  b.consecFails += 1
+  if (b.consecFails >= BREAKER_THRESHOLD) {
+    // 已在开路期再失败 → 退避翻倍（半开探测失败场景）
+    b.openMs = Math.min(BREAKER_OPEN_CAP_MS, b.openUntil > Date.now() ? b.openMs * 2 : b.openMs)
+    b.openUntil = Date.now() + b.openMs
+    b.halfOpenProbe = false
+    console.warn(`[embed][breaker] 连续 ${b.consecFails} 次可重试失败，开路 ${Math.round(b.openMs / 1000)}s（快速失败，不再空耗重试）`)
+  }
+}
+
+/** 开路期满后的首次调用作为半开探测标记 */
+function breakerTakeProbe(): boolean {
+  const b = breaker()
+  if (b.openUntil > 0 && b.openUntil <= Date.now() && !b.halfOpenProbe) {
+    b.halfOpenProbe = true
+    return true
+  }
+  return false
+}
+
 export const DEFAULT_EMBED_DIM = 1024
 
 // 429/瞬断退避重试（真实 API 实测联调引入：共享 qpm 限流的大文档嵌入会命中 429）
@@ -212,6 +286,18 @@ async function realEmbedBatch(
   conn: { apiBase: string; apiKey: string; model: string }
 ): Promise<{ vectors: number[][]; sparse: SparseVector[] }> {
   const base = conn.apiBase.replace(/\/+$/, '')
+  // F-EXT-02：熔断开路中 → 直接 retryable 快速失败（不发起请求不空耗重试）；
+  // 开路期满的首个调用作为半开探测放行（成功复位 / 失败重新开路翻倍）
+  const blockedMs = breakerBlockedMs()
+  if (blockedMs > 0) {
+    const isProbe = breakerTakeProbe()
+    if (!isProbe) {
+      throw new StoreError(
+        `Embedding 熔断中（连续 ${BREAKER_THRESHOLD} 次可重试失败），约 ${Math.ceil(blockedMs / 1000)}s 后自动半开探测——期间任务将快速失败回队，不消耗重试预算`,
+        { retryable: true }
+      )
+    }
+  }
   // 429/5xx/网络瞬断 → 批内退避重试（避免整文档流水线因共享限流瞬时窗口而失败；
   // 流水线级重试是“从头重跑整个 embed 阶段”，远贵于批内等待）
   interface TransientEmbedError extends StoreError {
@@ -239,7 +325,8 @@ async function realEmbedBatch(
         },
         body: JSON.stringify({ model: conn.model, input: texts.length === 1 ? texts[0] : texts }),
         cache: 'no-store',
-        signal: AbortSignal.timeout(EMBED_TIMEOUT_MS),
+        // F-EXT-01：超时按批字符量动态化
+        signal: AbortSignal.timeout(embedTimeoutMs(texts)),
       })
     } catch (e) {
       // 网络层（超时/DNS/断连）→ 瞬时可重试
@@ -282,16 +369,27 @@ async function realEmbedBatch(
     }
     const data = (json.data ?? []).slice().sort((a, b) => (a.index ?? 0) - (b.index ?? 0))
     if (data.length !== texts.length) {
-      throw new StoreError(
+      // F-EXT-03：数量不符（provider 截断/异常）→ 纳入批内重试循环（与 429/5xx 同路径），
+      // 而非当前循环直接 throw（原先该错误绕过重试直达失败）
+      const err = new StoreError(
         `Embedding API 返回数量不匹配（期望 ${texts.length} 实得 ${data.length}）`,
         { retryable: true }
-      )
+      ) as TransientEmbedError
+      if (attempt < EMBED_RETRY_DELAYS_MS.length) {
+        lastErr = err
+        continue
+      }
+      throw err
     }
     const vectors = data.map((d) => d.embedding)
     // 原生稀疏多字段探测；探测不到 → 空 sparse（绝不退化 mock 词袋）
     const sparse = data.map((d) => probeSparseFromDatum(d) ?? EMPTY_SPARSE)
+    // F-EXT-02：成功 → 熔断计数复位
+    breakerRecord(true)
     return { vectors, sparse }
   }
+  // F-EXT-02：批内重试耗尽仍失败 → 熔断记账（连续达阈值即开路）
+  breakerRecord(false)
   throw (
     lastErr ??
     new StoreError('Embedding API 重试次数耗尽', { retryable: true })
