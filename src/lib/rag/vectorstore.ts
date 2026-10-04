@@ -47,7 +47,7 @@ export function isNonRetryable(e: unknown): boolean {
 
 export interface VectorStore {
   mode: 'qdrant'
-  ensureCollection(name: string, dim: number): Promise<void>
+  ensureCollection(name: string, dim: number, opts?: { hnswM?: number }): Promise<void>
   deleteCollection(name: string): Promise<void>
   listCollections(): Promise<{ name: string; pointsCount: number; dim?: number }[]>
   upsertPoints(name: string, points: PointInput[]): Promise<void>
@@ -289,7 +289,7 @@ export class QdrantVectorStore implements VectorStore {
     }
   }
 
-  async ensureCollection(name: string, dim: number): Promise<void> {
+  async ensureCollection(name: string, dim: number, opts?: { hnswM?: number }): Promise<void> {
     await this.versionGuard()
     try {
       await this.fetchJson(`/collections/${encodeURIComponent(name)}`)
@@ -308,7 +308,13 @@ export class QdrantVectorStore implements VectorStore {
         sparse: { index: { memory: 'cold' } },
       },
       payload: { memory: 'cold' },
-      hnsw_config: { m: 0, payload_m: 16, memory: 'cold', full_scan_threshold: 10_000 },
+      // F-EXT-12：m 可配置（默认 0=低内存暴力扫描——单库 >10 万点时检索延迟线性退化，可在设置页调 16）
+      hnsw_config: {
+        m: Math.max(0, Math.min(64, opts?.hnswM ?? 0)),
+        payload_m: 16,
+        memory: 'cold',
+        full_scan_threshold: 10_000,
+      },
       quantization_config: { scalar: { type: 'int8', quantile: 0.99, memory: 'pinned' } },
       optimizers_config: {
         indexing_threshold: 20_000,

@@ -59,6 +59,7 @@ const DEFAULT_FORM: RagSettings = {
   url: '',
   apiKey: '',
   defaultCollection: '',
+  qdrantHnswM: 0,
   embedApiBase: '',
   embedApiKey: '',
   embedModel: '',
@@ -347,6 +348,21 @@ export function RagSettingsDialog() {
                 <div className="mt-1.5">
                   <SecretInput id="rag-key" value={form.apiKey} onChange={(v) => update('apiKey', v)} placeholder={secretMasks.apiKey ? `已保存 ${secretMasks.apiKey}，留空保持不变` : '留空表示无鉴权'} k="qdrant" showKeys={showKeys} setShowKeys={setShowKeys} />
                 </div>
+              </div>
+              <div>
+                <Label htmlFor="rag-hnsw-m" className="text-xs text-muted-foreground">HNSW 图参数 m（0-64，仅新建知识库生效）</Label>
+                <Input
+                  id="rag-hnsw-m"
+                  type="number"
+                  min={0}
+                  max={64}
+                  value={form.qdrantHnswM ?? 0}
+                  onChange={(e) => update('qdrantHnswM', Math.max(0, Math.min(64, Number(e.target.value) || 0)))}
+                  className="mt-1.5 h-9 text-sm"
+                />
+                <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
+                  0 = 禁用 HNSW 暴力扫描（低内存默认权衡，单库超过 10 万点时检索延迟线性增长）；大库建议 16。已有集合不追溯，仅对之后新建的知识库生效。
+                </p>
               </div>
               <TestButton kind="qdrant" label="测试连接" disabled={!form.url} testing={testing} testResults={testResults} onTest={onTest} />
             </TabsContent>

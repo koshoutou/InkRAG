@@ -16,6 +16,7 @@ import path from 'node:path'
 import { db } from '@/lib/db'
 import { chunksDir, resolveStorageKey } from './artifacts'
 import { embedTexts } from './embed'
+import { getRagSettings } from './settings'
 import { getVectorStore, type PointInput } from './vectorstore'
 import { countTokens } from './chunking'
 import { emitToRoom } from './events'
@@ -150,7 +151,8 @@ export async function editChunkText(
   const emb = await embedTexts([newText], { dim })
   const point = await buildChunkPoint(kb, doc, updated, newText, emb.vectors[0], emb.sparse[0])
   const store = await getVectorStore()
-  await store.ensureCollection(kb.collection, dim)
+  const hnswM = (await getRagSettings()).row.qdrantHnswM ?? 0
+  await store.ensureCollection(kb.collection, dim, { hnswM: hnswM })
   await store.upsertPoints(kb.collection, [point])
 
   const tookMs = Date.now() - started
@@ -233,7 +235,8 @@ export async function revertChunkText(
   const emb = await embedTexts([originalText], { dim })
   const point = await buildChunkPoint(kb, doc, updated, originalText, emb.vectors[0], emb.sparse[0])
   const store = await getVectorStore()
-  await store.ensureCollection(kb.collection, dim)
+  const hnswM = (await getRagSettings()).row.qdrantHnswM ?? 0
+  await store.ensureCollection(kb.collection, dim, { hnswM: hnswM })
   await store.upsertPoints(kb.collection, [point])
 
   const tookMs = Date.now() - started

@@ -1537,11 +1537,26 @@ export async function finishMineruArtifact(
 // 降级解析器（Node 引擎）
 // ---------------------------------------------------------------------------
 
+/** 宽字符码点区间表（F-LOC-02：displayWidth 原先每字符执行一次正则——
+ * 几十 MB 的 md/txt 合成布局时 CPU 热点；改码点查表 O(1) 判定，语义不变） */
+const WIDE_RANGES: Array<[number, number]> = [
+  [0x1100, 0x115f], [0x2e80, 0xa4cf], [0xac00, 0xd7af],
+  [0xf900, 0xfaff], [0xfe30, 0xfe6f], [0xff00, 0xffef],
+]
+function isWideCodePoint(cp: number): boolean {
+  for (const [lo, hi] of WIDE_RANGES) {
+    if (cp >= lo && cp <= hi) return true
+  }
+  return false
+}
+
 /** 文本显示宽度（CJK=2，其余=1） */
 function displayWidth(text: string): number {
   let w = 0
-  for (const ch of text) {
-    w += /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe6f\uff00-\uffef]/.test(ch) ? 2 : 1
+  for (let i = 0; i < text.length; i++) {
+    const cp = text.codePointAt(i)!
+    if (cp > 0xffff) i++ // 代理对占两个 code unit
+    w += isWideCodePoint(cp) ? 2 : 1
   }
   return w
 }

@@ -32,6 +32,7 @@ export interface RagSettings {
     url: string
     apiKey: string
     defaultCollection: string
+    qdrantHnswM: number
     embedApiBase: string
     embedApiKey: string
     embedModel: string
@@ -152,6 +153,7 @@ async function computeRagSettings(): Promise<RagSettings> {
       url: row.url,
       apiKey: row.apiKey,
       defaultCollection: row.defaultCollection,
+      qdrantHnswM: row.qdrantHnswM ?? 0,
       embedApiBase: row.embedApiBase,
       embedApiKey: row.embedApiKey,
       embedModel: row.embedModel,

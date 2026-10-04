@@ -17,7 +17,7 @@
  *   （>120s 未续租判僵死），回收前先 abort AbortController + CAS 回置（防双跑）
  * - 【P1-2 吞吐】嵌入经全局闸门：64/组（= 1 请求/组）× 在飞 ≤2 × AIMD 自适应
  *   放行间隔（实测嵌入 API qpm≈10，8 路并发会 429 风暴 → 重试耗尽失败）；
- *   向量入库 256/批 × 2 路有限并发
+ *   向量入库：流水线 256/批切片 × 2 路有限并发（vectorstore.upsertPoints 内部再按 64/批串行 PUT，实测慢速上行下 256/批请求体易超时）
  * - 【N13/N14 取消】新状态 cancelled：删 KB / 删文档 / 重复入队前取消在途任务；
  *   各阶段边界与长循环检查 signal → 安静退出（不写 failed、不发失败事件）
  * - 【N16】progressThrottle 增 TTL 清扫（引擎 tick 惰性清理 >5 分钟无更新条目）
@@ -86,7 +86,7 @@ const LEGACY_STALE_MS = 10 * 60_000
 const RECOVER_EVERY_TICKS = 10
 /** progressThrottle 条目 TTL（审计#N16：防 Map 单调增长） */
 const PROGRESS_TTL_MS = 5 * 60_000
-/** 向量入库批内并发路数（Qdrant upsert 256/批） */
+/** 向量入库切片并发路数（256/批切片 × 2 路；upsertPoints 内部 64/批串行——F-EXT-13 注释对齐） */
 const UPSERT_CONCURRENCY = 2
 /** 单次轮询器单轮最多处理的 waiting 任务数 */
 const MINERU_POLL_BATCH = 20
@@ -848,6 +848,21 @@ async function sweepRetentions(): Promise<void> {
     } catch {
       /* 表不存在（全新库）时静默 */
     }
+    // F-LOC-11：空闲期 WAL checkpoint（TRUNCATE 归零 -wal 文件；大量写入后 WAL 增长占磁盘）。
+    // 仅在队列完全空闲（无 pending/active/waiting）时执行，避免与流水线写入争抢。
+    try {
+      const [p, a, w] = await Promise.all([
+        db.pipelineJob.count({ where: { status: 'pending' } }),
+        db.pipelineJob.count({ where: { status: 'active' } }),
+        db.pipelineJob.count({ where: { status: 'waiting_mineru' } }),
+      ])
+      if (p + a + w === 0) {
+        await db.$queryRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE);')
+      }
+    } catch {
+      /* checkpoint 失败静默（并发读锁时 TRUNCATE 可能返回 busy） */
+    }
+
     const total = doneJobs.count + failedJobs.count + oldCallLogs
     if (total > 0) {
       console.log(
@@ -1204,7 +1219,9 @@ async function execChunk(job: JobRow, doc: DocRow, kb: KbRow, ctx: JobRunCtx): P
   // 清旧 chunks + 向量（重切场景幂等；确定性 ID 本可覆盖，但删除更干净）
   await db.chunk.deleteMany({ where: { documentId: doc.id } })
   const store = await getVectorStore()
-  await store.ensureCollection(kb.collection, kb.dim || 1024)
+  // F-EXT-12：HNSW m 从设置读取（0=默认暴力扫描）
+  const hnswM = (await getRagSettings()).row.qdrantHnswM ?? 0
+  await store.ensureCollection(kb.collection, kb.dim || 1024, { hnswM: hnswM })
   try {
     await store.deleteByFilter(kb.collection, {
       must: [{ key: 'doc_id', match: { value: doc.id } }],
@@ -1600,8 +1617,8 @@ async function execEmbed(job: JobRow, doc: DocRow, kb: KbRow, ctx: JobRunCtx): P
   })
 
   const store = await getVectorStore()
-  await store.ensureCollection(kb.collection, dim)
-  // 审计#P1-2：256/批 2 路有限并发入库（原先串行 await；进度取单调最大值防回跳）
+  await store.ensureCollection(kb.collection, dim, { hnswM: (await getRagSettings()).row.qdrantHnswM ?? 0 })
+  // 审计#P1-2：256/批切片 × 2 路并发入库（upsertPoints 内部 64/批串行；进度取单调最大值防回跳）
   const BATCH = 256
   const batches: (typeof points)[] = []
   for (let i = 0; i < points.length; i += BATCH) batches.push(points.slice(i, i + BATCH))

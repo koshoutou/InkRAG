@@ -22,6 +22,7 @@ function serializeSettings(row: {
   url: string
   apiKey: string
   defaultCollection: string
+  qdrantHnswM: number
   embedApiBase: string
   embedApiKey: string
   embedModel: string
@@ -46,6 +47,7 @@ function serializeSettings(row: {
     apiKey: maskKey(row.apiKey),
     hasApiKey: row.apiKey.length > 0,
     defaultCollection: row.defaultCollection,
+    qdrantHnswM: row.qdrantHnswM ?? 0,
     embedApiBase: row.embedApiBase,
     embedApiKey: maskKey(row.embedApiKey),
     hasEmbedApiKey: row.embedApiKey.length > 0,
@@ -158,6 +160,7 @@ export async function PUT(req: NextRequest) {
     mineruPdfPartPages: body.mineruPdfPartPages ?? existing?.mineruPdfPartPages ?? 0,
     useFallbackParser: keep(body.useFallbackParser, existing?.useFallbackParser, true),
     // useMockEmbedding 缺省保留现值（与 schema 默认 false 对齐；避免旧客户端不携带该字段时静默开启 mock 嵌入）
+    qdrantHnswM: Math.max(0, Math.min(64, Number(body.qdrantHnswM ?? existing?.qdrantHnswM ?? 0) || 0)),
     useMockEmbedding: body.useMockEmbedding ?? existing?.useMockEmbedding ?? false,
     useMockRerank: keep(body.useMockRerank, existing?.useMockRerank, true),
   }

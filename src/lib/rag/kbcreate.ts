@@ -110,7 +110,7 @@ async function createKnowledgeBaseCoreImpl(input: CreateKbInput): Promise<Create
   // 先建集合（Qdrant 不可达 → 硬失败，不落库行避免孤儿记录）
   try {
     const store = await getVectorStore()
-    await store.ensureCollection(collection, dim)
+    await store.ensureCollection(collection, dim, { hnswM: settings.row.qdrantHnswM ?? 0 })
   } catch (e: any) {
     const status = e instanceof StoreError ? (e.status ?? 503) : 500
     return { ok: false, status, error: e?.message ?? String(e) }

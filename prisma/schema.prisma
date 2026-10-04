@@ -22,6 +22,9 @@ model QdrantSetting {
   url               String   @default("")
   apiKey            String   @default("")
   defaultCollection String   @default("")
+  /// HNSW 图 m 参数（F-EXT-12：0=禁用 HNSW 暴力扫描——低内存默认权衡；大库（>10 万点）建议 16。
+  /// 仅建库时生效（已有集合不追溯），设置页「Qdrant → HNSW m」可调
+  qdrantHnswM       Int      @default(0)
 
   // ---- Embedding（OpenAI 兼容，基座原有）----
   embedApiBase      String   @default("")

@@ -49,5 +49,10 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 process.on('SIGTERM', () => shutdown('SIGTERM'))
 
 const exitCode = await proc.exited
-await logWriter.end().catch(() => {})
+// FileSink.end() 在不同 Bun 版本返回 Promise 或 void——统一 try/await 包裹
+try {
+  await logWriter.end()
+} catch {
+  /* 收尾失败不影响退出码 */
+}
 process.exit(exitCode ?? 0)

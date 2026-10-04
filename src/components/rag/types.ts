@@ -262,6 +262,7 @@ export interface RagSettings {
   url: string
   apiKey: string
   defaultCollection: string
+  qdrantHnswM: number
   embedApiBase: string
   embedApiKey: string
   embedModel: string
