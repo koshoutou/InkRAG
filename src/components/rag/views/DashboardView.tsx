@@ -178,6 +178,96 @@ export function DashboardView() {
         )}
       </div>
 
+      {/* FE-006：流水线引擎状态卡（uptime/吞吐/成功率/并发槽） */}
+      {d.pipeline && (
+        <div className="rounded-xl border border-border/60 bg-card p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <span className="flex items-center gap-1.5 text-sm font-medium">
+              <ListChecks className="h-3.5 w-3.5 text-muted-foreground" />
+              流水线引擎
+            </span>
+            <div className="flex items-center gap-2 text-[11px]">
+              {d.pipeline.draining ? (
+                <span className="flex items-center gap-1 text-rose-600 dark:text-rose-400">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-rose-500" />
+                  关闭中
+                </span>
+              ) : d.pipeline.paused ? (
+                <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                  已暂停
+                </span>
+              ) : (
+                <span className="flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+                  运行中
+                </span>
+              )}
+              {isRefetching && <span className="text-muted-foreground">刷新中…</span>}
+            </div>
+          </div>
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 lg:grid-cols-6">
+            {/* 队列：pending + waiting */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">队列</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums">
+                {d.pipeline.pending + d.pipeline.waiting}
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                pending {d.pipeline.pending} · waiting {d.pipeline.waiting}
+              </div>
+            </div>
+            {/* 活跃 */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">活跃</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums text-sky-600 dark:text-sky-400">
+                {d.pipeline.active}
+                <span className="text-xs text-muted-foreground"> / {d.pipeline.concurrency || 2}</span>
+              </div>
+              <div className="text-[10px] text-muted-foreground">并发槽</div>
+            </div>
+            {/* 完成 */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">已完成</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums text-emerald-600 dark:text-emerald-400">
+                {d.pipeline.completed}
+              </div>
+              <div className="text-[10px] text-muted-foreground">累计</div>
+            </div>
+            {/* 失败 */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">失败</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums text-rose-600 dark:text-rose-400">
+                {d.pipeline.failed}
+              </div>
+              <div className="text-[10px] text-muted-foreground">累计</div>
+            </div>
+            {/* 成功率 */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">成功率</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums">
+                {d.pipeline.completed + d.pipeline.failed > 0
+                  ? ((d.pipeline.completed / (d.pipeline.completed + d.pipeline.failed)) * 100).toFixed(1) + '%'
+                  : '—'}
+              </div>
+              <div className="text-[10px] text-muted-foreground">完成/总</div>
+            </div>
+            {/* 引擎运行时长 */}
+            <div className="rounded-lg bg-muted/40 px-3 py-2">
+              <div className="text-[10px] text-muted-foreground">运行时长</div>
+              <div className="mt-0.5 text-lg font-semibold tabular-nums">
+                {d.pipeline.uptimeSec >= 3600
+                  ? `${Math.floor(d.pipeline.uptimeSec / 3600)}h${Math.floor((d.pipeline.uptimeSec % 3600) / 60)}m`
+                  : d.pipeline.uptimeSec >= 60
+                    ? `${Math.floor(d.pipeline.uptimeSec / 60)}m${d.pipeline.uptimeSec % 60}s`
+                    : `${d.pipeline.uptimeSec}s`}
+              </div>
+              <div className="text-[10px] text-muted-foreground">进程内</div>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 最近文档（全宽；原第二列「最近检索日志」已随 §32 移除） */}
       <div className="rounded-xl border border-border/60 bg-card">
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">

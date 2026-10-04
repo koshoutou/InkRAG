@@ -603,14 +603,30 @@ export function RagSettingsDialog() {
                 <span className="font-mono"> /api/input </span>入库 API Key、Dify 导出密钥相互独立。密码以 scrypt 哈希存储，平台不保存明文。
               </div>
               {/* SEC-008+：上次密钥轮转时间（改密时同步轮转 HMAC 密钥，使旧会话/API Key 签名失效） */}
-              <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-[11px]">
-                <span className="text-muted-foreground">上次密钥轮转</span>
-                <span className={cn('font-mono tabular-nums', secretRotatedAt ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
-                  {secretRotatedAt
-                    ? `${new Date(secretRotatedAt).toLocaleString('zh-CN', { hour12: false })}（改密时自动轮转）`
-                    : '从未轮转（改密后将自动轮转密钥，使旧会话失效）'}
-                </span>
-              </div>
+              {(() => {
+                const daysAgo = secretRotatedAt
+                  ? Math.floor((Date.now() - new Date(secretRotatedAt).getTime()) / 86_400_000)
+                  : null
+                const stale = daysAgo !== null && daysAgo > 90
+                return (
+                  <div className={cn('flex items-center justify-between rounded-md border px-3 py-2 text-[11px]', stale ? 'border-amber-300/60 bg-amber-50/50 dark:border-amber-500/30 dark:bg-amber-950/20' : 'bg-muted/20')}>
+                    <span className="text-muted-foreground">上次密钥轮转</span>
+                    <span className={cn(
+                      'font-mono tabular-nums',
+                      !secretRotatedAt ? 'text-amber-600 dark:text-amber-400'
+                        : stale ? 'text-amber-600 dark:text-amber-400'
+                        : 'text-emerald-600 dark:text-emerald-400',
+                    )}>
+                      {secretRotatedAt
+                        ? `${new Date(secretRotatedAt).toLocaleString('zh-CN', { hour12: false })}${daysAgo !== null ? `（${daysAgo} 天前` : '（'}，改密时自动轮转）`
+                        : '从未轮转（改密后将自动轮转密钥，使旧会话失效）'}
+                    </span>
+                    {stale && (
+                      <span className="ml-2 shrink-0 text-amber-600 dark:text-amber-400">⚠ 超过 90 天未轮转，建议改密</span>
+                    )}
+                  </div>
+                )
+              })()}
               <div>
                 <Label htmlFor="panel-pwd-current" className="text-xs text-muted-foreground">当前密码</Label>
                 <Input

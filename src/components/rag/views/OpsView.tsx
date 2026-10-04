@@ -612,35 +612,62 @@ export function OpsView() {
                 {HEALTH_ROWS.map(({ key, label, icon: Icon }) => {
                   const row = (health as Record<string, any>)[key] ?? {}
                   // 防御：pipeline 等无 ok 字段时按对象存在视为正常
-                  const ok = row.ok !== undefined ? !!row.ok : Object.keys(row).length > 0
+                  // FE-007：pipeline 特殊处理——paused=琥珀色（告警不阻断），draining=红色（503 摘流）
+                  const isPipeline = key === 'pipeline'
+                  const pipelineState = isPipeline
+                    ? (row.draining ? 'draining' : row.paused ? 'paused' : 'running')
+                    : 'running'
+                  const ok = isPipeline
+                    ? pipelineState === 'running'
+                    : (row.ok !== undefined ? !!row.ok : Object.keys(row).length > 0)
                   // 完整拼接文案（与下方渲染内容一致）：截断时 title 可悬停查看全文，不撑破卡片
                   const rowDetail = [
                     row.message ?? row.model ?? (ok ? '正常' : '不可用'),
                     row.version ? `v${row.version}` : '',
                     row.dim ? `${row.dim}d` : '',
                     key === 'vectorStore' ? `${formatNumber(row.collections)} 集合 / ${formatNumber(row.points)} 点` : '',
-                    key === 'pipeline' ? `运行 ${formatUptime(row.uptimeSec)}` : '',
+                    key === 'pipeline' ? `运行 ${formatUptime(row.uptimeSec)} · ${row.pending ?? 0} 待 / ${row.active ?? 0} 活跃 / ${row.completed ?? 0} 完成 / ${row.failed ?? 0} 失败` : '',
                   ]
                     .filter(Boolean)
                     .join(' · ')
+                  // FE-007：状态点颜色——pipeline 有 paused/draining 三态
+                  const dotColor = isPipeline
+                    ? pipelineState === 'draining' ? 'bg-rose-500 ring-rose-500/20'
+                      : pipelineState === 'paused' ? 'bg-amber-500 ring-amber-500/20 animate-pulse'
+                      : 'bg-emerald-500 ring-emerald-500/20'
+                    : ok ? 'bg-emerald-500 ring-emerald-500/20' : 'bg-rose-500 ring-rose-500/20'
                   return (
-                    <div key={key} className="flex items-start gap-2.5 rounded-lg border border-border/60 bg-muted/20 p-3">
-                      <span className={cn('mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ring-2', ok ? 'bg-emerald-500 ring-emerald-500/20' : 'bg-rose-500 ring-rose-500/20')} />
+                    <div key={key} className={cn('flex items-start gap-2.5 rounded-lg border border-border/60 bg-muted/20 p-3', isPipeline && pipelineState !== 'running' && (pipelineState === 'draining' ? 'border-rose-500/30 bg-rose-50/30 dark:bg-rose-950/10' : 'border-amber-500/30 bg-amber-50/30 dark:bg-amber-950/10'))}>
+                      <span className={cn('mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full ring-2', dotColor)} />
                       <div className="min-w-0 flex-1">
                         <div className="flex flex-wrap items-center gap-1.5">
                           <Icon className="h-3.5 w-3.5 text-muted-foreground" />
                           <span className="text-xs font-medium">{label}</span>
-                          <Badge
-                            variant="outline"
-                            className={cn(
-                              'ml-auto text-[10px]',
-                              row.mode === 'qdrant' || row.mode === 'real' || row.mode === 'mineru'
-                                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
-                                : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
-                            )}
-                          >
-                            {row.mode ?? '—'}
-                          </Badge>
+                          {isPipeline && pipelineState !== 'running' ? (
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                'ml-auto text-[10px]',
+                                pipelineState === 'draining'
+                                  ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-300'
+                                  : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+                              )}
+                            >
+                              {pipelineState === 'draining' ? '关闭中' : '已暂停'}
+                            </Badge>
+                          ) : (
+                            <Badge
+                              variant="outline"
+                              className={cn(
+                                'ml-auto text-[10px]',
+                                row.mode === 'qdrant' || row.mode === 'real' || row.mode === 'mineru'
+                                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+                                  : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
+                              )}
+                            >
+                              {row.mode ?? '—'}
+                            </Badge>
+                          )}
                         </div>
                         <p className="mt-1 truncate text-[11px] text-muted-foreground" title={rowDetail}>
                           {rowDetail}
