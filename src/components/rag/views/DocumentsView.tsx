@@ -44,6 +44,7 @@ import {
 } from '@/components/ui/select'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
+import { Checkbox } from '@/components/ui/checkbox'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
@@ -152,6 +153,48 @@ export function DocumentsView() {
 
   const docs = docsQuery.data?.docs ?? []
   const activeKb = kbs.find((k) => k.id === activeKbId)
+
+  // FE-014: 批量删除（选中多个文档一次性删除）
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
+  const [batchDeleteOpen, setBatchDeleteOpen] = useState(false)
+  const [batchDeleteBusy, setBatchDeleteBusy] = useState(false)
+  const toggleSelect = useCallback((id: string) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }, [])
+  const selectAll = useCallback(() => {
+    setSelectedIds(new Set(docs.map((d) => d.id)))
+  }, [docs])
+  const selectNone = useCallback(() => {
+    setSelectedIds(new Set())
+  }, [])
+  const runBatchDelete = useCallback(async () => {
+    if (selectedIds.size === 0) return
+    setBatchDeleteBusy(true)
+    let ok = 0
+    let fail = 0
+    let totalChunks = 0
+    for (const id of selectedIds) {
+      try {
+        const r = await ragApi.deleteDoc(id)
+        ok++
+        totalChunks += r.deletedChunks
+      } catch {
+        fail++
+      }
+    }
+    setBatchDeleteBusy(false)
+    setBatchDeleteOpen(false)
+    setSelectedIds(new Set())
+    if (fail === 0) toast.success(`已批量删除 ${ok} 个文档（清理 ${totalChunks} 个 chunk 与向量点）`)
+    else toast.warning(`批量删除完成：成功 ${ok} · 失败 ${fail}`)
+    queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }, [selectedIds, activeKbId, queryClient])
 
   // 批量重新解析（模式切换后的恢复路径：对当前 KB 全部可重跑文档逐个 reparse）
   const [batchReparseOpen, setBatchReparseOpen] = useState(false)
@@ -307,6 +350,21 @@ export function DocumentsView() {
             <UploadCloud className="h-3.5 w-3.5" />
             上传 / 导入
           </Button>
+          {/* FE-014: 批量删除（选中多个文档） */}
+          {selectedIds.size > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 border-rose-500/40 text-xs text-rose-600 hover:bg-rose-500/10 hover:text-rose-700 dark:text-rose-300"
+              onClick={() => setBatchDeleteOpen(true)}
+              disabled={batchDeleteBusy}
+              title={`删除选中的 ${selectedIds.size} 个文档（级联删除 chunk 与向量点，不可撤销）`}
+            >
+              <Trash2 className={cn('h-3 w-3', batchDeleteBusy && 'animate-pulse')} />
+              批量删除
+              <Badge variant="outline" className="ml-1 h-4 px-1 text-[9px]">{selectedIds.size}</Badge>
+            </Button>
+          )}
         </div>
 
         {/* 上传能力说明（入口收进对话框，契约 §26） */}
@@ -378,6 +436,14 @@ export function DocumentsView() {
             <Table>
               <TableHeader className="sticky top-0 z-10 bg-card">
                 <TableRow>
+                  <TableHead className="h-9 w-9 pl-3">
+                    <Checkbox
+                      checked={docs.length > 0 && selectedIds.size === docs.length}
+                      onCheckedChange={(v) => (v ? selectAll() : selectNone())}
+                      aria-label="全选"
+                      className="h-3.5 w-3.5"
+                    />
+                  </TableHead>
                   <TableHead className="h-9 text-[11px]">文件名</TableHead>
                   <TableHead className="h-9 text-[11px] text-right">大小</TableHead>
                   <TableHead className="h-9 text-[11px]">状态 / 进度</TableHead>
@@ -393,6 +459,8 @@ export function DocumentsView() {
                   <DocRow
                     key={doc.id}
                     doc={doc}
+                    selected={selectedIds.has(doc.id)}
+                    onToggleSelect={() => toggleSelect(doc.id)}
                     onClick={() => gotoViewer(doc.id)}
                     onAction={(action) => actionMutation.mutate({ docId: doc.id, action })}
                     onDelete={() => setDeleteDoc(doc)}
@@ -423,6 +491,30 @@ export function DocumentsView() {
               }}
             >
               {deleteMutation.isPending ? '删除中…' : '确认删除'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      {/* FE-014: 批量删除确认 */}
+      <AlertDialog open={batchDeleteOpen} onOpenChange={setBatchDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>批量删除 {selectedIds.size} 个文档？</AlertDialogTitle>
+            <AlertDialogDescription>
+              将级联删除所选文档的全部 chunk、对应向量点与磁盘产物，操作不可撤销。
+              <span className="mt-1 block font-medium text-rose-600 dark:text-rose-400">
+                请确认仅删除不再需要的文档（如失败的重试残留、测试数据）。
+              </span>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>取消</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-rose-600 text-white hover:bg-rose-700 dark:bg-rose-600 dark:hover:bg-rose-700"
+              onClick={runBatchDelete}
+            >
+              {batchDeleteBusy ? '删除中…' : `确认删除 ${selectedIds.size} 个`}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
@@ -461,12 +553,16 @@ export function DocumentsView() {
 
 function DocRow({
   doc,
+  selected,
+  onToggleSelect,
   onClick,
   onAction,
   onDelete,
   actionPending,
 }: {
   doc: DocSummary
+  selected: boolean
+  onToggleSelect: () => void
   onClick: () => void
   onAction: (action: 'reparse' | 'rechunk' | 'retry') => void
   onDelete: () => void
@@ -475,9 +571,17 @@ function DocRow({
   const processing = PROCESSING_STATUSES.includes(doc.status)
   return (
     <TableRow
-      className={cn('cursor-pointer transition-colors hover:bg-muted/40', doc.status === 'failed' && 'bg-rose-500/[0.03]')}
+      className={cn('cursor-pointer transition-colors hover:bg-muted/40', doc.status === 'failed' && 'bg-rose-500/[0.03]', selected && 'bg-sky-500/[0.05]')}
       onClick={onClick}
     >
+      <TableCell className="py-2.5" onClick={(e) => e.stopPropagation()}>
+        <Checkbox
+          checked={selected}
+          onCheckedChange={() => onToggleSelect()}
+          aria-label={`选中 ${doc.filename}`}
+          className="h-3.5 w-3.5"
+        />
+      </TableCell>
       <TableCell className="max-w-[260px] py-2.5">
         <div className="flex items-center gap-2">
           {fileIcon(doc.mimeType, doc.filename)}

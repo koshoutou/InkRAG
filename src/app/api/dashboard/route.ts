@@ -65,6 +65,29 @@ export async function GET() {
       engineDistribution[key] = (engineDistribution[key] ?? 0) + r._count._all
     }
 
+    // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数）
+    // 用于仪表盘「吞吐趋势」折线图，让用户直观看到流水线健康度变化
+    const trendSince = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    const trendJobs = await db.pipelineJob.findMany({
+      where: { finishedAt: { gte: trendSince }, status: { in: ['completed', 'failed'] } },
+      select: { status: true, finishedAt: true },
+    })
+    // 按小时桶聚合（24 桶，0=最旧 → 23=当前小时）
+    const throughputTrend: Array<{ hour: string; completed: number; failed: number }> = []
+    const now = Date.now()
+    for (let h = 23; h >= 0; h--) {
+      const bucketStart = new Date(now - h * 60 * 60 * 1000)
+      const bucketStartMs = bucketStart.getTime()
+      const bucketLabel = `${String(bucketStart.getHours()).padStart(2, '0')}:00`
+      const completed = trendJobs.filter(
+        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + 3600000 && j.status === 'completed',
+      ).length
+      const failed = trendJobs.filter(
+        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + 3600000 && j.status === 'failed',
+      ).length
+      throughputTrend.push({ hour: bucketLabel, completed, failed })
+    }
+
     // §32（Task 17-1）：recentLogs（最近检索日志）已随对外检索 API 一并移除——
     // 平台定位收敛为「知识库管理」，检索调用与审计由外部独立平台承担
     return NextResponse.json({
@@ -84,6 +107,8 @@ export async function GET() {
         statusFlow,
         // FE-011: 按解析引擎分布（mineru / fallback / pending）
         engineDistribution,
+        // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数，0=最旧→23=当前小时）
+        throughputTrend,
         // FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中）
         // 前端据此在仪表盘/系统运维页展示横幅，让用户直观看到引擎非正常态
         pipeline: {

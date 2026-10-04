@@ -23,6 +23,15 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip as RTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts'
 import { ragApi } from '../api'
 import { usePlatformStore } from '../store'
 import { ensureQuickActionBridge } from '../useQuickAction'
@@ -268,6 +277,96 @@ export function DashboardView() {
           </div>
         </div>
       )}
+
+      {/* FE-013: 流水线吞吐趋势图（近 24h 按小时桶完成/失败数） */}
+      {d.throughputTrend && d.throughputTrend.length > 0 && (() => {
+        const trend = d.throughputTrend
+        const totalCompleted = trend.reduce((a, b) => a + b.completed, 0)
+        const totalFailed = trend.reduce((a, b) => a + b.failed, 0)
+        const hasData = totalCompleted > 0 || totalFailed > 0
+        return (
+          <div className="rounded-xl border border-border/60 bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-sm font-medium">
+                <Activity className="h-3.5 w-3.5 text-muted-foreground" />
+                流水线吞吐趋势
+              </span>
+              <div className="flex items-center gap-3 text-[11px]">
+                <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="h-2 w-2 rounded-full bg-emerald-500" />
+                  完成 {totalCompleted}
+                </span>
+                <span className="inline-flex items-center gap-1 text-rose-600 dark:text-rose-400">
+                  <span className="h-2 w-2 rounded-full bg-rose-500" />
+                  失败 {totalFailed}
+                </span>
+                <span className="text-muted-foreground">近 24h</span>
+              </div>
+            </div>
+            {hasData ? (
+              <ResponsiveContainer width="100%" height={160}>
+                <AreaChart data={trend} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="gradCompleted" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#10b981" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#10b981" stopOpacity={0} />
+                    </linearGradient>
+                    <linearGradient id="gradFailed" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#f43f5e" stopOpacity={0.3} />
+                      <stop offset="95%" stopColor="#f43f5e" stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.4} vertical={false} />
+                  <XAxis
+                    dataKey="hour"
+                    tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                    interval={3}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                    allowDecimals={false}
+                    axisLine={false}
+                    tickLine={false}
+                    width={28}
+                  />
+                  <RTooltip
+                    contentStyle={{
+                      fontSize: 11,
+                      borderRadius: 8,
+                      border: '1px solid hsl(var(--border))',
+                      background: 'hsl(var(--card))',
+                      color: 'hsl(var(--card-foreground))',
+                    }}
+                    labelStyle={{ fontSize: 10, color: 'hsl(var(--muted-foreground))' }}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="completed"
+                    name="完成"
+                    stroke="#10b981"
+                    strokeWidth={1.5}
+                    fill="url(#gradCompleted)"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="failed"
+                    name="失败"
+                    stroke="#f43f5e"
+                    strokeWidth={1.5}
+                    fill="url(#gradFailed)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-40 items-center justify-center text-[11px] text-muted-foreground">
+                近 24h 无完成/失败任务
+              </div>
+            )}
+          </div>
+        )
+      })()}
 
       {/* FE-011: 按解析引擎分布统计卡（MinerU / 本地引擎 / 未解析 占比） */}
       {d.engineDistribution && (() => {
