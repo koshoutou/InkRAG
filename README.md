@@ -77,6 +77,17 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.13（2026-10 · 状态可见化与运维增强 3 项）
+
+> 本轮聚焦于上一轮 13 项修复的「可见性闭环」：让备份/恢复期间的流水线暂停、优雅关闭的 draining 态、改密轮转的审计时间从前端可见，让运维与 k8s 编排能据此决策。
+
+**状态可见化（FE-005/BE-011）**
+- **Pipeline paused/draining 状态 UI 横幅**：`/api/dashboard` 与 `/api/system/health` 增加 `pipeline` 段（`paused`/`pausedReason`/`pausedAt`/`draining`/`drainingAt`）；仪表盘与系统运维页顶部增加状态横幅——`draining` 红色「服务正在关闭，排空活跃任务中」/ `paused` 琥珀色「流水线已暂停（备份/恢复进行中）」，让用户直观看到引擎非正常态。
+- **`draining` → 503 摘流**：`/api/system/health` 在 `draining=true` 时返回 HTTP 503，k8s readiness probe / 网关探活据此摘流（不再接新请求）；liveness 仍走 `/api/system/health/live` 200。`drainForShutdown()` 入口设置 `draining=true`，配合 BE-010 优雅关闭。
+
+**密钥轮转审计（SEC-008+）**
+- **`secretRotatedAt` 持久化 + UI 展示**：`PanelAuth` schema 增加 `secretRotatedAt DateTime?`；改密轮转成功后写入时间戳；`/api/auth/session` 返回 `secretRotatedAt`；设置 → 面板安全 tab 展示「上次密钥轮转」——已轮转显示绿色时间戳，从未轮转显示琥珀色提示「改密后将自动轮转密钥，使旧会话失效」。便于安全合规检查。
+
 ### v1.12（2026-10 · 运维补全 / 安全加固 / 性能与可靠性增强 13 项）
 
 > 本轮针对运维完整性、安全面、前端渲染性能与后端数据一致性四类审计发现逐条修复：补全 UI 已调用但路由缺失的备份上传 / 日志清理调度端点；加固实时事件 /emit 与 SSRF 防护；前端 PDF 长文档虚拟化与防抖修复；后端秒传去重、版本恢复事务化、备份/恢复期间流水线暂停、优雅关闭、大文件内存保护；部署脚本补全 Prisma 生成与 mini-service 编排；改密轮转密钥。
