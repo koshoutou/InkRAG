@@ -1,4 +1,20 @@
 import type { NextConfig } from "next";
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
+/**
+ * 读取 package.json version 作为版本唯一真源（A13 修复）。
+ * 通过 env 注入 INKRAG_VERSION，构建时内联到客户端 bundle，UI 直接 process.env.INKRAG_VERSION。
+ * 消除此前 package.json(0.2.1) / PlatformShell(v1.0) / AppShell(v1.0) / README(v1.10) 四套版本号并存。
+ */
+const pkgVersion = (() => {
+  try {
+    const pkg = JSON.parse(readFileSync(path.join(process.cwd(), "package.json"), "utf-8"));
+    return typeof pkg.version === "string" ? pkg.version : "0.0.0";
+  } catch {
+    return "0.0.0";
+  }
+})();
 
 /**
  * 全局安全响应头（Task 15-b / 审计 #3）：
@@ -34,6 +50,10 @@ const nextConfig: NextConfig = {
   /* config options here (t14e: prisma client reload trigger) */
   // 关闭开发模式左下角 Next.js 路由指示徽标（Next 15.2+ 支持布尔值）
   devIndicators: false,
+  // A13: 版本号注入（构建时内联到客户端 bundle，UI 读 process.env.INKRAG_VERSION）
+  env: {
+    INKRAG_VERSION: pkgVersion,
+  },
   typescript: {
     ignoreBuildErrors: true,
   },

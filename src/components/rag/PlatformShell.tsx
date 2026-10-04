@@ -321,7 +321,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
       {/* Sticky footer */}
       <footer className="mt-auto shrink-0 border-t border-border/60 bg-background/85 backdrop-blur">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2 text-[11px] text-muted-foreground">
-          <span className="font-medium">InkRAG 知识库管理平台 v1.0</span>
+          <span className="font-medium">InkRAG 知识库管理平台 v{process.env.INKRAG_VERSION}</span>
           <span className="opacity-40">·</span>
           {vectorMode === 'qdrant' ? (
             <Badge variant="outline" className="border-emerald-500/40 bg-emerald-500/10 text-[10px] text-emerald-600 dark:text-emerald-300">

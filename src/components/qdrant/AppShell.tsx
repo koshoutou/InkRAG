@@ -135,7 +135,7 @@ export function AppShell() {
         <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center gap-x-4 gap-y-1 px-4 py-2.5 text-[11px] text-muted-foreground sm:px-6 lg:px-8">
           <div className="flex items-center gap-1.5">
             <BookOpen className="h-3 w-3" />
-            <span>Qdrant 检索工作台 v1.0</span>
+            <span>Qdrant 检索工作台 v{process.env.INKRAG_VERSION}</span>
           </div>
           <span className="opacity-40">·</span>
           <span>纯 Next.js 轻量实现</span>
