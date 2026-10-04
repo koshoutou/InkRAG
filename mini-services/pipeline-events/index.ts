@@ -109,10 +109,21 @@ const g = globalThis as unknown as {
 // 1) socket.io 服务（2608，前端实时通道）
 // ---------------------------------------------------------------------------
 const socketServer = createServer() // 不挂 request handler，全部交给 socket.io
+// A11 修复：CORS 收窄。原 origin: '*' 允许任意源发起握手尝试（虽由票据兜底，属不必要暴露面）。
+// 现支持 RAG_EVENTS_CORS_ORIGIN 环境变量显式配置允许源（逗号分隔，生产推荐设置）；
+// 未配置时回退 origin: true（反射请求 Origin，适配同源面板 + 网关链路，避免发送通配头）。
+const corsOrigin: string | boolean | string[] = (() => {
+  const raw = process.env.RAG_EVENTS_CORS_ORIGIN?.trim()
+  if (raw) {
+    const list = raw.split(',').map((s) => s.trim()).filter(Boolean)
+    return list.length > 0 ? list : true
+  }
+  return true
+})()
 const io = g.__pipelineEvents?.io ?? new Server(socketServer, {
   // DO NOT change the path, it is used by Caddy to forward the request to the correct port
   path: '/',
-  cors: { origin: '*', methods: ['GET', 'POST'] }, // 跨域放行给同源网关链路；准入由握手票据控制（F-EXT-14）
+  cors: { origin: corsOrigin, methods: ['GET', 'POST'] }, // 准入由握手票据控制（F-EXT-14）；CORS 仅收窄探测面
   pingTimeout: 60000,
   pingInterval: 25000,
 })
