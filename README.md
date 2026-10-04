@@ -77,6 +77,18 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.14（2026-10 · UI 可见化深化与 E2E 验证 3 项）
+
+> 本轮聚焦于仪表盘与运维页的流水线状态可视化深化，并完成完整 E2E RAG 流水线验证（创建知识库 → 上传文档 → parse→chunk→embed→ready 全链路跑通）。
+
+**UI 可见化深化**
+- **FE-006 仪表盘「流水线引擎」统计卡**：6 格网格展示队列(pending+waiting) / 活跃(并发槽) / 已完成 / 失败 / 成功率 / 运行时长；顶部状态指示灯三态（运行中绿色脉冲 / 已暂停琥珀色 / 关闭中红色脉冲）；数据来源 `/api/dashboard` pipeline 段。让用户在仪表盘即可看到引擎吞吐与健康度，无需深入系统运维页。
+- **FE-007 运维健康矩阵 pipeline 状态色**：pipeline 行从二元绿/红扩展为三态——running 绿点 / paused 琥珀点+脉冲 / draining 红点；卡片背景随状态变色；badge 展示「已暂停」/「关闭中」替代 mode；文案增加 pending/active/completed/failed 完整计数。与 v1.13 横幅形成双层提示。
+- **SEC-008++ 密钥轮转天数告警**：设置→面板安全 tab 的「上次密钥轮转」展示「N 天前」；超 90 天未轮转 → 琥珀色边框 + ⚠ 告警「建议改密」。符合安全合规检查需求。
+
+**E2E 验证**
+- 完整 RAG 流水线端到端跑通：创建知识库（dim=1024, BAAI/bge-m3, Qdrant collection 创建）→ 上传 Markdown 文档 → pipeline parse(fallback)→chunk→embed→ready，1 chunk / 1 向量点入库 Qdrant，pipeline.completed=3 / failed=0，成功率 100%。
+
 ### v1.13（2026-10 · 状态可见化与运维增强 3 项）
 
 > 本轮聚焦于上一轮 13 项修复的「可见性闭环」：让备份/恢复期间的流水线暂停、优雅关闭的 draining 态、改密轮转的审计时间从前端可见，让运维与 k8s 编排能据此决策。
