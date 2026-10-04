@@ -240,10 +240,23 @@ async function recoverStaleJobs(): Promise<void> {
 
     const res = await db.pipelineJob.updateMany({
       where: { ...staleWhere, id: { in: candidates.map((c) => c.id) } },
-      data: { status: 'pending' },
+      data: {
+        status: 'pending',
+        // F-CONC-02：回置同时减扣 attempts——重新认领会再 +1，若不减扣则一次进程卡顿/长 GC
+        // （>120s 心跳过期）就白烧 1~2 次重试预算（与 waiting_mineru→pending 路径口径一致）；
+        // 回收不是任务自身的失败，不应消耗重试次数
+        attempts: { decrement: 1 },
+        // 回收意味着上一轮执行环境异常（卡顿/OOM/被回收），给 2s 缓冲再重新入队
+        notBefore: new Date(Date.now() + 2_000),
+      },
     })
     if (res.count > 0) {
-      console.warn(`[pipeline] 心跳过期，恢复 ${res.count} 个僵死任务为 pending`)
+      // 防御：attempts=0 的存量行（理论不存在，认领即 +1）减成负数时归零
+      await db.pipelineJob.updateMany({
+        where: { id: { in: candidates.map((c) => c.id) }, attempts: { lt: 0 } },
+        data: { attempts: 0 },
+      })
+      console.warn(`[pipeline] 心跳过期，恢复 ${res.count} 个僵死任务为 pending（attempts 已减扣，不消耗重试预算）`)
     }
   } catch (e) {
     console.warn('[pipeline] 恢复僵死任务失败:', (e as Error).message)
