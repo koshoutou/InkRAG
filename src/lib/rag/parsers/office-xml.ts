@@ -53,9 +53,12 @@ function xmlUnescape(s: string): string {
 /** 提取一段 <a:p>…</a:p> 内的全部 <a:t> 文本 */
 function paragraphText(pXml: string): string {
   const runs: string[] = []
-  const re = /<a:t>([\s\S]*?)<\/a:t>/g
+  // F-LOC-05：先剥 CDATA 包装（部分生成器会把 <a:t> 内容包在 <![CDATA[…]]> 里，
+  // 原正则只匹配裸文本会整段漏提取）；属性变体（<a:t xml:space="preserve">）一并兼容
+  const normalized = pXml.replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, '$1')
+  const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g
   let m: RegExpExecArray | null
-  while ((m = re.exec(pXml)) !== null) {
+  while ((m = re.exec(normalized)) !== null) {
     runs.push(xmlUnescape(m[1]))
   }
   return runs.join('').replace(/\s+/g, ' ').trim()

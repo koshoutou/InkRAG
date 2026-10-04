@@ -350,15 +350,34 @@ interface Segment {
 
 const SENTENCE_DELIMITERS = new Set(['。', '！', '？', '!', '?', '.', ';', '；', '\n'])
 
+/**
+ * F-LOC-06：半角句点需上下文佐证才视为句末——后跟「空白+大写字母/数字/CJK/开引号」或文本末尾；
+ * 否则视为小数（3.14）/版本号（v1.2）/英文缩写（e.g.）的一部分，不切断。
+ * 其余分隔符（。！？!？;；\n）无需上下文。
+ */
+function isSentenceBoundary(text: string, i: number): boolean {
+  const ch = text[i]
+  if (ch !== '.') return true
+  const next = text[i + 1]
+  if (next === undefined) return true // 文本末尾
+  if (/\s/.test(next)) {
+    const after = text[i + 2]
+    if (after === undefined) return true
+    // 空白后跟大写/数字/CJK/开引号 —— 大概率新句；小写则是缩写（e.g. / i.e. / etc.）
+    return /[A-Z0-9\u4e00-\u9fff「“（(\[]/.test(after)
+  }
+  return false // 紧跟非空白（3.14 / v1.2 / a.b.c）不切
+}
+
 /** 句子切分（保留分隔符；返回相对偏移段） */
 function splitSentences(text: string): { text: string; start: number; end: number }[] {
   const out: { text: string; start: number; end: number }[] = []
   let start = 0
   for (let i = 0; i < text.length; i++) {
-    if (SENTENCE_DELIMITERS.has(text[i])) {
+    if (SENTENCE_DELIMITERS.has(text[i]) && isSentenceBoundary(text, i)) {
       // 连续分隔符合并
       let j = i + 1
-      while (j < text.length && SENTENCE_DELIMITERS.has(text[j])) j++
+      while (j < text.length && SENTENCE_DELIMITERS.has(text[j]) && isSentenceBoundary(text, j)) j++
       out.push({ text: text.slice(start, j), start, end: j })
       start = j
       i = j - 1

@@ -855,6 +855,8 @@ function normalizeMiddleJson(raw: unknown, markdown: string): MiddleJson {
   const blocks: LayoutBlock[] = []
   let cursor = 0
   let idx = 0
+  let lastGoodPage = 0
+  let missCount = 0
   const pageList = Array.isArray(obj) ? obj : (obj.pages ?? obj.pdf_info ?? [])
   for (const page of pageList) {
     const pi = typeof page.page_idx === 'number' ? page.page_idx : pages.length
@@ -870,18 +872,31 @@ function normalizeMiddleJson(raw: unknown, markdown: string): MiddleJson {
         charStart = found
         charEnd = found + text.length
         cursor = charEnd
+        lastGoodPage = pi + 1
+      } else {
+        // F-EXT-08：定位 miss（MinerU 输出与 full.md 清洗差异：表格/公式/脚注）时不再退化为 0
+        // （否则溯源高亮跳到文档开头污染坐标链）——改用「当前游标比例估算 + 继承上一定位块的页码」，
+        // 并计数 miss 率供观测（>30% 时 console.warn 提示人工检查产物质量）
+        missCount += 1
+        charStart = Math.min(cursor, Math.max(0, markdown.length - 1))
+        charEnd = charStart
       }
       const typeNum = typeof b.type === 'number' ? b.type : -1
       blocks.push({
         idx: idx++,
         type: typeNum === 1 ? 'title' : typeNum === 2 ? 'table' : typeNum === 3 ? 'image' : 'text',
-        page: pi + 1,
+        page: lastGoodPage,
         bbox: Array.isArray(b.bbox) && b.bbox.length === 4 ? [b.bbox[0], b.bbox[1], b.bbox[2], b.bbox[3]] : [0, 0, 0, 0],
         charStart,
         charEnd,
         text: text.slice(0, 200),
       })
     }
+  }
+  if (missCount > 0 && missCount / Math.max(1, idx) > 0.3) {
+    console.warn(
+      `[mineru] middle.json 定位 miss 率 ${(100 * missCount / Math.max(1, idx)).toFixed(0)}%（${missCount}/${idx} 块）——产物与 full.md 清洗差异较大，溯源坐标已按比例估算降级`
+    )
   }
   return { pages, blocks }
 }
