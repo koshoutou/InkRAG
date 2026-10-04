@@ -2,7 +2,7 @@
 
 // RAG 知识库平台 · socket.io 实时事件 hook
 // 连接单例 + 房间订阅 + 事件回调订阅。
-// 服务端（mini-services/pipeline-events，port 3003）事件契约见 docs/api-contract.md §9。
+// 服务端（mini-services/pipeline-events，port 2608）事件契约见 docs/api-contract.md §9。
 
 import { useCallback, useEffect, useState } from 'react'
 import { io, type Socket } from 'socket.io-client'
@@ -11,7 +11,7 @@ let socket: Socket | null = null
 
 function getSocket(): Socket {
   if (!socket) {
-    socket = io('/?XTransformPort=3003', {
+    socket = io('/?XTransformPort=2608', {
       transports: ['websocket', 'polling'],
       reconnection: true,
       reconnectionDelay: 1500,

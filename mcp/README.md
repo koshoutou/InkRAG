@@ -30,7 +30,7 @@ cd mcp && npm install
 
 ```bash
 bun run start          # 或 npm start
-INKRAG_BASE_URL=http://localhost:3000 INKRAG_API_KEY=rag-xxxx bun src/index.ts
+INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=rag-xxxx bun src/index.ts
 ```
 
 `npm run build` 可选（tsc 类型检查，产物不落盘）；开发热重载 `bun run dev`。
@@ -40,7 +40,7 @@ INKRAG_BASE_URL=http://localhost:3000 INKRAG_API_KEY=rag-xxxx bun src/index.ts
 | 变量 | 必填 | 默认 | 说明 / Description |
 |---|---|---|---|
 | `INKRAG_API_KEY` | ✅ | — | 平台 API Key。在平台「Agent API」视图创建（明文仅创建时展示一次，形如 `rag-<32位hex>`）。缺失时 Server 启动即失败并打印获取指引。Create it in the platform's "Agent API" view; the plaintext key is shown **once** at creation. |
-| `INKRAG_BASE_URL` | ❌ | `http://localhost:3000` | 平台地址。Platform base URL. |
+| `INKRAG_BASE_URL` | ❌ | `http://localhost:2607` | 平台地址。Platform base URL. |
 
 ## Claude Desktop 配置 / Configuration
 
@@ -54,7 +54,7 @@ INKRAG_BASE_URL=http://localhost:3000 INKRAG_API_KEY=rag-xxxx bun src/index.ts
       "args": ["run", "start"],
       "cwd": "/absolute/path/to/inkrag/mcp",
       "env": {
-        "INKRAG_BASE_URL": "http://localhost:3000",
+        "INKRAG_BASE_URL": "http://localhost:2607",
         "INKRAG_API_KEY": "rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
@@ -76,7 +76,7 @@ INKRAG_BASE_URL=http://localhost:3000 INKRAG_API_KEY=rag-xxxx bun src/index.ts
       "args": ["run", "start"],
       "cwd": "/absolute/path/to/inkrag/mcp",
       "env": {
-        "INKRAG_BASE_URL": "http://localhost:3000",
+        "INKRAG_BASE_URL": "http://localhost:2607",
         "INKRAG_API_KEY": "rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
@@ -124,7 +124,7 @@ EN: state machine `queued → … → ready | failed`; poll `get_document` every
 | 启动失败 `缺少必需的环境变量 INKRAG_API_KEY` | 未配置 env | 在 MCP 客户端配置 `env.INKRAG_API_KEY`；在平台「Agent API」视图创建 Key（明文仅展示一次） |
 | 工具返回 `无效的 API Key`（401 透传） | Key 复制不完整 / 已删除 | 检查 `rag-` 前缀与 32 位 hex 是否完整；在「Agent API」视图核对/重建 |
 | 写操作返回 403（readonly / 已禁用） | Key 角色为 readonly 或 enabled=false | 换用 operator / admin 角色的启用 Key |
-| 工具返回 `无法连接平台（…）：fetch failed` | `INKRAG_BASE_URL` 错误 / 平台未启动 | 核对地址（默认 `http://localhost:3000`），确认平台服务在线后重试 |
+| 工具返回 `无法连接平台（…）：fetch failed` | `INKRAG_BASE_URL` 错误 / 平台未启动 | 核对地址（默认 `http://localhost:2607`），确认平台服务在线后重试 |
 | 建库返回 400「未配置 Qdrant 连接 / 未配置 Embedding API」 | 平台级前置未满足（部署问题） | 管理员在平台「设置 → Qdrant / Embedding」配置并测试连通；重试同样请求不会成功 |
 | 上传后 `chunkCount` 为 0 | 流水线异步执行 | 轮询 `get_document` 到 `ready` 再读 chunkCount（正常现象） |
 | `get_document` 一直 `parsing` | MinerU 云免费档排队（可达小时级） | 属预期（等待上限 6h，超时自动 failed 可 retry）；轮询退避 10~30s |

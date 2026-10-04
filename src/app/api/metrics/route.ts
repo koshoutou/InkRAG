@@ -6,7 +6,7 @@ export const runtime = 'nodejs'
 
 /**
  * GET /api/metrics —— Prometheus 文本格式（text/plain; version=0.0.4）
- * scrape 配置示例：- job_name: rag, static_configs: [{ targets: ['host:3000'] }], metrics_path: /api/metrics
+ * scrape 配置示例：- job_name: rag, static_configs: [{ targets: ["host:2607"] }], metrics_path: /api/metrics
  */
 export async function GET() {
   try {

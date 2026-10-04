@@ -1,9 +1,10 @@
 /**
  * 实时事件推送（契约 §9）
  *
- * 后端 → mini-service pipeline-events (port 3004) 的 HTTP emit 通道：
- *   POST http://127.0.0.1:3004/emit { room, event, data }
+ * 后端 → mini-service pipeline-events (port 2609) 的 HTTP emit 通道：
+ *   POST http://127.0.0.1:2609/emit { room, event, data }
  *   mini-service 收到后向 socket.io 房间广播。
+ * emit 地址可用 RAG_EVENTS_EMIT_URL 覆盖（默认 2609，与 mini-services/pipeline-events 的 EMIT_PORT 对应）。
  *
  * Task 15-c（审计#N15）：推送改为 fire-and-forget —— 各 emit 包装函数立即返回，
  * HTTP 请求进入按房间串行的后台链（同一房间内保序，房间之间并行）。
@@ -22,7 +23,7 @@ import type {
   PipelineActivityEvent,
 } from './types'
 
-const EMIT_URL = 'http://127.0.0.1:3004/emit'
+const EMIT_URL = process.env.RAG_EVENTS_EMIT_URL?.trim() || 'http://127.0.0.1:2609/emit'
 const EMIT_TIMEOUT_MS = 10_000
 
 /** 向指定房间广播事件（10s 超时，失败静默） */

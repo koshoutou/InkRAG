@@ -46,17 +46,17 @@ Next.js 16（App Router）· TypeScript · Tailwind CSS 4 · shadcn/ui · Prisma
 bun install
 
 # 2. 初始化数据库
-cp .env.example .env   # 按需修改 DATABASE_URL
+cp .env.example .env   # 按需修改 DATABASE_URL 与 PANEL_PORT（默认 2607）
 bun run db:push
 
-# 3. 启动主服务（端口 3000）
+# 3. 启动主服务（默认端口 2607，可在 .env 用 PANEL_PORT 覆盖）
 bun run dev
 
-# 4. 启动实时事件服务（socket.io，端口 3003/3004）
+# 4. 启动实时事件服务（socket.io，端口 2608/2609）
 cd mini-services/pipeline-events && bun install && bun run dev
 ```
 
-打开 `http://localhost:3000`，在「设置」中配置 Qdrant / Embedding / Rerank / MinerU（v1.6 起必须先配置 Qdrant 与 Embedding 才能创建知识库；未配置或不可达时写入硬失败并给出引导，不再自动降级本地演示模式）。
+打开 `http://localhost:2607`，在「设置」中配置 Qdrant / Embedding / Rerank / MinerU（v1.6 起必须先配置 Qdrant 与 Embedding 才能创建知识库；未配置或不可达时写入硬失败并给出引导，不再自动降级本地演示模式）。
 
 ### MinerU 接入方式选择
 

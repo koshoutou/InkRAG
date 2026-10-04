@@ -1,12 +1,12 @@
 /**
  * RAG 知识库平台 · 流水线实时事件服务 (pipeline-events)
  *
- * 端口（双服务器架构）：
- *   - 3003：socket.io 服务（path 必须为 '/'，Caddy 网关 XTransformPort 转发；前端 io('/?XTransformPort=3003')）
- *   - 3004：内部 emit HTTP 服务（Next.js 流水线引擎 → POST http://127.0.0.1:3004/emit）
+ * 端口（双服务器架构，v2.0 起默认 2608/2609，可用环境变量 SOCKET_PORT/EMIT_PORT 覆盖）：
+ *   - 2608：socket.io 服务（path 必须为 '/'，Caddy 网关 XTransformPort 转发；前端 io('/?XTransformPort=2608')）
+ *   - 2609：内部 emit HTTP 服务（Next.js 流水线引擎 → POST http://127.0.0.1:2609/emit）
  *
  * 为什么两个端口：socket.io path='/' 会拦截所有 HTTP 请求（engine.io startsWith 匹配），
- * 普通 REST 端点无法共存于 3003；emit 走服务间直连，不经网关。
+ * 普通 REST 端点无法共存于 2608；emit 走服务间直连，不经网关。
  *
  * Room 约定（与 docs/api-contract.md §9 一致）：
  *   - global         全局房间（默认加入）：仪表盘/运维活动流
@@ -16,8 +16,8 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
 import { Server, type Socket } from 'socket.io'
 
-const SOCKET_PORT = 3003
-const EMIT_PORT = 3004
+const SOCKET_PORT = Number(process.env.SOCKET_PORT) || 2608
+const EMIT_PORT = Number(process.env.EMIT_PORT) || 2609
 
 // ---------------------------------------------------------------------------
 // 0) globalThis 单例守护（Task 16：bun --hot 模块重载时复用既有 server/io 实例）
@@ -32,7 +32,7 @@ const g = globalThis as unknown as {
 }
 
 // ---------------------------------------------------------------------------
-// 1) socket.io 服务（3003，前端实时通道）
+// 1) socket.io 服务（2608，前端实时通道）
 // ---------------------------------------------------------------------------
 const socketServer = createServer() // 不挂 request handler，全部交给 socket.io
 const io = g.__pipelineEvents?.io ?? new Server(socketServer, {
@@ -91,7 +91,7 @@ io.on('connection', (socket: Socket) => {
 })
 
 // ---------------------------------------------------------------------------
-// 2) emit HTTP 服务（3004，仅本机后端调用）
+// 2) emit HTTP 服务（2609，仅本机后端调用）
 // ---------------------------------------------------------------------------
 const emitServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   res.setHeader('Access-Control-Allow-Origin', '*')

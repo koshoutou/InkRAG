@@ -9,7 +9,7 @@
 - **解析双模式**：`mineru`（配置了 MinerU API URL）| `fallback`（内置降级解析器：md/txt/html 直接转 markdown；pdf 用 pdfjs 提取文本+坐标生成 layout）。
 - **嵌入双模式**：`real`（OpenAI 兼容 /embeddings）| `mock`（确定性哈希特征向量 + 词法 sparse）。
 - **状态机**：`queued → parsing → chunking → embedding → upserting → ready | failed`
-- **实时事件**：socket.io 连接 `io('/?XTransformPort=3003')`，事件见 §9。
+- **实时事件**：socket.io 连接 `io('/?XTransformPort=2608')`，事件见 §9。
 
 ## 1. 知识库 `/api/kb`
 
@@ -261,13 +261,13 @@ src/lib/
     search.ts            # 检索管线（§12.1 六阶段，生产/调试同路径）
     artifacts.ts         # 产物目录管理：{ARTIFACTS_DIR}/{kbId}/{docId}/source|full.md|middle.json|chunks/
     ids.ts               # uuidv5 确定性 chunk ID（§14.7）
-    events.ts            # emitPipelineEvent(): HTTP POST → mini-service:3003
+    events.ts            # emitPipelineEvent(): HTTP POST → mini-service:2609（emit 端口）
     pipeline.ts          # 流水线引擎（globalThis 单例 tick loop，四阶段 job 执行器，状态回写，事件推送）
 ```
 
-## 9. Socket.io 实时事件（mini-service 端口 3003）
+## 9. Socket.io 实时事件（mini-service 端口 2608）
 
-- 连接：`io('/?XTransformPort=3003', { transports:['websocket','polling'] })`
+- 连接：`io('/?XTransformPort=2608', { transports:['websocket','polling'] })`
 - 客户端 `emit('subscribe', { rooms: string[] })`，room 约定：`kb:{kbId}`、`doc:{docId}`、`global`
 - 服务端事件（mini-service 收到 POST /emit 后广播）：
   - `document:status` `{ docId, kbId, status, stageProgress, errorCode?, errorMessage? }`

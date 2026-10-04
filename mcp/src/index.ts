@@ -7,7 +7,7 @@
  * 文本入库、状态轮询、失败重试、删除。鉴权复用平台 API Key（Bearer）。
  *
  * 环境变量：
- *   INKRAG_BASE_URL  平台地址（默认 http://localhost:3000）
+ *   INKRAG_BASE_URL  平台地址（默认 http://localhost:2607）
  *   INKRAG_API_KEY   必填。在平台「Agent API」视图创建（明文仅创建时展示一次，形如 rag-<32位hex>）
  *
  * 运行：stdio transport（bun src/index.ts 或 npm/bin 入口）。
@@ -24,7 +24,7 @@ import { InputApiError, InputClient } from './client.js'
 // 启动配置
 // ---------------------------------------------------------------------------
 
-const BASE_URL = process.env.INKRAG_BASE_URL?.trim() || 'http://localhost:3000'
+const BASE_URL = process.env.INKRAG_BASE_URL?.trim() || 'http://localhost:2607'
 
 if (!process.env.INKRAG_API_KEY || !process.env.INKRAG_API_KEY.trim()) {
   process.stderr.write(
@@ -35,7 +35,7 @@ if (!process.env.INKRAG_API_KEY || !process.env.INKRAG_API_KEY.trim()) {
       '然后在 MCP 客户端配置的 env 中设置：',
       '  "env": { "INKRAG_API_KEY": "rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }',
       '',
-      '可选：INKRAG_BASE_URL（默认 http://localhost:3000）指向平台地址。',
+      '可选：INKRAG_BASE_URL（默认 http://localhost:2607）指向平台地址。',
       '',
     ].join('\n'),
   )
