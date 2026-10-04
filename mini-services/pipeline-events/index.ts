@@ -24,16 +24,29 @@ const EMIT_PORT = Number(process.env.EMIT_PORT) || 2609
 
 // ---------------------------------------------------------------------------
 // F-EXT-14：事件链路鉴权——与主应用共享密钥文件 db/.panel.secret
-// （主应用侧 src/lib/rag/panel-auth.ts 生成；环境变量 RAG_EVENTS_SECRET 可直接注入字面量、
-//  RAG_EVENTS_SECRET_FILE 可覆盖文件路径。密钥派生：events ticket（握手）+ emit secret（服务间））
+//
+// 密钥来源（按优先级）：
+//   1) 字面量环境变量：PANEL_SECRET（主服务名，推荐）或 RAG_EVENTS_SECRET（历史别名，兼容旧部署）
+//   2) 密钥文件：PANEL_SECRET_FILE 或 RAG_EVENTS_SECRET_FILE，默认 db/.panel.secret
+//      （基址统一为 process.cwd()，与主应用 src/lib/rag/panel-auth.ts 完全一致——
+//       避免 cwd 与 import.meta.dir 两套基址导致两服务读到不同文件、票据 HMAC 不匹配）
+//
+// 密钥派生：events ticket（握手）+ emit secret（服务间）。详见 docs/api-contract.md §36。
 // ---------------------------------------------------------------------------
+// 历史问题（A01/A07）：早期 mini-service 仅认 RAG_EVENTS_SECRET 变量名与 import.meta.dir 基址，
+// 主服务仅认 PANEL_SECRET 与 cwd 基址——运维按主服务文档注入 PANEL_SECRET 后，
+// mini-service 读不到密钥 → getSecret() 返回 '' → 所有 socket 握手被拒 + /emit 403，
+// 且无启动期告警。现统一两套变量名与基址，并在启动期探测密钥可达性。
 const SECRET_FILE =
-  process.env.RAG_EVENTS_SECRET_FILE ?? path.resolve(import.meta.dir, '../../db/.panel.secret')
+  process.env.PANEL_SECRET_FILE ??
+  process.env.RAG_EVENTS_SECRET_FILE ??
+  path.resolve(process.cwd(), 'db/.panel.secret')
 let cachedSecret: string | null = null
 
 async function getSecret(): Promise<string> {
   if (cachedSecret) return cachedSecret
-  const literal = process.env.RAG_EVENTS_SECRET?.trim()
+  // 主服务变量名 PANEL_SECRET 优先；RAG_EVENTS_SECRET 作为历史别名兼容
+  const literal = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
   if (literal && literal.length >= 32) {
     cachedSecret = literal
     return literal
@@ -251,6 +264,20 @@ if (!g.__pipelineEvents?.started) {
   })
   g.__pipelineEvents = { io, started: true }
   console.log('[pipeline-events] 实例已登记（globalThis 单例守护）')
+  // 启动期密钥可达性探测（A01 修复：避免密钥缺失导致事件链路静默瘫痪）
+  // 若密钥为空，所有 socket 握手与 /emit 调用都将被拒；此前仅在运行时 console.warn，无启动告警
+  void getSecret().then((s) => {
+    if (!s) {
+      console.warn(
+        '[pipeline-events] ⚠ 事件链路密钥不可用：未设置 PANEL_SECRET/RAG_EVENTS_SECRET，' +
+          `且密钥文件 ${SECRET_FILE} 不存在或长度不足。` +
+          '请先在主应用面板登录一次以生成密钥，或显式注入 PANEL_SECRET 环境变量。' +
+          '（未恢复前所有实时事件连接将被拒绝）',
+      )
+    } else {
+      console.log('[pipeline-events] 事件链路密钥已就绪')
+    }
+  })
 } else {
   console.log('[pipeline-events] 热重载：复用既有 server/io 实例（不重复 listen）')
 }

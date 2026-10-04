@@ -29,13 +29,20 @@ const secretCacheG = globalThis as unknown as { __panelSecret?: string }
 
 function secretFilePath(): string {
   // standalone 生产模式下 cwd 为 .next/standalone，退回项目根的 db/（server.js 与 db/ 同级部署时）
-  return process.env.PANEL_SECRET_FILE ?? path.join(process.cwd(), 'db', '.panel.secret')
+  // 同时接受 PANEL_SECRET_FILE（主服务名）与 RAG_EVENTS_SECRET_FILE（mini-service 历史名），
+  // 两服务共享同一密钥文件——见 A01/A07 修复说明
+  return (
+    process.env.PANEL_SECRET_FILE ??
+    process.env.RAG_EVENTS_SECRET_FILE ??
+    path.join(process.cwd(), 'db', '.panel.secret')
+  )
 }
 
-/** 读取（或生成并落盘）面板密钥；环境变量 PANEL_SECRET 优先 */
+/** 读取（或生成并落盘）面板密钥；环境变量 PANEL_SECRET 优先（RAG_EVENTS_SECRET 为历史兼容别名） */
 export async function getPanelSecret(): Promise<string> {
   if (secretCacheG.__panelSecret) return secretCacheG.__panelSecret
-  const fromEnv = process.env.PANEL_SECRET?.trim()
+  // 主服务变量名 PANEL_SECRET 优先；RAG_EVENTS_SECRET 作为历史别名兼容（与 mini-service 双向对称）
+  const fromEnv = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
   if (fromEnv) {
     secretCacheG.__panelSecret = fromEnv
     return fromEnv
