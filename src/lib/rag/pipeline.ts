@@ -63,6 +63,14 @@ const CONCURRENCY = 2
 const TICK_MS = 1200
 const MAX_ATTEMPTS = 3
 
+// ---- F-CONC-01：任务级重试指数退避（BullMQ delayed-job 语义的 SQLite 等价实现）----
+/** 退避序列（按 attempts 取，1→2s、2→8s、≥3→30s）；额外 0-1s 随机抖动防止同步风暴 */
+const RETRY_BACKOFF_MS = [2_000, 8_000, 30_000]
+function retryBackoffMs(attempts: number): number {
+  const idx = Math.min(Math.max(attempts, 1), RETRY_BACKOFF_MS.length) - 1
+  return RETRY_BACKOFF_MS[idx] + Math.floor(Math.random() * 1_000)
+}
+
 // ---- Task 15-c 新增调参 ----
 /** MinerU 轮询器周期（与主引擎 tick 并行；轮询不占文档并发槽） */
 const MINERU_POLL_MS = 5_000
@@ -263,7 +271,11 @@ async function tick(eng: PipelineEngineState): Promise<void> {
     }
     while (shared().active < CONCURRENCY) {
       const candidates = await db.pipelineJob.findMany({
-        where: { status: 'pending' },
+        // F-CONC-01：延迟重试——仅认领 notBefore 已到期的 pending 任务
+        where: {
+          status: 'pending',
+          OR: [{ notBefore: null }, { notBefore: { lte: new Date() } }],
+        },
         orderBy: { createdAt: 'asc' },
         take: 5,
       })
@@ -568,7 +580,16 @@ async function handleJobFailure(job: JobRow, e: unknown, startedAt: number): Pro
   // 已被取消（cancelled）或回收 → 安静返回，不写失败状态、不落文档失败、不发事件（审计#N13）
   const own = { id: job.id, status: { in: [...IN_FLIGHT_STATUSES] }, attempts: job.attempts }
   const res = canRetry
-    ? await db.pipelineJob.updateMany({ where: own, data: { status: 'pending', error: message } })
+    ? // F-CONC-01：可重试失败不立即回队——按 attempts 指数退避（2s/8s/30s+jitter）写 notBefore，
+      // tick 到期才重新认领；短暂抖动（Qdrant 重启/DNS 抖动）不再在 ~4s 内烧完全部重试预算
+      await db.pipelineJob.updateMany({
+          where: own,
+          data: {
+            status: 'pending',
+            error: message,
+            notBefore: new Date(Date.now() + retryBackoffMs(job.attempts)),
+          },
+        })
     : await db.pipelineJob.updateMany({
         where: own,
         data: { status: 'failed', finishedAt: new Date(), durationMs, error: message },
@@ -581,7 +602,7 @@ async function handleJobFailure(job: JobRow, e: unknown, startedAt: number): Pro
       documentId: job.documentId,
       type: job.type,
       status: 'retrying',
-      error: message,
+      error: `${message}（${Math.round(retryBackoffMs(job.attempts) / 1000)}s 后自动重试）`,
     })
     return
   }

@@ -289,11 +289,15 @@ model PipelineJob {
   durationMs     Int      @default(0)
   /// 心跳时间戳（活跃 job 每 30s 续租；僵死回收改为心跳驱动，替代固定 10 分钟阈值）
   heartbeatAt    DateTime?
+  /// 延迟重试门槛（F-CONC-01：可重试失败按 2s/8s/30s+jitter 退避，tick 仅认领 notBefore<=now 的任务；
+  /// null/过期 = 立即可执行。消除「瞬时抖动 4 秒烧完 3 次 attempts → 永久失败」）
+  notBefore      DateTime?
   createdAt      DateTime @default(now())
   startedAt      DateTime?
   finishedAt     DateTime?
 
   @@index([status, type])
+  @@index([status, notBefore])
   @@index([documentId])
   @@index([createdAt])
 }
