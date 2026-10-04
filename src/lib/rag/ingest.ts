@@ -125,9 +125,21 @@ function resolveMetaJson(opts?: IngestOptions): string | undefined {
   })
 }
 
-/** 秒传判定（同 kb + contentHash + parseConfigV） */
+/**
+ * 秒传判定（同 kb + contentHash）—— LOGIC-001 修复：不再硬编码 parseConfigV: 1。
+ *
+ * 原行为：findFirst({ where: { kbId, contentHash, parseConfigV: 1 } })，只比对 v1 行。
+ * 若文档被编辑 / 重切 / 版本恢复后 parseConfigV 已递增（原行 v1 → v2+），秒传查找落空，
+ * 同一原文重新上传会建新行而非去重，造成重复入库。
+ *
+ * 现行为：按 parseConfigV 倒序取最新版本行比对 contentHash，任意版本命中即去重。
+ * （文档被编辑后仍是同一行，parseConfigV 递增；最新版本即当前态。）
+ */
 async function findDuplicated(kbId: string, contentHash: string): Promise<Document | null> {
-  return db.document.findFirst({ where: { kbId, contentHash, parseConfigV: 1 } })
+  return db.document.findFirst({
+    where: { kbId, contentHash },
+    orderBy: { parseConfigV: 'desc' },
+  })
 }
 
 /** 建行 + 移入产物目录。P2002 竞争（并发同文件）→ raced=true 返回既有文档（秒传语义，不入队） */
@@ -165,8 +177,12 @@ async function persistDocumentRow(
     return { doc, raced: false }
   } catch (e: any) {
     // 并发同文件竞争唯一索引 → 返回既有行（秒传语义；产物目录回滚清理）
+    // LOGIC-001：P2002 查找同样按 parseConfigV 倒序取最新版本（与 findDuplicated 一致）
     if (String(e?.code) === 'P2002') {
-      const existing = await db.document.findFirst({ where: { kbId: kb.id, contentHash, parseConfigV: 1 } })
+      const existing = await db.document.findFirst({
+        where: { kbId: kb.id, contentHash },
+        orderBy: { parseConfigV: 'desc' },
+      })
       if (existing) {
         await fs.rm(path.dirname(sourcePath(kb.id, docId, ext)), { recursive: true, force: true })
         return { doc: existing, raced: true }

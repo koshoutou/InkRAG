@@ -243,11 +243,14 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       if (!/\.md$/i.test(displayName)) displayName += '.md'
 
       // --- 秒传判定（抽取文本 sha256，复用唯一索引语义） ---
+      // LOGIC-001：不再硬编码 parseConfigV=1，按 parseConfigV 倒序取最新版本比对，
+      // 编辑后的文档（parseConfigV 已递增）重新导入同样去重。
       const contentHash = createHash('sha256').update(markdown, 'utf-8').digest('hex')
       const sizeBytes = Buffer.byteLength(markdown, 'utf-8')
-      const parseConfigV = 1
+      const parseConfigV = 1 // 新建仍从 v1 起；秒传查找见下方 findFirst
       const dup = await db.document.findFirst({
-        where: { kbId: id, contentHash, parseConfigV },
+        where: { kbId: id, contentHash },
+        orderBy: { parseConfigV: 'desc' },
       })
       if (dup) {
         const [chunkCount, enabledChunkCount] = await Promise.all([
@@ -292,8 +295,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
         })
       } catch (e: any) {
         if (String(e?.code) === 'P2002') {
-          // 并发同 URL 竞争唯一索引 → 秒传返回
-          const existing = await db.document.findFirst({ where: { kbId: id, contentHash, parseConfigV } })
+          // 并发同 URL 竞争唯一索引 → 秒传返回（LOGIC-001：同样取最新版本）
+          const existing = await db.document.findFirst({
+            where: { kbId: id, contentHash },
+            orderBy: { parseConfigV: 'desc' },
+          })
           if (existing) {
             await fs.rm(sourcePath(id, docId, 'md'), { force: true })
             return NextResponse.json({ doc: toDocSummary(existing), deduplicated: true }, { status: 201 })
@@ -344,11 +350,13 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     const displayName = `${baseName}.${ext}`
 
     // --- 秒传判定（原始字节 sha256） ---
+    // LOGIC-001：按 parseConfigV 倒序取最新版本比对，编辑后重新导入同样去重。
     const contentHash = createHash('sha256').update(raw).digest('hex')
     const sizeBytes = raw.length
-    const parseConfigV = 1
+    const parseConfigV = 1 // 新建仍从 v1 起；秒传查找见下方 findFirst
     const dup = await db.document.findFirst({
-      where: { kbId: id, contentHash, parseConfigV },
+      where: { kbId: id, contentHash },
+      orderBy: { parseConfigV: 'desc' },
     })
     if (dup) {
       const [chunkCount, enabledChunkCount] = await Promise.all([
@@ -392,7 +400,11 @@ export async function POST(req: NextRequest, ctx: Ctx) {
       })
     } catch (e: any) {
       if (String(e?.code) === 'P2002') {
-        const existing = await db.document.findFirst({ where: { kbId: id, contentHash, parseConfigV } })
+        // LOGIC-001：同样取最新版本
+        const existing = await db.document.findFirst({
+          where: { kbId: id, contentHash },
+          orderBy: { parseConfigV: 'desc' },
+        })
         if (existing) {
           await fs.rm(sourcePath(id, docId, ext), { force: true })
           return NextResponse.json({ doc: toDocSummary(existing), deduplicated: true }, { status: 201 })
