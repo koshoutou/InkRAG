@@ -596,15 +596,60 @@ function splitParentChildren(
 // Phase 4 · 坐标回填
 // ---------------------------------------------------------------------------
 
+/**
+ * 预排序布局（F-LOC-03：backfill 原先对每个子 chunk 都执行 [...layout].sort ——
+ * 复杂度 O(chunks × blocks·log blocks)，1000 chunk × 5000 block 的大 PDF 切分 CPU 成倍放大）。
+ * splitMarkdown 入口预排序一次 + 预计算 charEnd 前缀最大值（单调），
+ * backfill 用双二分锁定候选窗口 [lo, hi)，窗口外必不相交，无需逐块扫描。
+ */
+interface SortedLayout {
+  /** 按 charStart 升序的布局块 */
+  blocks: LayoutBlock[]
+  /** maxEndPrefix[i] = blocks[0..i] 的 charEnd 最大值（非降序列，可二分） */
+  maxEndPrefix: number[]
+}
+
+function prepareLayout(layout: LayoutBlock[]): SortedLayout {
+  if (layout.length === 0) return { blocks: [], maxEndPrefix: [] }
+  const blocks = [...layout].sort((a, b) => a.charStart - b.charStart)
+  const maxEndPrefix = new Array<number>(blocks.length)
+  let m = -Infinity
+  for (let i = 0; i < blocks.length; i++) {
+    if (blocks[i].charEnd > m) m = blocks[i].charEnd
+    maxEndPrefix[i] = m
+  }
+  return { blocks, maxEndPrefix }
+}
+
 function backfill(
   charStart: number,
   charEnd: number,
-  layout: LayoutBlock[]
+  layout: SortedLayout
 ): { pageFrom: number; pageTo: number; bboxFrom: number[]; bboxTo: number[] } {
-  const sorted = [...layout].sort((a, b) => a.charStart - b.charStart)
+  const { blocks, maxEndPrefix } = layout
+  if (blocks.length === 0) return { pageFrom: 0, pageTo: 0, bboxFrom: [], bboxTo: [] }
+  // 上界 hi：第一个 charStart >= charEnd 的块（其后必不相交；charStart 有序可二分）
+  let lo = 0
+  let hi = blocks.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (blocks[mid].charStart >= charEnd) hi = mid
+    else lo = mid + 1
+  }
+  // 下界 lo：第一个 maxEndPrefix > charStart 的块（之前的块 charEnd 全 ≤ charStart，必不相交；
+  // maxEndPrefix 非降可二分，正确处理重叠/乱序块）
+  let l2 = 0
+  let h2 = hi
+  while (l2 < h2) {
+    const mid = (l2 + h2) >> 1
+    if (maxEndPrefix[mid] > charStart) h2 = mid
+    else l2 = mid + 1
+  }
+  // 候选窗口 [l2, hi) 内逐块精确判定相交（窗口外已证明必不相交）
   let first: LayoutBlock | null = null
   let last: LayoutBlock | null = null
-  for (const lb of sorted) {
+  for (let i = l2; i < hi; i++) {
+    const lb = blocks[i]
     if (lb.charStart < charEnd && lb.charEnd > charStart) {
       if (!first) first = lb
       last = lb
@@ -645,6 +690,8 @@ export function splitMarkdown(
 
   const blocks = parseMarkdownBlocks(md)
   const hasHeadings = blocks.some((b) => b.type === 'heading')
+  // F-LOC-03：布局预排序一次（backfill 双二分用）
+  const sortedLayout = prepareLayout(layout)
 
   // ---- Phase 2：父构建 ----
   let parentDrafts: ParentDraft[]
@@ -704,7 +751,7 @@ export function splitMarkdown(
     })
     const { segments } = splitParentChildren(draft, safeConfig)
     for (const seg of segments) {
-      const coords = backfill(seg.charStart, seg.charEnd, layout)
+      const coords = backfill(seg.charStart, seg.charEnd, sortedLayout)
       children.push({
         seq: seq++,
         parentSeq,
