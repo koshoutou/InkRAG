@@ -77,6 +77,19 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.21（2026-10 · 排行榜交互与文件大小分布饼图 3 项）
+
+> 本轮聚焦于让仪表盘排行榜可点击跳转到对应知识库文档，并新增文件大小分布饼图，让用户直观看到库的体积构成。
+
+**排行榜交互与大小分布（FE-019/020/BE-018）**
+- **FE-019 仪表盘排行榜点击跳转**：知识库容量排行榜每行增加 `cursor-pointer` + `onClick` → `setKb(kb.id) + setView('docs')`，与最近文档行同口径交互；`title` 提示「点击查看「库名」的文档」。
+- **BE-018 `/api/dashboard` 增加 `sizeDistribution` 字段**：查询全部文档 `sizeBytes` 按体积分桶（<100KB / 100KB-1MB / 1MB-10MB / 10MB-100MB / >100MB），每桶含 `label/count/color`。
+- **FE-020 仪表盘「文件大小分布」饼图**：recharts `PieChart` 环形饼图 + `Cell` 着色 + `RTooltip`；右侧图例：色点 + 标签 + 数量 + 百分比；`total=0` 时不渲染。
+
+**E2E 验证**
+- API: `sizeDistribution` 5 桶 total=3（全 <100KB）✓
+- UI: 文件大小分布卡渲染 ✓ / 排行榜行可点击 ✓
+
 ### v1.20（2026-10 · 知识库排行榜与文档类型筛选 3 项）
 
 > 本轮聚焦于让用户在仪表盘直观看到各知识库容量分布（Top 5 排行榜），并在文档中心支持按文件类型筛选，提升库管理效率。
