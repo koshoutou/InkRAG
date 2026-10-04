@@ -77,6 +77,38 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.11（2026-10 · 一致性审计整改：密钥链路 / 鉴权回归 / 端口串联 / 测试脚手架 18 项）
+
+> 本轮针对一份针对仓库的「AI 修复任务清单」逐条核验并修复：P0 全清（事件链路密钥静默瘫痪、硬编码默认口令）、P1 全清（监控/探活端点鉴权回归、备份端口、env 模板、测试脚手架）、P2 收口（运维页端口、进程退出语义、CORS、版本号）、P3 体验收敛（Qdrant 端口提示、Dify 地址只读、变量命名空间化、API Key 前缀、自定义头命名空间）。误报项（B01-B03）已核实排除，迁移提示项（C01）已补入文档。
+
+**P0 — 致命**
+- **事件链路密钥静默瘫痪（A01+A07）**：主服务与实时事件服务共享同一份 `db/.panel.secret`，但环境变量名两套（`PANEL_SECRET` vs `RAG_EVENTS_SECRET`）、密钥文件路径基址两套（`process.cwd()` vs `import.meta.dir`）。运维按主服务文档注入 `PANEL_SECRET` 后，主服务直接返回字面量、不生成密钥文件；mini-service 不认识该变量名 → 读默认路径文件不存在 → `getSecret()` 返回空 → 所有 socket 握手被拒 + `/emit` 403，整条实时事件链路 100% 瘫痪且**无启动期告警**。修复：两服务双向兼容两套变量名（主服务名优先）、密钥文件基址统一为 `process.cwd()/db/.panel.secret`、mini-service 新增启动期密钥可达性探测（不可用时打印醒目告警含恢复指引）。
+- **硬编码默认口令（A02）**：`DEFAULT_PANEL_PASSWORD` 硬编码为作者联系 ID，任何拿到仓库者皆知初始口令。修复：移除硬编码，改为每实例首次启动随机生成 32 位易读口令（去除 IO01lo 易混字符），落盘 `db/.panel.pass`（0600，gitignore）并醒目打印到 stdout 含修改指引；来源优先级 `PANEL_INITIAL_PASSWORD` 环境变量 > 文件复用（跨重启稳定）> 首次生成。`.gitignore` 显式补充 `.panel.secret`/`.panel.pass` 防脱离 `db/` 目录泄露。顺带修复 `createEventsTicket()` 返回类型与实现不符的历史类型错误。
+
+**P1 — 严重**
+- **`/api/metrics` 被 401 拦截（A03）**：v1.10 引入面板鉴权后豁免清单漏配 `/api/metrics` → Prometheus 抓取（不带 panel Cookie）监控断流。修复：路由内独立 scrape token 鉴权——配置 `METRICS_SCRAPE_TOKEN`（≥16 位）后校验 `?token=` 或 `Authorization: Bearer`；面板会话仍可查看；都无则 401（不再无条件公开指标）。
+- **`/api/system/health` 被 401 拦截（A04）**：Docker HEALTHCHECK / 网关探活全失败。修复：`/api/system/health` 加入公开豁免清单（健康探针不含敏感数据）。
+- **备份恢复回退端口 3000（A05）**：`backup.ts` `defaultOrigin()` 回退端口硬编码 3000，v1.10 端口已迁移到 2607。直接 `bun .next/standalone/server.js` 启动时 PORT 为空 → Qdrant 回拉失败、含快照备份静默损坏。修复：回退端口优先级 `PORT > PANEL_PORT > 2607`。
+- **`.env.example` 覆盖 2/13（A06）**：仅定义 `PANEL_PORT`、`DATABASE_URL`，新部署者不知密钥注入、事件端口、监控 token。修复：补齐全部 14 个环境变量（含 A02/A03 新增的初始口令与 scrape token），分五组并标注 `[必配-生产]`/`[可选]`，附生成示例（`openssl rand`）。
+- **全仓无测试（A08）**：v1.10 大量并发/鉴权/重试/解压改动仅静态审计覆盖。修复：引入 `bun test`（原生支持，无需依赖），新增 4 测试文件 25 用例——中间件豁免前缀（固化 A03/A04 回归保护）、`retryBackoffMs` 退避序列边界、`createKeyHash`/`apiKeyColumns` 明文不落库契约、`safeUnzip` 三层解压预算（炸弹不进内存）。为可测性导出 `retryBackoffMs`/`RETRY_BACKOFF_BASE_MS`/`isPublicApiPath`。
+
+**P2 — 中等**
+- **OpsView scrape 命令硬编码 `:3000`（A09）**：复制即用连错端口。修复：动态取 `window.location.port`（默认 2607），补 token 提示与 A03 呼应。
+- **`uncaughtException` 后继续运行（A10）**：进程可能处于不一致状态（堆损坏/半写文件），继续响应放大损坏。修复：记录后 1s 延迟退出（exit 1）交由 supervisor 重启；`unhandledRejection` 仍不退出（Promise 漏网可隔离）；可忽略的 I/O 中断（EPIPE/ECONNRESET/ERR_STREAM_PREMATURE_CLOSE 等）不退出。
+- **socket.io `cors.origin: '*'`（A11）**：虽由握手票据兜底，属不必要暴露面。修复：新增 `RAG_EVENTS_CORS_ORIGIN` 环境变量（逗号分隔允许源，生产推荐配置面板域名）；未配置时回退 `origin: true`（反射请求 Origin，适配同源面板，避免发送通配头）。
+- **schema 注释残留旧前缀 `lkb-`（A12）**：历史遗留前缀误导维护者。修复：改为 `inkrag-xxxx…`，与实际生成逻辑一致。
+- **版本号三套并存（A13）**：`package.json` 0.2.1 / UI v1.0 / README v1.10 互相矛盾。修复：`package.json` 升至 1.10.0（与 v1.10 更新日志对齐），`next.config.ts` 读取 version 经 `env` 注入 `INKRAG_VERSION`，UI 改读 `process.env.INKRAG_VERSION`，发版只需改 `package.json`。
+
+**P3 — 低风险改进**
+- **Qdrant 输入框缺默认端口提示（A14）**：补「默认端口 6333」与示例（`http://10.0.0.5:6333` / 云端 `https`）。
+- **Dify 导出地址可改只读（A15）**：默认只读展示 `effectiveBase` 避免误填，新增「编辑」按钮切换可写——保留内网/公网地址不一致场景的可编辑能力。
+- **`SOCKET_PORT`/`EMIT_PORT` 裸名无前缀（A16）**：新增命名空间变量 `RAG_EVENTS_SOCKET_PORT`/`RAG_EVENTS_EMIT_PORT`（推荐），保留旧名兼容读取。
+- **API Key 前缀 `rag-`（A17）**：改为 `inkrag-`，与项目命名前缀统一（`verifyApiKey` 不校验前缀，存量 `rag-` key 仍可用）；同步 input-api / dify-compat / api-contract / mcp README 文档。
+- **自定义头 `x-emit-secret` 无命名空间（A18）**：改为 `x-inkrag-emit-secret`，接收方双向兼容旧名（滚动升级不中断 emit 链路）。
+
+**端口迁移提示（C01）**
+- 面板端口由 3000 段迁移到 2607；socket.io 由 3003/3004 迁移到 2608/2609。**外部旧调用方/脚本**（如旧版 MinerU 面板、早期集成）若硬编码 `3000`/`3003`/`3004` 需改为 `2607`/`2608`/`2609`。内置 MCP 已默认 2607。
+
 ### v1.10（2026-10 · 深度审计整改：安全、可靠性、性能三大主线 24 项）
 
 > 本轮按《架构与功能性审查报告》（外部深度审计）逐项整改：审计矩阵中 P0 全清、P1 全清、P2 按性价比取舍；
