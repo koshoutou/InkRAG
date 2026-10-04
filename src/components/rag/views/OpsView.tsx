@@ -24,6 +24,7 @@ import {
   MemoryStick,
   Pause,
   Play,
+  Radio,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -93,6 +94,7 @@ const HEALTH_ROWS = [
   { key: 'embedding', label: 'Embedding', icon: Activity },
   { key: 'mineru', label: 'MinerU 解析', icon: Activity },
   { key: 'rerank', label: 'Rerank', icon: Activity },
+  { key: 'events', label: '实时事件服务', icon: Radio },
   { key: 'pipeline', label: '流水线引擎', icon: ListChecks },
 ] as const
 

@@ -9,7 +9,7 @@ export const runtime = 'nodejs'
 
 /**
  * GET /api/system/health —— 聚合健康检查
- * { qdrant, vectorStore, embedding, mineru, rerank, pipeline }
+ * { qdrant, vectorStore, embedding, mineru, rerank, events, pipeline }
  */
 export async function GET() {
   try {
@@ -18,16 +18,17 @@ export async function GET() {
     // ---- Qdrant 探测 ----
     let qdrant: { mode: string; ok: boolean; version?: string; message: string }
     if (!settings.qdrant.url) {
-      qdrant = { mode: 'local', ok: true, message: '未配置 Qdrant，使用内置向量引擎（沙箱演示）' }
+      // F-E2E-02：文案与实际行为一致（v1.6 起本地引擎已移除，未配置时向量读写硬失败）
+      qdrant = { mode: 'unconfigured', ok: false, message: '未配置 Qdrant——向量写入将硬失败，请到「设置 → Qdrant」配置' }
     } else {
       const probe = await isQdrantReachable(settings.qdrant, { noCache: true })
       qdrant = {
-        mode: probe.ok ? 'qdrant' : 'local',
+        mode: probe.ok ? 'qdrant' : 'unconfigured',
         ok: probe.ok,
         ...(probe.version ? { version: probe.version } : {}),
         message: probe.ok
           ? `连接成功${probe.version ? ` · ${probe.version}` : ''}`
-          : `${probe.message}（运行时自动降级 local）`,
+          : `${probe.message}（向量读写将硬失败，不降级本地存储）`,
       }
     }
 
@@ -121,6 +122,30 @@ export async function GET() {
           ? { mode: 'mock', ok: true, model: 'mock-bm25' }
           : { mode: 'none', ok: false, model: '' }
 
+    // ---- 实时事件服务探活（F-EXT-15：事件服务独立进程无守护，停摆时进度事件全丢且难以发现）----
+    let events: { mode: string; ok: boolean; clients?: number; message: string }
+    try {
+      const emitBase = process.env.RAG_EVENTS_EMIT_URL?.replace(/\/emit$/, '').trim() || 'http://127.0.0.1:2609'
+      const res = await fetch(`${emitBase}/healthz`, { signal: AbortSignal.timeout(2_000) })
+      if (res.ok) {
+        const j = (await res.json()) as { clients?: number; socketPort?: number; emitPort?: number }
+        events = {
+          mode: 'socket.io',
+          ok: true,
+          clients: j.clients ?? 0,
+          message: `事件服务在线（socket ${j.socketPort ?? '?'} / emit ${j.emitPort ?? '?'} · 当前客户端 ${j.clients ?? 0}）`,
+        }
+      } else {
+        events = { mode: 'down', ok: false, message: `事件服务异常响应：HTTP ${res.status}（实时进度将不可见，入库不受影响）` }
+      }
+    } catch (e) {
+      events = {
+        mode: 'down',
+        ok: false,
+        message: `事件服务不可达：${(e as Error).message}——实时进度将不可见（入库不受影响），请在 mini-services/pipeline-events 启动`,
+      }
+    }
+
     // ---- Pipeline ----
     const stats = await pipelineStats()
     const pipeline = {
@@ -140,6 +165,7 @@ export async function GET() {
         embedding,
         mineru,
         rerank,
+        events,
         pipeline,
       },
     })
