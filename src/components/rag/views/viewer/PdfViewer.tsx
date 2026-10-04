@@ -131,27 +131,77 @@ function PageOverlay({ pageNumber, scale, wPt, hPt, blocks, highlightBlockIdx, s
 }
 
 // ---------------------------------------------------------------------------
-// 单页容器
+// 单页容器 —— FE-002 后由 LazyPdfPage 统一承载 data-page + 尺寸，旧 PageFrame 已移除
 // ---------------------------------------------------------------------------
 
-function PageFrame({
+/**
+ * 懒加载页（FE-002）：用 IntersectionObserver 只挂载视口附近页面，避免长文档一次性渲染崩溃。
+ *
+ * - 占位骨架屏：始终保留与真实页面等宽等高的占位 div（带 data-page），保证滚动条高度、
+ *   onScroll 页码探测、scrollToPage 跳转在页面未挂载时仍精确（无布局抖动）。
+ * - 可见判定：IntersectionObserver rootMargin='400px 0px' 提前预挂载，滚动到时已渲染好。
+ * - 卸载回收：离开预挂载区超过一屏则卸载真实内容（canvas/文本块释放），仅留占位；
+ *   重新进入视口时再次挂载（pdfjs render 可重入，无副作用）。
+ */
+function LazyPdfPage({
   pageNumber,
   widthPx,
   heightPx,
+  visible,
+  onVisibleChange,
   children,
 }: {
   pageNumber: number
   widthPx: number
   heightPx: number
-  children?: React.ReactNode
+  visible: boolean
+  onVisibleChange: (pageNumber: number, visible: boolean) => void
+  children: (visible: boolean) => React.ReactNode
 }) {
+  const placeholderRef = useRef<HTMLDivElement>(null)
+  const ioRef = useRef<IntersectionObserver | null>(null)
+
+  useEffect(() => {
+    const el = placeholderRef.current
+    const root = el?.closest<HTMLElement>('.pdf-viewer-scroll-root') ?? null
+    if (!el) return
+    // 提前 400px 预挂载，避免快速滚动时出现空白闪屏
+    const io = new IntersectionObserver(
+      (entries) => {
+        for (const e of entries) {
+          onVisibleChange(pageNumber, e.isIntersecting)
+        }
+      },
+      { root, rootMargin: '400px 0px', threshold: 0 },
+    )
+    io.observe(el)
+    ioRef.current = io
+    return () => {
+      io.disconnect()
+      ioRef.current = null
+    }
+  }, [pageNumber, onVisibleChange])
+
   return (
     <div
+      ref={placeholderRef}
       data-page={pageNumber}
-      className="relative shrink-0 rounded-[2px] bg-white shadow-md ring-1 ring-black/10"
+      className="relative shrink-0"
       style={{ width: Math.round(widthPx), height: Math.round(heightPx) }}
     >
-      {children}
+      {visible ? (
+        children(true)
+      ) : (
+        <div
+          className="absolute inset-0 flex items-center justify-center rounded-[2px] bg-stone-50 ring-1 ring-black/5"
+          aria-hidden
+        >
+          <div className="flex flex-col items-center gap-2 text-stone-300">
+            <Loader2 className="h-4 w-4 animate-spin opacity-50" />
+            <span className="text-[10px] tabular-nums">P{pageNumber}</span>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -213,10 +263,10 @@ function PdfCanvasPage({
   }, [pdf, pageNumber, scale, onRendered])
 
   return (
-    <PageFrame pageNumber={pageNumber} widthPx={wPt * scale} heightPx={hPt * scale}>
+    <div className="relative" style={{ width: Math.round(wPt * scale), height: Math.round(hPt * scale) }}>
       <canvas ref={canvasRef} className="absolute left-0 top-0" aria-label={`第 ${pageNumber} 页`} />
       {children}
-    </PageFrame>
+    </div>
   )
 }
 
@@ -239,8 +289,8 @@ function SyntheticPage({
   const viewport = { width: wPt * scale, height: hPt * scale, scale }
   const pageBlocks = blocks.filter((b) => b.page === pageNumber)
   return (
-    <PageFrame pageNumber={pageNumber} widthPx={wPt * scale} heightPx={hPt * scale}>
-      <div className="absolute inset-0 overflow-hidden" aria-label={`第 ${pageNumber} 页（合成分页）`}>
+    <div className="relative" style={{ width: Math.round(wPt * scale), height: Math.round(hPt * scale) }} aria-label={`第 ${pageNumber} 页（合成分页）`}>
+      <div className="absolute inset-0 overflow-hidden">
         {pageBlocks.map((b) => {
           const pos = bboxToViewport(b.bbox, viewport, hPt)
           if (b.type === 'image') {
@@ -272,7 +322,7 @@ function SyntheticPage({
         })}
       </div>
       {children}
-    </PageFrame>
+    </div>
   )
 }
 
@@ -310,6 +360,28 @@ export function PdfViewer({
   const [pdfMeta, setPdfMeta] = useState<{ wPt: number; hPt: number; pages: number } | null>(null)
   const [currentPage, setCurrentPage] = useState(1)
   const [renderedCount, setRenderedCount] = useState(0)
+  // FE-002：可见页集合（IntersectionObserver 维护）。仅可见页挂载真实 canvas/文本块，
+  // 其余页保留占位骨架屏——长文档（100+ 页）不再一次性渲染所有页导致 OOM/卡顿。
+  const [visiblePages, setVisiblePages] = useState<Set<number>>(() => new Set([1]))
+  const handleVisibleChange = useCallback((page: number, vis: boolean) => {
+    setVisiblePages((prev) => {
+      const cur = prev.has(page)
+      if (vis && !cur) {
+        const next = new Set(prev)
+        next.add(page)
+        return next
+      }
+      if (!vis && cur) {
+        // 离开预挂载区卸载，释放 canvas；再次进入时 LazyPdfPage 会重新挂载并重渲染。
+        // 保留首页（1）常驻，避免顶部空白与 IntersectionObserver 初次未触发的边界。
+        if (page === 1) return prev
+        const next = new Set(prev)
+        next.delete(page)
+        return next
+      }
+      return prev
+    })
+  }, [])
 
   // PDF 加载（仅 PDF 文档）
   useEffect(() => {
@@ -389,9 +461,14 @@ export function PdfViewer({
     setCurrentPage(best)
   }, [])
 
-  // 选中 chunk → 滚动到 pageFrom
+  // 选中 chunk → 滚动到 pageFrom，并强制将其所在页范围标记为可见（确保高亮 overlay 渲染）
   useEffect(() => {
     if (!selectedChunk) return
+    setVisiblePages((prev) => {
+      const next = new Set(prev)
+      for (let p = selectedChunk.pageFrom; p <= selectedChunk.pageTo; p++) next.add(p)
+      return next
+    })
     const container = containerRef.current
     if (!container) return
     const el = container.querySelector(`[data-page="${selectedChunk.pageFrom}"]`)
@@ -481,7 +558,7 @@ export function PdfViewer({
         ref={containerRef}
         onScroll={onScroll}
         className={cn(
-          'h-full overflow-y-auto bg-muted/40 px-4 py-6 dark:bg-stone-900/40',
+          'pdf-viewer-scroll-root h-full overflow-y-auto bg-muted/40 px-4 py-6 dark:bg-stone-900/40',
           '[&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-muted-foreground/25 [&::-webkit-scrollbar-thumb:hover]:bg-muted-foreground/45',
         )}
         role="region"
@@ -491,37 +568,50 @@ export function PdfViewer({
           {metrics.sizes.map((size, i) => {
             const pageNumber = i + 1
             const scale = scaleFor(size)
-            const overlay = (
-              <PageOverlay
-                pageNumber={pageNumber}
-                scale={scale}
-                wPt={size.w}
-                hPt={size.h}
-                blocks={layout}
-                highlightBlockIdx={highlightBlockIdx}
-                selectedChunk={selectedChunk}
-                onBlockClick={onBlockClick}
-              />
-            )
-            if (isPdf && pdf) {
-              return (
-                <PdfCanvasPage
-                  key={`${docId}-${pageNumber}-${zoom}`}
-                  pdf={pdf}
-                  pageNumber={pageNumber}
-                  scale={scale}
-                  wPt={size.w}
-                  hPt={size.h}
-                  onRendered={onRendered}
-                >
-                  {overlay}
-                </PdfCanvasPage>
-              )
-            }
+            const visible = visiblePages.has(pageNumber)
             return (
-              <SyntheticPage key={`${docId}-${pageNumber}`} pageNumber={pageNumber} scale={scale} wPt={size.w} hPt={size.h} blocks={layout}>
-                {overlay}
-              </SyntheticPage>
+              <LazyPdfPage
+                key={`${docId}-${pageNumber}`}
+                pageNumber={pageNumber}
+                widthPx={size.w * scale}
+                heightPx={size.h * scale}
+                visible={visible}
+                onVisibleChange={handleVisibleChange}
+              >
+                {() => {
+                  const overlay = (
+                    <PageOverlay
+                      pageNumber={pageNumber}
+                      scale={scale}
+                      wPt={size.w}
+                      hPt={size.h}
+                      blocks={layout}
+                      highlightBlockIdx={highlightBlockIdx}
+                      selectedChunk={selectedChunk}
+                      onBlockClick={onBlockClick}
+                    />
+                  )
+                  if (isPdf && pdf) {
+                    return (
+                      <PdfCanvasPage
+                        pdf={pdf}
+                        pageNumber={pageNumber}
+                        scale={scale}
+                        wPt={size.w}
+                        hPt={size.h}
+                        onRendered={onRendered}
+                      >
+                        {overlay}
+                      </PdfCanvasPage>
+                    )
+                  }
+                  return (
+                    <SyntheticPage pageNumber={pageNumber} scale={scale} wPt={size.w} hPt={size.h} blocks={layout}>
+                      {overlay}
+                    </SyntheticPage>
+                  )
+                }}
+              </LazyPdfPage>
             )
           })}
           <div className="h-2" />
