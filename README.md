@@ -77,6 +77,19 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.22（2026-10 · 知识库增长趋势与平均指标 3 项）
+
+> 本轮聚焦于让用户在仪表盘看到知识库近 30 天的增长趋势（每天新增文档数），并在统计卡显示平均文件大小与平均 chunk 数，全面掌握库构成。
+
+**增长趋势与平均指标（FE-021/022/BE-019）**
+- **BE-019 `/api/dashboard` 增加 `growthTrend` + `avgFileSize` + `avgChunksPerDoc`**：`growthTrend` 近 30 天按天桶文档创建数（30 桶，`day='M/D'`）；`totals.avgFileSize` 全部文档 `sizeBytes` 平均值（字节）；`totals.avgChunksPerDoc` `chunks/docs` 平均值。
+- **FE-021 仪表盘「知识库增长趋势」折线图**：recharts `LineChart` 折线图（emerald 色，`dot=false`，`activeDot`）；`CartesianGrid` + `XAxis` 每 6 天 + `YAxis` 整数 + `RTooltip`；顶部图例「近 30 天新增 N 个文档」；无数据时显示空态。
+- **FE-022 仪表盘统计卡增加平均指标**：文档总数卡 hint「平均 {avgFileSize} · 就绪 N」；Chunk 总数卡 hint「平均 {avgChunksPerDoc} 块/文档」；引入 `formatBytes` 格式化字节。
+
+**E2E 验证**
+- API: `growthTrend` 30 桶 total=3 / `avgFileSize=1377B` / `avgChunksPerDoc=1` ✓
+- UI: 增长趋势卡渲染 ✓ / 统计卡平均 hint 渲染 ✓
+
 ### v1.21（2026-10 · 排行榜交互与文件大小分布饼图 3 项）
 
 > 本轮聚焦于让仪表盘排行榜可点击跳转到对应知识库文档，并新增文件大小分布饼图，让用户直观看到库的体积构成。
