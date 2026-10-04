@@ -332,3 +332,38 @@ process.on('SIGINT', () => {
   socketServer.close()
   emitServer.close(() => process.exit(0))
 })
+
+// OPS-009：进程级异常兜底——与主服务 process-guards 同口径
+// - unhandledRejection：仅记录，不退出（Promise 漏网可隔离）
+// - uncaughtException：记录后退出（exit 1），交由外部 supervisor（systemd/docker restart）
+//   拉起。socket.io / emit HTTP 服务在异常态下行为不可预期，继续服务可能放大损坏。
+//   可忽略的 I/O 中断（EPIPE/ECONNRESET 等）不退出，避免客户端断连拖垮进程。
+const IGNORABLE_CODES = new Set([
+  'EPIPE',
+  'ECONNRESET',
+  'ECONNABORTED',
+  'ERR_STREAM_PREMATURE_CLOSE',
+  'ERR_STREAM_DESTROYED',
+])
+process.on('unhandledRejection', (reason) => {
+  const err = reason instanceof Error ? reason : new Error(String(reason))
+  console.error('[pipeline-events] unhandledRejection:', err.message)
+})
+process.on('uncaughtException', (err: NodeJS.ErrnoException) => {
+  const code = err?.code
+  if (code && IGNORABLE_CODES.has(code)) {
+    // 客户端断连等 I/O 中断，进程状态仍一致 → 记录不退出
+    console.warn(`[pipeline-events] 可忽略 I/O 异常（${code}）:`, err.message)
+    return
+  }
+  console.error('[pipeline-events] uncaughtException（致命，进程将退出交由 supervisor 重启）:', err)
+  // 优雅关闭 socket/server 再退出
+  try {
+    socketServer.close()
+    emitServer.close(() => process.exit(1))
+  } catch {
+    process.exit(1)
+  }
+  // 兜底：close 回调未在 3s 内触发也强制退出
+  setTimeout(() => process.exit(1), 3_000).unref?.()
+})

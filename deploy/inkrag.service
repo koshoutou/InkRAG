@@ -1,0 +1,56 @@
+# InkRAG systemd 部署示例（OPS-009/012）
+#
+# 两个独立 unit 分别管理主服务与 pipeline-events mini-service，共享同一份密钥文件
+# 与 SQLite 数据库。任一进程崩溃由 systemd 自动重启；stop 时发 SIGTERM，
+# 主服务 drainForShutdown 优雅关闭（BE-010），events 服务优雅关闭 socket。
+#
+# 安装：
+#   sudo cp deploy/inkrag.service /etc/systemd/system/
+#   sudo cp deploy/inkrag-events.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now inkrag inkrag-events
+#
+# 查看日志：
+#   journalctl -u inkrag -f
+#   journalctl -u inkrag-events -f
+#
+# 环境变量：建议放 /etc/inkrag.env（权限 0600），通过 EnvironmentFile 注入
+#   PANEL_SECRET=<openssl rand -hex 32>
+#   METRICS_SCRAPE_TOKEN=<openssl rand -hex 16>
+#   # 可选：覆盖端口
+#   # PANEL_PORT=2607
+#   # RAG_EVENTS_SOCKET_PORT=2608
+#   # RAG_EVENTS_EMIT_PORT=2609
+
+[Unit]
+Description=InkRAG 主服务（Next.js standalone，端口 2607）
+After=network.target inkrag-events.service
+Wants=inkrag-events.service
+# 数据库就绪（SQLite 文件就绪即用，无外部 DB 依赖）
+
+[Service]
+Type=simple
+User=inkrag
+Group=inkrag
+WorkingDirectory=/opt/inkrag
+EnvironmentFile=-/etc/inkrag.env
+Environment=NODE_ENV=production
+Environment=PORT=2607
+Environment=PANEL_SECRET_FILE=/opt/inkrag/db/.panel.secret
+# standalone server.js 入口（bun run build 产物）
+ExecStart=/usr/bin/bun /opt/inkrag/.next/standalone/server.js
+# BE-010：优雅关闭——SIGTERM 后主服务 drainForShutdown 最长 30s，systemd 宽限给 35s
+KillSignal=SIGTERM
+TimeoutStopSec=40
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+# 安全加固（生产建议开启）
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/inkrag/db /opt/inkrag/artifacts
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

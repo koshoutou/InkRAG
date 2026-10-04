@@ -1,0 +1,37 @@
+# InkRAG pipeline-events mini-service（socket.io 2608 + emit HTTP 2609）
+#
+# 与 inkrag.service 配套，共享同一份 PANEL_SECRET_FILE（db/.panel.secret）。
+# 主服务面板登录后生成密钥文件，本服务读同一文件做握手/emit 鉴权（F-EXT-14）。
+# 启动顺序：本服务应在主服务之前或同时启动（密钥文件未就绪时本服务会拒绝连接，
+# 但不会崩溃——主服务登录生成密钥后，已连接客户端重连即可）。
+
+[Unit]
+Description=InkRAG pipeline-events 实时事件服务（socket.io 2608 / emit 2609）
+After=network.target
+# 不依赖 inkrag.service：本服务可独立启动，密钥缺失时拒绝连接并打印告警（A01）
+
+[Service]
+Type=simple
+User=inkrag
+Group=inkrag
+WorkingDirectory=/opt/inkrag/mini-services/pipeline-events
+EnvironmentFile=-/etc/inkrag.env
+Environment=NODE_ENV=production
+Environment=PANEL_SECRET_FILE=/opt/inkrag/db/.panel.secret
+Environment=RAG_EVENTS_SOCKET_PORT=2608
+Environment=RAG_EVENTS_EMIT_PORT=2609
+# OPS-009：uncaughtException 致命错误会 exit(1)，systemd 自动重启
+ExecStart=/usr/bin/bun /opt/inkrag/mini-services/pipeline-events/index.ts
+KillSignal=SIGTERM
+TimeoutStopSec=10
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/inkrag/db
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
