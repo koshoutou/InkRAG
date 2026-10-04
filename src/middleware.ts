@@ -32,10 +32,15 @@ export const dynamic = 'force-dynamic'
  */
 const PUBLIC_API_PREFIXES = ['/api/auth', '/api/input', '/api/system/health', '/api/metrics']
 
+/** 判断 API 路径是否在公开豁免清单内（导出供单元测试 A08） */
+export function isPublicApiPath(pathname: string): boolean {
+  return PUBLIC_API_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'))
+}
+
 export async function middleware(req: NextRequest) {
   const { pathname } = req.nextUrl
   if (!pathname.startsWith('/api/')) return NextResponse.next()
-  if (PUBLIC_API_PREFIXES.some((p) => pathname === p || pathname.startsWith(p + '/'))) {
+  if (isPublicApiPath(pathname)) {
     return NextResponse.next()
   }
 

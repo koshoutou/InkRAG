@@ -66,7 +66,9 @@ const MAX_ATTEMPTS = 3
 // ---- F-CONC-01：任务级重试指数退避（BullMQ delayed-job 语义的 SQLite 等价实现）----
 /** 退避序列（按 attempts 取，1→2s、2→8s、≥3→30s）；额外 0-1s 随机抖动防止同步风暴 */
 const RETRY_BACKOFF_MS = [2_000, 8_000, 30_000]
-function retryBackoffMs(attempts: number): number {
+/** 导出供单元测试（A08）：退避序列基础值（不含 jitter），测试可断言边界 */
+export const RETRY_BACKOFF_BASE_MS = RETRY_BACKOFF_MS
+export function retryBackoffMs(attempts: number): number {
   const idx = Math.min(Math.max(attempts, 1), RETRY_BACKOFF_MS.length) - 1
   return RETRY_BACKOFF_MS[idx] + Math.floor(Math.random() * 1_000)
 }
