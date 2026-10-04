@@ -11,10 +11,9 @@
  * 全部输出 markdown 文本，交由 mineru.ts parseWithFallback → synthesizeLayout 合成布局。
  */
 import { promises as fs } from 'node:fs'
-import { unzipSync } from 'fflate'
 import * as cheerio from 'cheerio'
+import { safeUnzip, ZipBudgetError } from './zip-safe'
 
-/** zip 魔数校验 + 解包 */
 async function readZip(filePath: string, what: string): Promise<Record<string, Uint8Array>> {
   const buf = await fs.readFile(filePath)
   if (buf.length === 0) throw new Error(`${what} 文件为空`)
@@ -22,8 +21,11 @@ async function readZip(filePath: string, what: string): Promise<Record<string, U
     throw new Error(`不是合法的 ${what} 文件（缺少 zip 容器魔数，可能扩展名伪装）`)
   }
   try {
-    return unzipSync(new Uint8Array(buf)) as Record<string, Uint8Array>
+    // F-LOC-01/EXT-06：异步解压 + 解压预算（条目/单条/总量上限，zip 炸弹在展开前被拒）
+    const { files } = await safeUnzip(new Uint8Array(buf))
+    return files as Record<string, Uint8Array>
   } catch (e) {
+    if (e instanceof ZipBudgetError) throw e
     throw new Error(`${what} 解包失败：${(e as Error).message}`)
   }
 }

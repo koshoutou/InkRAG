@@ -8,7 +8,7 @@
  *   ④ 按顺序拼接（每章首行追加书名/章节标题结构由原文 heading 保留）
  */
 import { promises as fs } from 'node:fs'
-import { unzipSync } from 'fflate'
+import { safeUnzip, ZipBudgetError } from './zip-safe'
 import * as cheerio from 'cheerio'
 import { htmlToMarkdown } from './html-clean'
 
@@ -20,8 +20,11 @@ export async function epubToMarkdown(filePath: string): Promise<string> {
   }
   let files: Record<string, Uint8Array>
   try {
-    files = unzipSync(new Uint8Array(buf)) as Record<string, Uint8Array>
+    // F-LOC-01/EXT-06：异步解压 + 解压预算
+    const r = await safeUnzip(new Uint8Array(buf))
+    files = r.files as Record<string, Uint8Array>
   } catch (e) {
+    if (e instanceof ZipBudgetError) throw e
     throw new Error(`epub 解包失败：${(e as Error).message}`)
   }
   const decode = (u: Uint8Array): string => new TextDecoder('utf-8', { fatal: false }).decode(u)

@@ -10,7 +10,7 @@
  * 失败（结构缺失/无文本）给出明确报错并建议改用 MinerU 引擎）。
  */
 import { promises as fs } from 'node:fs'
-import { unzipSync } from 'fflate'
+import { safeUnzip, ZipBudgetError } from './zip-safe'
 
 function xmlUnescape(s: string): string {
   return s
@@ -47,8 +47,11 @@ export async function ofdToMarkdown(filePath: string): Promise<string> {
   }
   let files: Record<string, Uint8Array>
   try {
-    files = unzipSync(new Uint8Array(buf)) as Record<string, Uint8Array>
+    // F-LOC-01/EXT-06：异步解压 + 解压预算
+    const r = await safeUnzip(new Uint8Array(buf))
+    files = r.files as Record<string, Uint8Array>
   } catch (e) {
+    if (e instanceof ZipBudgetError) throw e
     throw new Error(`ofd 解包失败：${(e as Error).message}`)
   }
   const decode = (u: Uint8Array): string => new TextDecoder('utf-8', { fatal: false }).decode(u)

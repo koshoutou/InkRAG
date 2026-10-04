@@ -51,7 +51,7 @@ import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { z } from 'zod'
-import { unzipSync } from 'fflate'
+import { safeUnzip, ZipBudgetError } from './parsers/zip-safe'
 import { parseMarkdownBlocks } from './chunking'
 import { htmlToMarkdown } from './parsers/html-clean'
 import { docxToMarkdown } from './parsers/docx'
@@ -484,8 +484,11 @@ async function writeArtifactFromBytes(
   if (isZip) {
     let files: Record<string, Uint8Array>
     try {
-      files = unzipSync(new Uint8Array(buf)) as Record<string, Uint8Array>
+      // F-LOC-01/EXT-06：异步解压 + 解压预算（MinerU 产物与用户上传共用防护）
+      const r = await safeUnzip(new Uint8Array(buf))
+      files = r.files as Record<string, Uint8Array>
     } catch (e) {
+      if (e instanceof ZipBudgetError) throw nonRetryable('MINERU_BAD_ARTIFACT', e.message)
       throw nonRetryable('MINERU_BAD_ARTIFACT', `产物 zip 解压失败: ${(e as Error).message}`)
     }
     const entries = Object.entries(files)
