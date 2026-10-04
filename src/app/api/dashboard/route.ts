@@ -73,6 +73,25 @@ export async function GET(req: NextRequest) {
       engineDistribution[key] = (engineDistribution[key] ?? 0) + r._count._all
     }
 
+    // FE-020/BE-018: 文件大小分布（按体积分桶）
+    // 用于仪表盘「文件大小分布」饼图，让用户了解库组成
+    const allDocs = await db.document.findMany({ select: { sizeBytes: true } })
+    const sizeDistribution: Array<{ label: string; count: number; color: string }> = [
+      { label: '< 100KB', count: 0, color: '#10b981' },
+      { label: '100KB - 1MB', count: 0, color: '#0ea5e9' },
+      { label: '1MB - 10MB', count: 0, color: '#f59e0b' },
+      { label: '10MB - 100MB', count: 0, color: '#f43f5e' },
+      { label: '> 100MB', count: 0, color: '#8b5cf6' },
+    ]
+    for (const d of allDocs) {
+      const s = d.sizeBytes
+      if (s < 100 * 1024) sizeDistribution[0].count++
+      else if (s < 1024 * 1024) sizeDistribution[1].count++
+      else if (s < 10 * 1024 * 1024) sizeDistribution[2].count++
+      else if (s < 100 * 1024 * 1024) sizeDistribution[3].count++
+      else sizeDistribution[4].count++
+    }
+
     // FE-017/BE-017: 知识库容量排行榜（Top 5 按 chunk 数排序）
     // 用于仪表盘「知识库容量排行榜」卡，让用户直观看到各库容量分布
     const leaderboardKbs = await db.knowledgeBase.findMany({
@@ -143,6 +162,8 @@ export async function GET(req: NextRequest) {
         statusFlow,
         // FE-011: 按解析引擎分布（mineru / fallback / pending）
         engineDistribution,
+        // FE-020/BE-018: 文件大小分布（按体积分桶）
+        sizeDistribution,
         // FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序）
         kbLeaderboard,
         // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数，0=最旧→23=当前小时）

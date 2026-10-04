@@ -269,6 +269,8 @@ export interface DashboardData {
   statusFlow: Record<string, number>
   /** FE-011: 按解析引擎分布（mineru / fallback / pending） */
   engineDistribution?: Record<string, number>
+  /** FE-020/BE-018: 文件大小分布（按体积分桶） */
+  sizeDistribution?: Array<{ label: string; count: number; color: string }>
   /** FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序） */
   kbLeaderboard?: Array<{
     id: string

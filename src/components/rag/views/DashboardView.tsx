@@ -28,6 +28,9 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  Cell,
+  Pie,
+  PieChart,
   ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
@@ -438,6 +441,69 @@ export function DashboardView() {
         )
       })()}
 
+      {/* FE-020: 文件大小分布饼图（按体积分桶，<100KB / 100KB-1MB / 1-10MB / 10-100MB / >100MB） */}
+      {d.sizeDistribution && (() => {
+        const dist = d.sizeDistribution
+        const total = dist.reduce((a, b) => a + b.count, 0)
+        if (total === 0) return null
+        const pct = (n: number) => ((n / total) * 100).toFixed(1)
+        return (
+          <div className="rounded-xl border border-border/60 bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-sm font-medium">
+                <Boxes className="h-3.5 w-3.5 text-muted-foreground" />
+                文件大小分布
+              </span>
+              <span className="text-[11px] text-muted-foreground">共 {total} 个文档</span>
+            </div>
+            <div className="flex items-center gap-4">
+              {/* 饼图 */}
+              <ResponsiveContainer width={140} height={140}>
+                <PieChart>
+                  <Pie
+                    data={dist.filter((x) => x.count > 0)}
+                    dataKey="count"
+                    nameKey="label"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={35}
+                    outerRadius={60}
+                    paddingAngle={2}
+                  >
+                    {dist.filter((x) => x.count > 0).map((entry, idx) => (
+                      <Cell key={idx} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <RTooltip
+                    contentStyle={{
+                      fontSize: 11,
+                      borderRadius: 8,
+                      border: '1px solid hsl(var(--border))',
+                      background: 'hsl(var(--card))',
+                      color: 'hsl(var(--card-foreground))',
+                    }}
+                    formatter={(value: number, name: string) => [`${value} 个 (${pct(value)}%)`, name]}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              {/* 图例 */}
+              <div className="flex-1 space-y-1.5">
+                {dist.map((item) => (
+                  <div key={item.label} className="flex items-center gap-2 text-[11px]">
+                    <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ backgroundColor: item.color }} />
+                    <span className="text-muted-foreground">{item.label}</span>
+                    <span className="ml-auto font-medium tabular-nums">
+                      {item.count}
+                      <span className="text-muted-foreground/70"> ({pct(item.count)}%)</span>
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* FE-017: 知识库容量排行榜（Top 5 按 pointCount 排序） */}
       {d.kbLeaderboard && d.kbLeaderboard.length > 0 && (() => {
         const board = d.kbLeaderboard
@@ -470,7 +536,12 @@ export function DashboardView() {
                 return (
                   <div
                     key={kb.id}
-                    className="group flex items-center gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-colors hover:border-border/60 hover:bg-muted/30"
+                    className="group flex cursor-pointer items-center gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-colors hover:border-border/60 hover:bg-muted/30"
+                    onClick={() => {
+                      usePlatformStore.getState().setKb(kb.id)
+                      setView('docs')
+                    }}
+                    title={`点击查看「${kb.name}」的文档`}
                   >
                     <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold tabular-nums', rankColor)}>
                       {rank}
