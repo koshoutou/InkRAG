@@ -695,7 +695,9 @@ export function OpsView() {
                       size="sm"
                       className="h-6 gap-1 px-2 text-[10px]"
                       onClick={() => {
-                        void navigator.clipboard?.writeText('curl -s http://<host>:3000/api/metrics').then(() => toast.success('已复制 scrape 命令'))
+                        // A09 修复：端口取当前访问端口（默认 2607），避免硬编码 :3000 与实际端口体系不符
+                        const port = typeof window !== 'undefined' ? window.location.port || '2607' : '2607'
+                        void navigator.clipboard?.writeText(`curl -s http://<host>:${port}/api/metrics`).then(() => toast.success('已复制 scrape 命令'))
                       }}
                     >
                       复制
@@ -704,6 +706,9 @@ export function OpsView() {
                       <RefreshCw className={cn('h-3 w-3', promQuery.isFetching && 'animate-spin')} />刷新
                     </Button>
                   </div>
+                  <p className="text-[9px] leading-relaxed text-muted-foreground">
+                    Prometheus 抓取需配置 <code className="font-mono">METRICS_SCRAPE_TOKEN</code> 环境变量并带 <code className="font-mono">?token=xxx</code> 或 <code className="font-mono">Authorization: Bearer xxx</code>；面板内查看免 token（A03 修复）。
+                  </p>
                   <pre className={cn('max-h-80 overflow-auto rounded-lg border border-border/60 bg-muted/30 p-3 font-mono text-[10px] leading-relaxed', ragScrollbar)}>
                     {promQuery.isFetching && !promQuery.data ? '加载中…' : promQuery.data ?? '加载中…'}
                   </pre>
