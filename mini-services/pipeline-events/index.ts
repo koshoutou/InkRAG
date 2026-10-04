@@ -45,14 +45,31 @@ const SECRET_FILE =
   process.env.RAG_EVENTS_SECRET_FILE ??
   path.resolve(import.meta.dir, '../../db/.panel.secret')
 let cachedSecret: string | null = null
+/** SEC-008：密钥文件 mtime 缓存——主服务轮转密钥后改 mtime，本服务下次读取自动失效缓存 */
+let cachedSecretMtimeMs = 0
 
 async function getSecret(): Promise<string> {
+  // SEC-008：检测密钥文件 mtime 变化（主服务 rotatePanelSecret 改写文件），变化则清缓存重读
+  // 未注入 PANEL_SECRET 字面量时才走文件 mtime 检测（字面量不可轮转，无需检测）
+  const literal = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
+  if (!literal || literal.length < 32) {
+    try {
+      const st = await fs.stat(SECRET_FILE)
+      if (cachedSecret && st.mtimeMs !== cachedSecretMtimeMs) {
+        console.warn('[pipeline-events] 检测到密钥文件已轮转（mtime 变化），清空密钥缓存重读')
+        cachedSecret = null
+      }
+      cachedSecretMtimeMs = st.mtimeMs
+    } catch {
+      /* 文件不存在保持原状（主服务尚未生成） */
+    }
+  }
   if (cachedSecret) return cachedSecret
   // 主服务变量名 PANEL_SECRET 优先；RAG_EVENTS_SECRET 作为历史别名兼容
-  const literal = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
-  if (literal && literal.length >= 32) {
-    cachedSecret = literal
-    return literal
+  const lit = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
+  if (lit && lit.length >= 32) {
+    cachedSecret = lit
+    return lit
   }
   try {
     const s = (await fs.readFile(SECRET_FILE, 'utf-8')).trim()

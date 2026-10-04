@@ -72,6 +72,44 @@ export async function getPanelSecret(): Promise<string> {
   return fresh
 }
 
+/**
+ * SEC-008：轮转面板密钥——改密成功时调用。
+ *
+ * 重新生成 32 字节随机密钥并覆盖 db/.panel.secret，同时清空进程内缓存。
+ * 效果：所有现有会话令牌（session token）、事件票据（events ticket）、
+ *      API Key 签名（HMAC 依赖此密钥）全部失效——符合改密后的安全预期。
+ *
+ * 环境变量 PANEL_SECRET 注入的场景无法轮转（字面量不可变）→ 抛错提示
+ * 显式注入 PANEL_SECRET 的部署若需轮转，应改注入 PANEL_SECRET_FILE 并轮转文件。
+ *
+ * @returns 新密钥（一般不回传给客户端，仅内部使用）
+ */
+export async function rotatePanelSecret(): Promise<string> {
+  // 环境变量注入的密钥不可轮转（字面量固定）
+  const fromEnv = (process.env.PANEL_SECRET ?? process.env.RAG_EVENTS_SECRET)?.trim()
+  if (fromEnv && fromEnv.length >= 32) {
+    throw new Error(
+      '面板密钥由 PANEL_SECRET 环境变量注入，无法运行时轮转。' +
+        '如需改密轮转，请改为注入 PANEL_SECRET_FILE 指向密钥文件，重启后即可轮转。',
+    )
+  }
+  const file = secretFilePath()
+  const fresh = randomBytes(32).toString('hex')
+  try {
+    await fs.mkdir(path.dirname(file), { recursive: true })
+    // 原子写入：先写临时文件再 rename，避免半写态被 mini-service 读到
+    const tmp = `${file}.${process.pid}.tmp`
+    await fs.writeFile(tmp, fresh, 'utf-8')
+    await fs.rename(tmp, file)
+  } catch (e) {
+    throw new Error(`轮转面板密钥写文件失败: ${(e as Error).message}`)
+  }
+  // 清空进程内缓存 → 下次 getPanelSecret() 读到新密钥
+  secretCacheG.__panelSecret = fresh
+  console.warn('[panel-auth] 面板密钥已轮转：所有现有会话/票据/API Key 签名失效，需重新登录')
+  return fresh
+}
+
 // ---------------------------------------------------------------------------
 // HMAC 令牌（session / events ticket / emit secret 三用途）
 // ---------------------------------------------------------------------------

@@ -336,7 +336,10 @@ export const ragApi = {
       }),
     )
   },
-  async changePanelPassword(current: string, next: string): Promise<{ ok: true }> {
+  async changePanelPassword(
+    current: string,
+    next: string,
+  ): Promise<{ ok: true; secretRotated?: boolean; rotateError?: string }> {
     return asJson(
       await req('/api/auth/password', {
         method: 'POST',

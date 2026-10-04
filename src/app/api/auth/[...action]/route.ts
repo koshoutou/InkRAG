@@ -24,6 +24,7 @@ import {
   loginLockRemaining,
   recordLoginFail,
   recordLoginSuccess,
+  rotatePanelSecret,
   verifyPassword,
   verifySessionToken,
 } from '@/lib/rag/panel-auth'
@@ -152,15 +153,28 @@ async function handlePasswordChange(req: NextRequest) {
     where: { id: 'default' },
     data: { passwordHash: hashed.hash, passwordSalt: hashed.salt },
   })
-  // 改密后换发新会话（语义清晰：旧 Cookie 继续有效但建议以新会话为准）
+  // SEC-008：改密成功后轮转面板密钥——所有现有会话令牌、事件票据、API Key 签名失效
+  // （符合改密后的安全预期：旧密码持有者的已签发令牌不能再继续访问）
+  let rotated = false
+  let rotateError: string | undefined
+  try {
+    await rotatePanelSecret()
+    rotated = true
+  } catch (e) {
+    // 密钥轮转失败不应阻断改密本身（密码已更新成功）；记录错误供运维排查
+    rotateError = (e as Error).message
+    console.error('[auth] 改密后密钥轮转失败（密码已更新，但旧会话仍可能有效）:', rotateError)
+  }
+  // 改密后换发新会话（用新密钥签发；旧会话因密钥轮转而失效）
   const { token: newToken } = await createSessionToken()
   recordOp({
     level: 'warn',
     category: 'auth',
     action: 'auth.panel_password_changed',
-    message: '面板访问密码已修改',
+    message: `面板访问密码已修改${rotated ? '，面板密钥已轮转（所有旧会话/API Key 签名失效）' : '（密钥轮转失败，旧会话可能仍有效，请检查日志）'}`,
+    detail: rotated ? { secretRotated: true } : { secretRotated: false, rotateError },
   })
-  const res = NextResponse.json({ ok: true })
+  const res = NextResponse.json({ ok: true, secretRotated: rotated, ...(rotateError ? { rotateError } : {}) })
   res.cookies.set(sessionCookie(newToken))
   return res
 }

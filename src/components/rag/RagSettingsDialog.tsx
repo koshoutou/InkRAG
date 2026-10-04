@@ -646,8 +646,17 @@ export function RagSettingsDialog() {
                   }
                   setPwdBusy(true)
                   try {
-                    await ragApi.changePanelPassword(pwdCurrent, pwdNext)
-                    toast.success('面板密码已修改（新会话已签发）')
+                    const r = await ragApi.changePanelPassword(pwdCurrent, pwdNext)
+                    // SEC-008：密钥轮转后所有旧会话/API Key 签名失效——提示用户其他设备需重新登录
+                    if (r.secretRotated) {
+                      toast.success('面板密码已修改，密钥已轮转（其他设备的会话已失效，需重新登录）')
+                    } else if (r.rotateError) {
+                      toast.warning(
+                        `面板密码已修改，但密钥轮转失败：${r.rotateError}（旧会话可能仍有效，建议重启服务后再次改密）`,
+                      )
+                    } else {
+                      toast.success('面板密码已修改（新会话已签发）')
+                    }
                     setPwdCurrent('')
                     setPwdNext('')
                     setPwdConfirm('')
