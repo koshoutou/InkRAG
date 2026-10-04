@@ -29,6 +29,50 @@ export const MINERU_PART_LIMITS: Record<
   selfhost: { pages: 0, bytes: 0, label: '自部署（无默认限制）' },
 }
 
+/**
+ * PERF-004/005：大文件内存保护阈值。
+ *
+ * - FALLBACK_PDF_MAX_BYTES：降级解析器（Node + pdfjs）处理 PDF 的上限。
+ *   pdfjs-dist 在 Node 端会把整个 PDF 读入 Uint8Array 再解析，单进程内存吃满即 OOM。
+ *   100MB 是经验阈值（4GB 容器约可容纳 1 个 100MB PDF 解析 + 正常负载）。
+ *   超限 → 拒绝并提示配置 MinerU（MinerU 云服务 / 自部署均可处理更大文件）。
+ * - PDF_SPLIT_HARD_MAX_BYTES：pdf-lib 拆分硬上限。
+ *   splitPdfToParts / countPdfPages 同样全量读入内存；超 500MB 直接拒绝，
+ *   防止 selfhost MinerU 提交超大 PDF 时主进程 OOM。
+ */
+export const FALLBACK_PDF_MAX_BYTES = 100 * 1024 * 1024
+export const PDF_SPLIT_HARD_MAX_BYTES = 500 * 1024 * 1024
+
+/** 读取文件体积（不存在返回 0） */
+async function safeFileSize(filePath: string): Promise<number> {
+  try {
+    const st = await import('node:fs').then((m) => m.promises.stat(filePath))
+    return st.size
+  } catch {
+    return 0
+  }
+}
+
+/**
+ * 校验文件体积是否在 pdf-lib 拆分安全范围内。
+ * 超过 PDF_SPLIT_HARD_MAX_BYTES 抛错（防 OOM）。
+ */
+async function assertSplittable(filePath: string): Promise<void> {
+  const size = await safeFileSize(filePath)
+  if (size > PDF_SPLIT_HARD_MAX_BYTES) {
+    throw new Error(
+      `PDF 体积 ${(size / 1024 / 1024).toFixed(1)}MB 超过拆分硬上限 ${PDF_SPLIT_HARD_MAX_BYTES / 1024 / 1024}MB，` +
+        `主进程内存不足以加载（建议：① 配置 MinerU 云服务直传大文件；② 手动拆分后再上传；③ 增大部署内存）`,
+    )
+  }
+  if (size > 200 * 1024 * 1024) {
+    console.warn(
+      `[pdf-split] 警告：PDF 体积 ${(size / 1024 / 1024).toFixed(1)}MB 较大，` +
+        `拆分将占用较多内存（建议配置 MinerU 云服务直传，避免本地拆分）`,
+    )
+  }
+}
+
 /** 段文件命名（与 mineru.ts 提交/续传共用；padStart 保证字典序 = 段序） */
 export function pdfPartFileName(index: number): string {
   return `part-${String(index).padStart(4, '0')}.pdf`
@@ -36,6 +80,7 @@ export function pdfPartFileName(index: number): string {
 
 /** 读取 PDF 页数（损坏/加密文件抛带上下文的 Error） */
 export async function countPdfPages(filePath: string): Promise<number> {
+  await assertSplittable(filePath) // PERF-004/005：超硬上限拒绝，防 OOM
   const { promises: fs } = await import('node:fs')
   let buf: Buffer
   try {
@@ -60,6 +105,7 @@ export async function splitPdfToParts(
   pagesPerPart: number,
   outDir: string
 ): Promise<{ total: number; parts: Array<{ index: number; pageFrom: number; pageTo: number }> }> {
+  await assertSplittable(filePath) // PERF-004/005：超硬上限拒绝，防 OOM
   const { promises: fs } = await import('node:fs')
   const buf = await fs.readFile(filePath)
   const src = await PDFDocument.load(buf, { ignoreEncryption: true, updateMetadata: false })

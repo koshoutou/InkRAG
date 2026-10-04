@@ -68,6 +68,7 @@ import {
   countPdfPages,
   splitPdfToParts,
   pdfPartFileName,
+  FALLBACK_PDF_MAX_BYTES,
 } from './pdf-split'
 import { StoreError, isNonRetryable } from './vectorstore'
 import type { RagSettings, MinerUProviderKind } from './settings'
@@ -1850,6 +1851,27 @@ export async function parseWithFallback(input: ParseDocumentInput): Promise<Pars
     onProgress?.({ progress: 60, message: '布局合成' })
     middle = synthesizeLayout(markdown)
   } else if (ext === 'pdf') {
+    // PERF-004/005：降级模式（Node + pdfjs）处理大 PDF 会 OOM——超 100MB 直接拒绝并提示配置 MinerU
+    let pdfSize = 0
+    try {
+      pdfSize = (await fs.stat(localPath)).size
+    } catch {
+      /* stat 失败继续走，由 parsePdf 内部报错 */
+    }
+    if (pdfSize > FALLBACK_PDF_MAX_BYTES) {
+      throw nonRetryable(
+        'FALLBACK_PDF_TOO_LARGE',
+        `PDF 体积 ${(pdfSize / 1024 / 1024).toFixed(1)}MB 超过降级解析器上限 ${FALLBACK_PDF_MAX_BYTES / 1024 / 1024}MB。` +
+          `Node 引擎（pdfjs-dist）需将整个 PDF 读入内存，大文件会 OOM。` +
+          `请在「设置 → MinerU」配置 MinerU 云服务或自部署实例，并在上传时选择 MinerU 引擎（MinerU 支持流式处理大文件，不占主进程内存）。`,
+      )
+    }
+    if (pdfSize > 50 * 1024 * 1024) {
+      console.warn(
+        `[mineru] 警告：PDF 体积 ${(pdfSize / 1024 / 1024).toFixed(1)}MB 较大，` +
+          `降级解析器（Node）可能占用较多内存，建议配置 MinerU 引擎处理大文件`,
+      )
+    }
     const r = await parsePdf(localPath, onProgress)
     markdown = r.markdown
     middle = r.middle
