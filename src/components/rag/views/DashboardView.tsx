@@ -269,6 +269,55 @@ export function DashboardView() {
         </div>
       )}
 
+      {/* FE-011: 按解析引擎分布统计卡（MinerU / 本地引擎 / 未解析 占比） */}
+      {d.engineDistribution && (() => {
+        const dist = d.engineDistribution
+        const mineru = dist.mineru ?? 0
+        const fallback = dist.fallback ?? 0
+        const pending = dist.pending ?? 0
+        const total = mineru + fallback + pending
+        if (total === 0) return null
+        const pct = (n: number) => ((n / total) * 100).toFixed(1)
+        return (
+          <div className="rounded-xl border border-border/60 bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-sm font-medium">
+                <Sparkles className="h-3.5 w-3.5 text-muted-foreground" />
+                解析引擎分布
+              </span>
+              <span className="text-[11px] text-muted-foreground">共 {total} 个文档</span>
+            </div>
+            {/* 堆叠条 */}
+            <div className="flex h-3 w-full overflow-hidden rounded-full bg-muted" role="img" aria-label={`引擎分布，共 ${total} 个文档`}>
+              {mineru > 0 && (
+                <div className="bg-sky-500" style={{ width: `${(mineru / total) * 100}%` }} title={`MinerU: ${mineru}`} />
+              )}
+              {fallback > 0 && (
+                <div className="bg-amber-500" style={{ width: `${(fallback / total) * 100}%` }} title={`本地引擎: ${fallback}`} />
+              )}
+              {pending > 0 && (
+                <div className="bg-stone-400" style={{ width: `${(pending / total) * 100}%` }} title={`未解析: ${pending}`} />
+              )}
+            </div>
+            {/* 图例 */}
+            <div className="mt-2.5 flex flex-wrap gap-x-4 gap-y-1.5">
+              {[
+                { label: 'MinerU', count: mineru, color: 'bg-sky-500', text: 'text-sky-600 dark:text-sky-400' },
+                { label: '本地引擎', count: fallback, color: 'bg-amber-500', text: 'text-amber-600 dark:text-amber-400' },
+                { label: '未解析', count: pending, color: 'bg-stone-400', text: 'text-stone-500 dark:text-stone-400' },
+              ].map((item) => (
+                <span key={item.label} className="inline-flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span className={`h-2 w-2 rounded-full ${item.color}`} />
+                  {item.label}
+                  <span className={`font-medium tabular-nums ${item.text}`}>{item.count}</span>
+                  <span className="text-muted-foreground/70">({pct(item.count)}%)</span>
+                </span>
+              ))}
+            </div>
+          </div>
+        )
+      })()}
+
       {/* 最近文档（全宽；原第二列「最近检索日志」已随 §32 移除） */}
       <div className="rounded-xl border border-border/60 bg-card">
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">

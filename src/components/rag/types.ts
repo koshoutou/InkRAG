@@ -267,6 +267,8 @@ export interface DashboardData {
   recentDocs: (DocSummary & { kbName: string })[]
   jobs: { pending: number; active: number; failed: number }
   statusFlow: Record<string, number>
+  /** FE-011: 按解析引擎分布（mineru / fallback / pending） */
+  engineDistribution?: Record<string, number>
   /** FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中） */
   pipeline?: {
     pending: number

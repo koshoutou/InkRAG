@@ -180,6 +180,33 @@ export function DocumentsView() {
     queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
   }, [activeKbId, batchReparseTargets, queryClient])
 
+  // FE-012: 批量降级重试（MinerU 失败文档 → Node 引擎重试）
+  // 对当前 KB 全部 failed 文档调用 retry-with-node（MinerU 故障期间一键降级）
+  const [batchFallbackBusy, setBatchFallbackBusy] = useState(false)
+  const batchFallbackTargets = useMemo(
+    () => docs.filter((d) => d.status === 'failed'),
+    [docs],
+  )
+  const runBatchFallback = useCallback(async () => {
+    if (!activeKbId || batchFallbackTargets.length === 0) return
+    setBatchFallbackBusy(true)
+    let ok = 0
+    let fail = 0
+    for (const d of batchFallbackTargets) {
+      try {
+        await ragApi.retryWithNode(d.id)
+        ok++
+      } catch {
+        fail++
+      }
+    }
+    setBatchFallbackBusy(false)
+    if (fail === 0) toast.success(`已批量降级重试 ${ok} 个文档（切换为 Node 引擎）`)
+    else toast.warning(`批量降级完成：成功 ${ok} · 失败 ${fail}`)
+    queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }, [activeKbId, batchFallbackTargets, queryClient])
+
   if (kbsQuery.isLoading) {
     return (
       <ViewPage>
@@ -252,6 +279,23 @@ export function DocumentsView() {
             >
               <Layers className={cn('h-3 w-3', batchReparseBusy && 'animate-pulse')} />
               批量重解析
+            </Button>
+          )}
+          {/* FE-012: 批量降级重试（MinerU 失败文档 → Node 引擎） */}
+          {batchFallbackTargets.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 border-sky-500/40 text-xs text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300"
+              onClick={runBatchFallback}
+              disabled={batchFallbackBusy}
+              title={`对当前知识库 ${batchFallbackTargets.length} 个失败文档改用 Node 引擎重新解析（MinerU 故障期间一键降级）`}
+            >
+              <RotateCcw className={cn('h-3 w-3', batchFallbackBusy && 'animate-spin')} />
+              批量降级重试
+              {batchFallbackTargets.length > 0 && (
+                <Badge variant="outline" className="ml-1 h-4 px-1 text-[9px]">{batchFallbackTargets.length}</Badge>
+              )}
             </Button>
           )}
           <Button

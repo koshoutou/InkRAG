@@ -56,7 +56,16 @@ export async function GET() {
 
     const stats = await pipelineStats()
 
-    // §32（Task 17-1）：recentLogs（最近检索日志）已随对外检索 API 一同移除——
+    // FE-011: 按解析引擎分布（mineru / fallback / 未解析）
+    // 用于仪表盘「引擎分布」统计卡，让用户直观看到 MinerU vs 本地引擎的占比
+    const engineRows = await db.document.groupBy({ by: ['parseEngine'], _count: { _all: true } })
+    const engineDistribution: Record<string, number> = { mineru: 0, fallback: 0, pending: 0 }
+    for (const r of engineRows) {
+      const key = r.parseEngine || 'pending'
+      engineDistribution[key] = (engineDistribution[key] ?? 0) + r._count._all
+    }
+
+    // §32（Task 17-1）：recentLogs（最近检索日志）已随对外检索 API 一并移除——
     // 平台定位收敛为「知识库管理」，检索调用与审计由外部独立平台承担
     return NextResponse.json({
       dashboard: {
@@ -73,6 +82,8 @@ export async function GET() {
         recentDocs,
         jobs: { pending: stats.pending, active: stats.active, failed: stats.failed },
         statusFlow,
+        // FE-011: 按解析引擎分布（mineru / fallback / pending）
+        engineDistribution,
         // FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中）
         // 前端据此在仪表盘/系统运维页展示横幅，让用户直观看到引擎非正常态
         pipeline: {
