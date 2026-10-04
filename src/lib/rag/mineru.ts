@@ -76,6 +76,37 @@ import type { LayoutBlock, MiddleJson, ParseArtifacts, ParseProgressEvent } from
 const MINERU_TIMEOUT_MS = 120_000
 const MINERU_CLOUD_BASE = 'https://mineru.net'
 
+/**
+ * F-EXT-04：体积感知超时——大文件不再被固定 120s 拦杀。
+ * 基准 60s + 每 MB 1.5s（≈容忍 0.67MB/s 慢上行），封顶 15 分钟；
+ * 未知体积回退固定 120s。超时错误另附带宽提示（见 wrapTimeoutHint）。
+ */
+function sizeAwareTimeoutMs(bytes: number | null | undefined): number {
+  if (!bytes || bytes <= 0) return MINERU_TIMEOUT_MS
+  const mb = bytes / (1024 * 1024)
+  return Math.min(15 * 60_000, Math.max(MINERU_TIMEOUT_MS, 60_000 + Math.round(mb * 1_500)))
+}
+
+/** 超时类异常附带可诊断提示（上行带宽不足 / 链路抖动） */
+function isTimeoutError(e: unknown): boolean {
+  const name = (e as Error)?.name
+  return name === 'TimeoutError' || name === 'AbortError' || /timed?\s?out|aborted/i.test(String((e as Error)?.message))
+}
+
+function timeoutHint(bytes: number | null | undefined): string {
+  const mb = bytes ? (bytes / 1024 / 1024).toFixed(1) : '?'
+  return `（体积 ${mb}MB，超时上限已按体积放宽；若反复超时请检查上行带宽或改用更小文件）`
+}
+
+/** F-EXT-05：文件 → 流式请求体（避免 fs.readFile 全量读入 + Uint8Array 拷贝双份内存） */
+function fileRequestBody(localPath: string): { body: ReadableStream<Uint8Array>; duplex: 'half' } {
+  return {
+    body: Readable.toWeb(createReadStream(localPath)) as unknown as ReadableStream<Uint8Array>,
+    // @ts-expect-error Node fetch 流式请求体需要 duplex: half（类型定义未覆盖）
+    duplex: 'half',
+  }
+}
+
 function nonRetryable(code: string, message: string): StoreError {
   const e = new StoreError(`${code}: ${message}`, { retryable: false })
   e.name = code
@@ -347,6 +378,7 @@ class MinerUClient {
     }
     const { id: uploadId, upload_url: uploadUrl } = parsed.data
     // ② 预签名 URL 上传 —— 🔴 绝不带 Authorization 头（坑#3，会泄露 MinerU Key）
+    // F-EXT-04：超时按体积动态化（大文件不再被固定 120s 拦杀）
     const stream = Readable.toWeb(createReadStream(localPath)) as unknown as ReadableStream<Uint8Array>
     let putRes: Response
     try {
@@ -356,10 +388,12 @@ class MinerUClient {
         body: stream,
         // @ts-expect-error Node fetch 需要 duplex 支持流式请求体
         duplex: 'half',
-        signal: AbortSignal.timeout(MINERU_TIMEOUT_MS),
+        signal: AbortSignal.timeout(sizeAwareTimeoutMs(stat.size)),
       })
     } catch (e) {
-      throw retryable(`MinerU 上传失败: ${(e as Error).message}`)
+      throw retryable(
+        `MinerU 上传失败: ${(e as Error).message}${isTimeoutError(e) ? timeoutHint(stat.size) : ''}`
+      )
     }
     if (!putRes.ok) {
       throw new StoreError(`MinerU 上传失败 (${putRes.status}): ${(await putRes.text().catch(() => '')).slice(0, 200)}`, {
@@ -409,7 +443,8 @@ class MinerUClient {
     try {
       res = await fetch(url, {
         headers: this.apiKey ? { Authorization: `Bearer ${this.apiKey}` } : {},
-        signal: AbortSignal.timeout(MINERU_TIMEOUT_MS),
+        // 响应头阶段固定超时（体积未知）；body 传输阶段按 Content-Length 放宽（见下方 pipeline）
+        signal: AbortSignal.timeout(sizeAwareTimeoutMs(null)),
       })
     } catch (e) {
       throw retryable(`MinerU 下载失败: ${(e as Error).message}`)
@@ -421,7 +456,13 @@ class MinerUClient {
       })
     }
     const partPath = path.join(outDir, 'artifact.part')
-    await pipeline(Readable.fromWeb(res.body as any), createWriteStream(partPath))
+    // F-EXT-05：流式落盘（不 arrayBuffer 全量入内存）；带整体超时包住 body 传输
+    const cl = Number(res.headers.get('content-length')) || null
+    await pipeline(
+      Readable.fromWeb(res.body as any),
+      createWriteStream(partPath),
+      { signal: AbortSignal.timeout(sizeAwareTimeoutMs(cl)) }
+    )
     const buf = await fs.readFile(partPath)
     if (buf.length === 0) {
       throw retryable('MinerU 产物为空')
@@ -552,17 +593,20 @@ class MinerUCloudProvider {
     }
 
     // ② PUT 字节到签名 URL —— 无 Content-Type、不带 Authorization（OSS 签名要求）
+    // F-EXT-04/05：流式上传（不再 fs.readFile 全量入内存+Uint8Array 拷贝）+ 体积感知超时
     onProgress?.({ progress: 15, message: '上传文件至 MinerU 云' })
-    const buf = await fs.readFile(localPath)
+    const stat = await fs.stat(localPath)
     let putRes: Response
     try {
       putRes = await fetch(uploadUrl, {
         method: 'PUT',
-        body: new Uint8Array(buf),
-        signal: AbortSignal.timeout(MINERU_TIMEOUT_MS),
+        ...fileRequestBody(localPath),
+        signal: AbortSignal.timeout(sizeAwareTimeoutMs(stat.size)),
       })
     } catch (e) {
-      throw retryable(`MinerU 云上传失败: ${(e as Error).message}`)
+      throw retryable(
+        `MinerU 云上传失败: ${(e as Error).message}${isTimeoutError(e) ? timeoutHint(stat.size) : ''}`
+      )
     }
     if (!putRes.ok) {
       const t = await putRes.text().catch(() => '')
@@ -597,7 +641,7 @@ class MinerUCloudProvider {
     }
   }
 
-  /** ④-0 下载 zip 产物（CDN 直链，无鉴权） */
+  /** ④-0 下载 zip 产物（CDN 直链，无鉴权）—— F-EXT-05：流式落盘，不再 arrayBuffer 全量入内存 */
   async downloadZip(zipUrl: string, outDir: string): Promise<{ markdownPath: string; middleJsonPath: string }> {
     let zipRes: Response
     try {
@@ -611,9 +655,31 @@ class MinerUCloudProvider {
         retryable: zipRes.status >= 500 || zipRes.status === 429,
       })
     }
-    const zipBuf = Buffer.from(await zipRes.arrayBuffer())
-    if (zipBuf.length === 0) throw retryable('MinerU 云产物为空')
-    return writeArtifactFromBytes(zipBuf, outDir)
+    if (!zipRes.body) throw retryable('MinerU 云产物响应无 body')
+    const partPath = path.join(outDir, 'artifact.zip.part')
+    const cl = Number(zipRes.headers.get('content-length')) || null
+    try {
+      await pipeline(
+        Readable.fromWeb(zipRes.body as any),
+        createWriteStream(partPath),
+        { signal: AbortSignal.timeout(sizeAwareTimeoutMs(cl)) }
+      )
+    } catch (e) {
+      await fs.rm(partPath, { force: true }).catch(() => {})
+      throw retryable(
+        `MinerU 云产物下载中断: ${(e as Error).message}${isTimeoutError(e) ? timeoutHint(cl) : ''}`
+      )
+    }
+    const zipBuf = await fs.readFile(partPath)
+    if (zipBuf.length === 0) {
+      await fs.rm(partPath, { force: true }).catch(() => {})
+      throw retryable('MinerU 云产物为空')
+    }
+    try {
+      return await writeArtifactFromBytes(zipBuf, outDir)
+    } finally {
+      await fs.rm(partPath, { force: true }).catch(() => {})
+    }
   }
 
 }
@@ -684,18 +750,20 @@ class MinerUAgentProvider {
       )
     }
 
-    // ② PUT 上传（无鉴权）
+    // ② PUT 上传（无鉴权）—— F-EXT-04/05：流式 + 体积感知超时
     onProgress?.({ progress: 15, message: '上传文件至 MinerU 云（Agent）' })
-    const buf = await fs.readFile(localPath)
+    const stat = await fs.stat(localPath)
     let putRes: Response
     try {
       putRes = await fetch(fileUrl, {
         method: 'PUT',
-        body: new Uint8Array(buf),
-        signal: AbortSignal.timeout(MINERU_TIMEOUT_MS),
+        ...fileRequestBody(localPath),
+        signal: AbortSignal.timeout(sizeAwareTimeoutMs(stat.size)),
       })
     } catch (e) {
-      throw retryable(`MinerU 云（Agent）上传失败: ${(e as Error).message}`)
+      throw retryable(
+        `MinerU 云（Agent）上传失败: ${(e as Error).message}${isTimeoutError(e) ? timeoutHint(stat.size) : ''}`
+      )
     }
     if (!putRes.ok) {
       const t = await putRes.text().catch(() => '')
@@ -730,7 +798,7 @@ class MinerUAgentProvider {
     }
   }
 
-  /** ④-0 下载 markdown 产物（仅 Markdown 输出，无 middle → 合成空） */
+  /** ④-0 下载 markdown 产物（仅 Markdown 输出，无 middle → 合成空）—— F-EXT-05：流式落盘 */
   async downloadMarkdown(mdUrl: string, outDir: string): Promise<{ markdownPath: string; middleJsonPath: string }> {
     let mdRes: Response
     try {
@@ -744,11 +812,24 @@ class MinerUAgentProvider {
         retryable: mdRes.status >= 500 || mdRes.status === 429,
       })
     }
-    const mdBuf = Buffer.from(await mdRes.arrayBuffer())
-    if (mdBuf.length === 0) throw retryable('MinerU 云（Agent）产物为空')
+    if (!mdRes.body) throw retryable('MinerU 云（Agent）产物响应无 body')
     const mdPath = path.join(outDir, 'full.md')
     const midPath = path.join(outDir, 'middle.json')
-    await fs.writeFile(mdPath, mdBuf)
+    const cl = Number(mdRes.headers.get('content-length')) || null
+    try {
+      await pipeline(
+        Readable.fromWeb(mdRes.body as any),
+        createWriteStream(mdPath),
+        { signal: AbortSignal.timeout(sizeAwareTimeoutMs(cl)) }
+      )
+    } catch (e) {
+      await fs.rm(mdPath, { force: true }).catch(() => {})
+      throw retryable(
+        `MinerU 云（Agent）产物下载中断: ${(e as Error).message}${isTimeoutError(e) ? timeoutHint(cl) : ''}`
+      )
+    }
+    const size = (await fs.stat(mdPath).catch(() => null))?.size ?? 0
+    if (size === 0) throw retryable('MinerU 云（Agent）产物为空')
     await fs.writeFile(midPath, JSON.stringify({ pages: [], blocks: [] }))
     return { markdownPath: mdPath, middleJsonPath: midPath }
   }
