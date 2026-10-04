@@ -14,10 +14,71 @@
  *   - doc:{docId}    文档房间：三屏视图/详情页进度
  */
 import { createServer, type IncomingMessage, type ServerResponse } from 'http'
+import { createHmac, timingSafeEqual } from 'node:crypto'
+import { promises as fs } from 'node:fs'
+import path from 'node:path'
 import { Server, type Socket } from 'socket.io'
 
 const SOCKET_PORT = Number(process.env.SOCKET_PORT) || 2608
 const EMIT_PORT = Number(process.env.EMIT_PORT) || 2609
+
+// ---------------------------------------------------------------------------
+// F-EXT-14：事件链路鉴权——与主应用共享密钥文件 db/.panel.secret
+// （主应用侧 src/lib/rag/panel-auth.ts 生成；环境变量 RAG_EVENTS_SECRET 可直接注入字面量、
+//  RAG_EVENTS_SECRET_FILE 可覆盖文件路径。密钥派生：events ticket（握手）+ emit secret（服务间））
+// ---------------------------------------------------------------------------
+const SECRET_FILE =
+  process.env.RAG_EVENTS_SECRET_FILE ?? path.resolve(import.meta.dir, '../../db/.panel.secret')
+let cachedSecret: string | null = null
+
+async function getSecret(): Promise<string> {
+  if (cachedSecret) return cachedSecret
+  const literal = process.env.RAG_EVENTS_SECRET?.trim()
+  if (literal && literal.length >= 32) {
+    cachedSecret = literal
+    return literal
+  }
+  try {
+    const s = (await fs.readFile(SECRET_FILE, 'utf-8')).trim()
+    if (s.length >= 32) {
+      cachedSecret = s
+      return s
+    }
+  } catch {
+    /* 主应用尚未生成密钥（首次启动未登录）——拒绝所有连接，登录后自动可用 */
+  }
+  return ''
+}
+
+function hmacHex(secret: string, payload: string): string {
+  return createHmac('sha256', secret).update(payload).digest('hex')
+}
+
+/** 恒定时间比对两个 hex 串（长度不等直接 false） */
+function safeEqualHex(a: string, b: string): boolean {
+  if (a.length !== b.length || a.length === 0) return false
+  try {
+    return timingSafeEqual(Buffer.from(a, 'utf-8'), Buffer.from(b, 'utf-8'))
+  } catch {
+    return false
+  }
+}
+
+/** 校验令牌 `${exp}.${HMAC(secret, purpose:exp)}`（与会话/票据同源协议） */
+function verifyToken(secret: string, purpose: string, token: unknown): boolean {
+  if (!secret || typeof token !== 'string') return false
+  const dot = token.indexOf('.')
+  if (dot <= 0) return false
+  const expStr = token.slice(0, dot)
+  const sig = token.slice(dot + 1)
+  const exp = Number(expStr)
+  if (!Number.isFinite(exp) || exp < Date.now()) return false
+  return safeEqualHex(sig, hmacHex(secret, `${purpose}:${expStr}`))
+}
+
+/** Room 名白名单（F-EXT-14：阻断任意房间名探测/越权订阅）
+ *  global | kb:{cuid 等 ≥10 位字母数字} | doc:{uuid 等 ≥6 位字母数字连字符} */
+const ROOM_RE = /^(global|kb:[A-Za-z0-9]{10,}|doc:[A-Za-z0-9-]{6,})$/
 
 // ---------------------------------------------------------------------------
 // 0) globalThis 单例守护（Task 16：bun --hot 模块重载时复用既有 server/io 实例）
@@ -38,9 +99,21 @@ const socketServer = createServer() // 不挂 request handler，全部交给 soc
 const io = g.__pipelineEvents?.io ?? new Server(socketServer, {
   // DO NOT change the path, it is used by Caddy to forward the request to the correct port
   path: '/',
-  cors: { origin: '*', methods: ['GET', 'POST'] },
+  cors: { origin: '*', methods: ['GET', 'POST'] }, // 跨域放行给同源网关链路；准入由握手票据控制（F-EXT-14）
   pingTimeout: 60000,
   pingInterval: 25000,
+})
+
+// F-EXT-14：握手鉴权——必须携带主应用签发的 events ticket（登录会话派生，12h TTL）。
+// 未登录/票据过期/伪造 → 拒绝连接（前端收到 connect_error 后重新取票或弹登录遮罩）。
+io.use(async (socket, next) => {
+  const secret = await getSecret()
+  const ticket = (socket.handshake.auth as { ticket?: unknown } | undefined)?.ticket
+  if (!secret || !verifyToken(secret, 'events', ticket)) {
+    console.warn(`[pipeline-events] 拒绝未授权连接（票据缺失/过期/伪造）: ${socket.id}`)
+    return next(new Error('unauthorized: invalid or missing events ticket'))
+  }
+  next()
 })
 
 /** 订阅记录：socket.id → Set<room>（断连清理 + 状态查询） */
@@ -53,9 +126,15 @@ io.on('connection', (socket: Socket) => {
   console.log(`[pipeline-events] client connected: ${socket.id} (total ${io.engine.clientsCount})`)
 
   socket.on('subscribe', (data: { rooms?: string[] }) => {
-    const rooms = Array.isArray(data?.rooms)
+    // F-EXT-14：room 名白名单校验（仅 global / kb:{id} / doc:{id}）
+    const requested = Array.isArray(data?.rooms)
       ? data.rooms.filter((r) => typeof r === 'string' && r.length > 0 && r.length < 128).slice(0, 32)
       : []
+    const rooms = requested.filter((r) => {
+      if (ROOM_RE.test(r)) return true
+      console.warn(`[pipeline-events] 拒绝白名单外房间订阅: ${r.slice(0, 64)}`)
+      return false
+    })
     const subs = subscriptions.get(socket.id) ?? new Set<string>()
     for (const r of rooms) {
       socket.join(r)
@@ -93,7 +172,7 @@ io.on('connection', (socket: Socket) => {
 // ---------------------------------------------------------------------------
 // 2) emit HTTP 服务（2609，仅本机后端调用）
 // ---------------------------------------------------------------------------
-const emitServer = createServer((req: IncomingMessage, res: ServerResponse) => {
+const emitServer = createServer(async (req: IncomingMessage, res: ServerResponse) => {
   res.setHeader('Access-Control-Allow-Origin', '*')
   res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS')
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type')
@@ -116,6 +195,15 @@ const emitServer = createServer((req: IncomingMessage, res: ServerResponse) => {
   }
 
   if (req.method === 'POST' && req.url === '/emit') {
+    // F-EXT-14：服务间 emit 密钥校验（仅主应用流水线可广播；密钥 = HMAC(secret, 'emit')）
+    const provided = String(req.headers['x-emit-secret'] ?? '')
+    const expected = hmacHex(await getSecret(), 'emit')
+    if (!expected || !provided || !safeEqualHex(provided, expected)) {
+      console.warn('[pipeline-events] 拒绝未授权 emit 调用（缺少/错误 x-emit-secret）')
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'forbidden: x-emit-secret required' }))
+      return
+    }
     let body = ''
     req.on('data', (chunk: Buffer) => {
       body += chunk.toString()

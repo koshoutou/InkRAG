@@ -22,11 +22,12 @@ import type {
   KbStatsEvent,
   PipelineActivityEvent,
 } from './types'
+import { eventsEmitSecret } from './panel-auth'
 
 const EMIT_URL = process.env.RAG_EVENTS_EMIT_URL?.trim() || 'http://127.0.0.1:2609/emit'
 const EMIT_TIMEOUT_MS = 10_000
 
-/** 向指定房间广播事件（10s 超时，失败静默） */
+/** 向指定房间广播事件（10s 超时，失败静默；F-EXT-14：携带服务间 emit 密钥） */
 export async function emitToRoom(
   room: string,
   event: string,
@@ -35,7 +36,10 @@ export async function emitToRoom(
   try {
     await fetch(EMIT_URL, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        'x-emit-secret': await eventsEmitSecret(),
+      },
       body: JSON.stringify({ room, event, data }),
       signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),
     })
@@ -50,12 +54,26 @@ export async function emitToRoom(
 
 const roomChains = new Map<string, Promise<void>>()
 
+/** F-EXT-16：每房间待投递链长度上限（事件服务长停摆时丢弃新事件并告警，防 Map 无限积压） */
+const ROOM_CHAIN_MAX = 200
+const roomChainLens = new Map<string, number>()
+let chainDropWarnedAt = 0
+
 /**
  * 入队一条后台投递：立即返回，不阻塞调用方。
  * 同一房间按提交顺序串行（保证 StageStepper 之类的时序消费者不乱序）；
- * 单条超时/失败仅告警，链继续推进（内存积压上限 = 事件服务停摆时长，可接受）。
+ * 单条超时/失败仅告警，链继续推进；超过 ROOM_CHAIN_MAX 丢弃并限频告警（F-EXT-16）。
  */
 function enqueueEmit(room: string, event: string, data: unknown): void {
+  const len = roomChainLens.get(room) ?? 0
+  if (len >= ROOM_CHAIN_MAX) {
+    const now = Date.now()
+    if (now - chainDropWarnedAt > 60_000) {
+      chainDropWarnedAt = now
+      console.warn(`[events] 房间 ${room} 积压超 ${ROOM_CHAIN_MAX} 条（事件服务停摆？），丢弃新事件并告警`)
+    }
+    return
+  }
   const prev = roomChains.get(room) ?? Promise.resolve()
   const run = prev.then(() => emitToRoom(room, event, data))
   const tail = run.then(
@@ -63,9 +81,15 @@ function enqueueEmit(room: string, event: string, data: unknown): void {
     () => undefined
   )
   roomChains.set(room, tail)
+  roomChainLens.set(room, len + 1)
   void tail.then(() => {
     // 链尾静默后清理（若期间有新投递则保留新链尾）
-    if (roomChains.get(room) === tail) roomChains.delete(room)
+    if (roomChains.get(room) === tail) {
+      roomChains.delete(room)
+      roomChainLens.delete(room)
+    } else {
+      roomChainLens.set(room, Math.max(0, (roomChainLens.get(room) ?? 1) - 1))
+    }
   })
 }
 

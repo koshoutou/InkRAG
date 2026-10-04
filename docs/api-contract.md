@@ -267,9 +267,12 @@ src/lib/
 
 ## 9. Socket.io 实时事件（mini-service 端口 2608）
 
-- 连接：`io('/?XTransformPort=2608', { transports:['websocket','polling'] })`
-- 客户端 `emit('subscribe', { rooms: string[] })`，room 约定：`kb:{kbId}`、`doc:{docId}`、`global`
-- 服务端事件（mini-service 收到 POST /emit 后广播）：
+- 连接（v1.10 起需票据鉴权，审计 F-EXT-14）：先 `GET /api/auth/events-ticket`（需面板登录会话，返回 12h TTL 的 HMAC 签名票据），再
+  `io('/?XTransformPort=2608', { transports:['websocket','polling'], auth: { ticket } })`；
+  无票据/过期/伪造 → 服务端拒绝握手（前端收到 connect_error 后自动取新票重连）
+- 客户端 `emit('subscribe', { rooms: string[] })`，room 名白名单校验（正则 `^(global|kb:[A-Za-z0-9]{10,}|doc:[A-Za-z0-9-]{6,})$`）：
+  `kb:{kbId}`、`doc:{docId}`、`global`；白名单外的房间名会被拒绝并告警
+- 服务端事件（mini-service 收到 POST /emit 后广播；emit 调用需携带 `x-emit-secret` 请求头 = HMAC(db/.panel.secret, 'emit')，仅主应用流水线可广播）：
   - `document:status` `{ docId, kbId, status, stageProgress, errorCode?, errorMessage? }`
   - `document:progress` `{ docId, kbId, stage, progress, message? }`（阶段内部进度）
   - `document:done` `{ docId, kbId, status, chunkCount, tookMs }`

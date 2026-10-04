@@ -174,7 +174,7 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       if (!authenticated) {
         return NextResponse.json({ error: '面板未登录' }, { status: 401 })
       }
-      const { ticket, exp } = await createEventsTicket()
+      const { token: ticket, exp } = await createEventsTicket()
       return NextResponse.json({ ticket, exp })
     }
     if (kind === 'session') {
