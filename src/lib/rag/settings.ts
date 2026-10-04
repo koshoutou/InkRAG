@@ -83,8 +83,34 @@ export async function getSettingsRow() {
   return row
 }
 
-/** 读取设置并做双模式判定（不发起任何网络请求，纯配置判定） */
+// ---------------------------------------------------------------------------
+// F-LOC-08：设置进程内短 TTL 缓存（tick 1.2s / 轮询 5s / 每次 embedTexts 都查 DB → 读放大）
+// 写设置时主动失效（invalidateRagSettingsCache），保证热更新安全；TTL 3s 兜底直改 DB 的场景。
+// ---------------------------------------------------------------------------
+
+const SETTINGS_TTL_MS = 3_000
+const settingsCacheG = globalThis as unknown as {
+  __ragSettingsCache?: { value: RagSettings; at: number }
+}
+
+/** 写设置后主动失效（settings PUT 路由调用）；也可在直改 DB 后手动调用 */
+export function invalidateRagSettingsCache(): void {
+  settingsCacheG.__ragSettingsCache = undefined
+}
+
+/** 读取设置并做双模式判定（不发起任何网络请求，纯配置判定；带 3s 进程内缓存） */
 export async function getRagSettings(): Promise<RagSettings> {
+  const cached = settingsCacheG.__ragSettingsCache
+  if (cached && Date.now() - cached.at < SETTINGS_TTL_MS) {
+    return cached.value
+  }
+  const value = await computeRagSettings()
+  settingsCacheG.__ragSettingsCache = { value, at: Date.now() }
+  return value
+}
+
+/** 实际计算（原 getRagSettings 主体） */
+async function computeRagSettings(): Promise<RagSettings> {
   const row = await getSettingsRow()
 
   const vectorMode: VectorMode = row.url.trim() ? 'qdrant' : 'unconfigured'

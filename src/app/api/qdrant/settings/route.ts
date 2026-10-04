@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { recordOp } from '@/lib/rag/oplog'
 import { testConnection } from '@/lib/qdrant'
-import { MINERU_PROVIDERS, normalizeMinerUProvider } from '@/lib/rag/settings'
+import { MINERU_PROVIDERS, invalidateRagSettingsCache, normalizeMinerUProvider } from '@/lib/rag/settings'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -166,6 +166,8 @@ export async function PUT(req: NextRequest) {
     update: data,
     create: { id: 'default', ...data },
   })
+  // F-LOC-08：写后主动失效设置缓存（getRagSettings 3s TTL 缓存立即见到新值）
+  invalidateRagSettingsCache()
   let testResult: { ok: boolean; message: string; version?: string } | undefined
   if (body.test) {
     // 用落库后的真实值测试（掩码值从不落库，row.apiKey 一定是真实密钥或空串）
