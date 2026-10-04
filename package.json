@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "bun run scripts/dev.ts",
-    "build": "prisma generate && next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/",
+    "build": "prisma generate && next build && cp -r .next/static .next/standalone/.next/ && cp -r public .next/standalone/ && cp node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs .next/standalone/node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs && cp node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs .next/standalone/node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs && cp -r node_modules/pdfjs-dist/legacy/build/*.mjs .next/standalone/node_modules/pdfjs-dist/legacy/build/",
     "start": "NODE_ENV=production PORT=${PANEL_PORT:-2607} bun .next/standalone/server.js 2>&1 | tee server.log",
     "start:events": "cd mini-services/pipeline-events && bun index.ts",
     "lint": "eslint .",

@@ -651,7 +651,21 @@ class MinerUCloudProvider {
     try {
       zipRes = await fetch(zipUrl, { signal: AbortSignal.timeout(MINERU_TIMEOUT_MS) })
     } catch (e) {
-      throw retryable(`MinerU 云产物下载失败: ${(e as Error).message}`)
+      const msg = (e as Error).message
+      // FE-008+：MinerU CDN 证书过期/网络 TLS 错误分类提示
+      // 「certificate has expired」是 MinerU 云 CDN 侧证书问题，用户无法自行修复，
+      // 给出明确指引（等待 MinerU 官方修复 / 切换 MinerU Agent / 改用 Node 引擎重试）
+      if (/certificate|CERT_|tls|ssl/i.test(msg) && /expired|invalid|self-signed|unable to verify/i.test(msg)) {
+        throw new StoreError(
+          `MinerU 云产物下载失败（TLS 证书问题）：${msg}。` +
+            `这是 MinerU 云 CDN 侧证书过期或配置问题，非本平台可修复。建议：` +
+            `① 稍后重试（MinerU 官方通常几小时内修复）；` +
+            `② 切换 MinerU 接入方式为 cloud-agent（设置→MinerU）；` +
+            `③ 在文档中心对该文档选择「Node 引擎」重试（本地解析，不依赖 MinerU CDN）。`,
+          { retryable: true },
+        )
+      }
+      throw retryable(`MinerU 云产物下载失败: ${msg}`)
     }
     if (!zipRes.ok) {
       throw new StoreError(`MinerU 云产物下载失败 (${zipRes.status})`, {
@@ -1657,6 +1671,15 @@ async function parsePdf(
 ): Promise<{ markdown: string; middle: MiddleJson }> {
   // 服务端引用 legacy build（serverExternalPackages 外部化；Node 下自动 fake worker）
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  // FE-008+ fix: standalone 构建下 fake worker 需显式 workerSrc（默认动态 import 失败）
+  // 指向 legacy/build/pdf.worker.mjs（package.json build 脚本已拷贝到 standalone）
+  try {
+    const require = (await import('node:module')).createRequire(import.meta.url)
+    const workerPath = require.resolve('pdfjs-dist/legacy/build/pdf.worker.mjs')
+    ;(pdfjs as unknown as { GlobalWorkerOptions: { workerSrc: string } }).GlobalWorkerOptions.workerSrc = workerPath
+  } catch {
+    /* worker 路径解析失败时走 fake worker 默认行为（dev 模式可用） */
+  }
   const data = new Uint8Array(await fs.readFile(filePath))
 
   // standard fonts 目录尽力解析（Helvetica 等标准字体度量）

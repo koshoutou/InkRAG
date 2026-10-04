@@ -230,6 +230,27 @@ export function TaskCenterView() {
     onError: (e: Error) => toast.error('重试失败：' + e.message),
   })
 
+  // FE-008+：MinerU 失败降级为 Node 引擎重试（清 MinerU 续传字段，engineChoice=node）
+  const retryWithNodeMutation = useMutation({
+    mutationFn: (doc: ActivityDoc) => ragApi.retryWithNode(doc.id),
+    onSuccess: (_r, doc) => {
+      toast.success(`已降级重试「${doc.filename}」：切换为 Node 引擎（不依赖 MinerU CDN）`)
+      queryClient.invalidateQueries({ queryKey: ['activity'] })
+      queryClient.invalidateQueries({ queryKey: ['docs'] })
+      queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+    },
+    onError: (e: Error) => toast.error('降级重试失败：' + e.message),
+  })
+
+  /** 是否可降级：失败阶段为 parse 且原文是 MinerU 引擎（或未指定但支持 Node 解析的格式） */
+  const canFallbackToNode = (doc: ActivityDoc): boolean => {
+    const fs = failedStageInfo(doc)
+    if (!fs || fs.stage !== 'parse') return false
+    // PDF 在降级模式有 100MB 限制（PERF-004/005），但失败重试时让用户试一次更友好
+    // （超限会在 Node 解析时再报 FALLBACK_PDF_TOO_LARGE）
+    return true
+  }
+
   const deleteMutation = useMutation({
     mutationFn: (doc: ActivityDoc) => ragApi.deleteDoc(doc.id),
     onSuccess: (r, doc) => {
@@ -479,6 +500,19 @@ export function TaskCenterView() {
                             <RotateCcw className="h-3.5 w-3.5" />
                             重试
                           </Button>
+                          {canFallbackToNode(doc) && (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="h-8 gap-1 border-sky-500/40 text-xs text-sky-600 hover:bg-sky-500/10 hover:text-sky-700 dark:text-sky-300"
+                              disabled={retryWithNodeMutation.isPending}
+                              onClick={() => retryWithNodeMutation.mutate(doc)}
+                              title="MinerU 失败时改用本地 Node 引擎重新解析（不依赖 MinerU CDN）"
+                            >
+                              <RotateCcw className="h-3.5 w-3.5" />
+                              降级重试
+                            </Button>
+                          )}
                           <Button
                             variant="outline"
                             size="sm"

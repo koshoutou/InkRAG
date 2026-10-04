@@ -220,6 +220,12 @@ export const ragApi = {
   async deleteDoc(id: string): Promise<{ ok: true; deletedChunks: number }> {
     return asJson(await req(`/api/documents/${encodeURIComponent(id)}`, { method: 'DELETE' }))
   },
+  /** FE-008+: MinerU 失败后降级为 Node 引擎重试（清 MinerU 续传字段，engineChoice=node） */
+  async retryWithNode(id: string): Promise<{ ok: true; engine: string }> {
+    return asJson(
+      await req(`/api/documents/${encodeURIComponent(id)}/retry-with-node`, { method: 'POST' }),
+    )
+  },
   /** 原始字节（PDF 等） */
   async fetchDocBytes(id: string, kind: 'source' | 'markdown' = 'source'): Promise<ArrayBuffer> {
     const res = await req(`/api/documents/${encodeURIComponent(id)}/file${qs({ kind })}`, { cache: 'force-cache' })
