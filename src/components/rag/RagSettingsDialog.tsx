@@ -341,7 +341,9 @@ export function RagSettingsDialog() {
               <div>
                 <Label htmlFor="rag-url" className="text-xs text-muted-foreground">Qdrant 服务地址</Label>
                 <Input id="rag-url" value={form.url} onChange={(e) => update('url', e.target.value)} placeholder="https://your-qdrant.example.com 或 http://localhost:6333" className="mt-1.5 h-9 text-sm" />
-                <p className="mt-1.5 text-[11px] text-muted-foreground">向量数据统一写入 Qdrant；未配置或不可达时入库/检索将直接失败（不降级本地存储，避免索引断裂）。</p>
+                <p className="mt-1.5 text-[11px] text-muted-foreground">
+                  填写 Qdrant 服务地址（默认端口 <b>6333</b>，如 <code className="font-mono">http://10.0.0.5:6333</code> 或云端 <code className="font-mono">https</code> 域名）。向量数据统一写入 Qdrant；未配置或不可达时入库/检索将直接失败（不降级本地存储，避免索引断裂）。
+                </p>
               </div>
               <div>
                 <Label htmlFor="rag-key" className="text-xs text-muted-foreground">API Key（可空）</Label>

@@ -69,6 +69,8 @@ export function DifyExportDialog({ open, onOpenChange }: { open: boolean; onOpen
 
   // ① 配置
   const [baseUrl, setBaseUrl] = useState('')
+  // A15：默认只读展示 effectiveBase，避免误填；内网/公网地址不一致时可点「编辑」切换可写
+  const [editingBase, setEditingBase] = useState(false)
   const effectiveBase = useMemo(() => {
     const b = (baseUrl || (typeof window !== 'undefined' ? window.location.origin : '')).trim()
     return b.replace(/\/v1\/?$/i, '').replace(/\/+$/, '')
@@ -156,18 +158,34 @@ export function DifyExportDialog({ open, onOpenChange }: { open: boolean; onOpen
                 <Label className="text-[11px] text-muted-foreground">API 服务器地址（勿带 /v1）</Label>
                 <div className="flex gap-1.5">
                   <Input
-                    value={baseUrl}
+                    value={editingBase ? baseUrl : effectiveBase}
                     onChange={(e) => setBaseUrl(e.target.value)}
+                    readOnly={!editingBase}
                     placeholder={typeof window !== 'undefined' ? window.location.origin : 'https://your-domain'}
-                    className="h-8 font-mono text-[11px]"
+                    className={cn('h-8 font-mono text-[11px]', !editingBase && 'bg-muted/40')}
                     aria-label="API 服务器地址"
                   />
+                  <Button
+                    variant={editingBase ? 'default' : 'outline'}
+                    size="sm"
+                    className="h-8 shrink-0 gap-1 text-[11px]"
+                    onClick={() => {
+                      if (editingBase) {
+                        // 退出编辑：若清空则回退到当前访问地址
+                        setBaseUrl((v) => (v.trim() ? v : ''))
+                      }
+                      setEditingBase((v) => !v)
+                    }}
+                    title={editingBase ? '完成编辑' : '编辑地址（内网/公网不一致时使用）'}
+                  >
+                    {editingBase ? '完成' : '编辑'}
+                  </Button>
                   <Button variant="outline" size="sm" className="h-8 shrink-0 gap-1 text-[11px]" onClick={() => copy(effectiveBase)}>
                     <Copy className="h-3 w-3" /> 复制
                   </Button>
                 </div>
                 <p className="text-[10px] leading-relaxed text-muted-foreground">
-                  默认为当前访问地址；部署到自有域名后改为公网地址（导出由 mineru.net 服务器转发，平台地址需公网可达）。
+                  默认只读展示当前访问地址；部署到自有域名且内网/公网地址不一致时点「编辑」改为公网地址（导出由 mineru.net 服务器转发，平台地址需公网可达）。
                 </p>
               </div>
             </section>
