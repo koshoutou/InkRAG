@@ -40,6 +40,8 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     const q = url.searchParams.get('q') || undefined
     // FE-010: 解析引擎筛选（mineru / fallback）
     const engine = url.searchParams.get('engine') || undefined
+    // FE-018: 按文件扩展名筛选（pdf / md / docx 等）
+    const ext = url.searchParams.get('ext') || undefined
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50') || 50, 1), 200)
     const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0') || 0, 0)
 
@@ -54,6 +56,11 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       } else {
         where.parseEngine = engine
       }
+    }
+    // FE-018: 按文件扩展名筛选（endswith 大小写不敏感）
+    if (ext) {
+      // Prisma 不直接支持 insensitive endswith on SQLite，用 contains 匹配 .ext
+      where.filename = { ...(where.filename as object), endsWith: '.' + ext.toLowerCase() }
     }
 
     const [docs, total] = await Promise.all([

@@ -73,6 +73,29 @@ export async function GET(req: NextRequest) {
       engineDistribution[key] = (engineDistribution[key] ?? 0) + r._count._all
     }
 
+    // FE-017/BE-017: 知识库容量排行榜（Top 5 按 chunk 数排序）
+    // 用于仪表盘「知识库容量排行榜」卡，让用户直观看到各库容量分布
+    const leaderboardKbs = await db.knowledgeBase.findMany({
+      orderBy: { pointCount: 'desc' },
+      take: 5,
+      select: {
+        id: true,
+        name: true,
+        docCount: true,
+        chunkCount: true,
+        pointCount: true,
+        createdAt: true,
+      },
+    })
+    const kbLeaderboard = leaderboardKbs.map((kb) => ({
+      id: kb.id,
+      name: kb.name,
+      docCount: kb.docCount,
+      chunkCount: kb.chunkCount,
+      pointCount: kb.pointCount,
+      createdAt: kb.createdAt.toISOString(),
+    }))
+
     // FE-013/BE-015/016: 流水线吞吐趋势（按 trendRange 小时桶完成/失败数）
     // 用于仪表盘「吞吐趋势」折线图，让用户直观看到流水线健康度变化
     // 1h→5min桶(12), 6h→30min桶(12), 24h→1h桶(24)
@@ -120,6 +143,8 @@ export async function GET(req: NextRequest) {
         statusFlow,
         // FE-011: 按解析引擎分布（mineru / fallback / pending）
         engineDistribution,
+        // FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序）
+        kbLeaderboard,
         // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数，0=最旧→23=当前小时）
         throughputTrend,
         // FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中）

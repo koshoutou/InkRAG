@@ -438,6 +438,65 @@ export function DashboardView() {
         )
       })()}
 
+      {/* FE-017: 知识库容量排行榜（Top 5 按 pointCount 排序） */}
+      {d.kbLeaderboard && d.kbLeaderboard.length > 0 && (() => {
+        const board = d.kbLeaderboard
+        const maxPoints = Math.max(...board.map((k) => k.pointCount || 0), 1)
+        return (
+          <div className="rounded-xl border border-border/60 bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-sm font-medium">
+                <Library className="h-3.5 w-3.5 text-muted-foreground" />
+                知识库容量排行榜
+              </span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 gap-1 text-[11px]"
+                onClick={() => setView('kbs')}
+              >
+                查看全部
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {board.map((kb, i) => {
+                const pct = maxPoints > 0 ? ((kb.pointCount || 0) / maxPoints) * 100 : 0
+                const rank = i + 1
+                const rankColor =
+                  rank === 1 ? 'bg-amber-500 text-white' :
+                  rank === 2 ? 'bg-stone-400 text-white' :
+                  rank === 3 ? 'bg-orange-600 text-white' :
+                  'bg-muted text-muted-foreground'
+                return (
+                  <div
+                    key={kb.id}
+                    className="group flex items-center gap-3 rounded-lg border border-transparent px-2 py-1.5 transition-colors hover:border-border/60 hover:bg-muted/30"
+                  >
+                    <span className={cn('flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold tabular-nums', rankColor)}>
+                      {rank}
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="truncate text-xs font-medium" title={kb.name}>{kb.name}</span>
+                        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">
+                          {formatNumber(kb.pointCount)} 点 · {formatNumber(kb.chunkCount)} chunk · {formatNumber(kb.docCount)} 文档
+                        </span>
+                      </div>
+                      <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-primary/60 to-primary transition-all"
+                          style={{ width: `${pct}%` }}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        )
+      })()}
+
       {/* 最近文档（全宽；原第二列「最近检索日志」已随 §32 移除） */}
       <div className="rounded-xl border border-border/60 bg-card">
         <div className="flex items-center justify-between border-b border-border/60 px-4 py-3">

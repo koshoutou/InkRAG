@@ -269,6 +269,15 @@ export interface DashboardData {
   statusFlow: Record<string, number>
   /** FE-011: 按解析引擎分布（mineru / fallback / pending） */
   engineDistribution?: Record<string, number>
+  /** FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序） */
+  kbLeaderboard?: Array<{
+    id: string
+    name: string
+    docCount: number
+    chunkCount: number
+    pointCount: number
+    createdAt: string
+  }>
   /** FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数，0=最旧→23=当前小时） */
   throughputTrend?: Array<{ hour: string; completed: number; failed: number }>
   /** FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中） */

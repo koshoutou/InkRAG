@@ -85,6 +85,7 @@ export function DocumentsView() {
 
   const [statusFilter, setStatusFilter] = useState<string>('all')
   const [engineFilter, setEngineFilter] = useState<string>('all')
+  const [extFilter, setExtFilter] = useState<string>('all')
   const [q, setQ] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [deleteDoc, setDeleteDoc] = useState<DocSummary | null>(null)
@@ -98,11 +99,12 @@ export function DocumentsView() {
   }, [activeKbId, kbs, setKb])
 
   const docsQuery = useQuery({
-    queryKey: ['docs', activeKbId, statusFilter, engineFilter, q],
+    queryKey: ['docs', activeKbId, statusFilter, engineFilter, extFilter, q],
     queryFn: () =>
       ragApi.listDocs(activeKbId!, {
         status: statusFilter !== 'all' ? statusFilter : undefined,
         engine: engineFilter !== 'all' ? engineFilter : undefined,
+        ext: extFilter !== 'all' ? extFilter : undefined,
         q: q.trim() || undefined,
         limit: 200,
       }),
@@ -446,6 +448,23 @@ export function DocumentsView() {
             <SelectItem value="all" className="text-xs">全部引擎</SelectItem>
             <SelectItem value="mineru" className="text-xs">MinerU</SelectItem>
             <SelectItem value="fallback" className="text-xs">本地引擎</SelectItem>
+          </SelectContent>
+        </Select>
+        {/* FE-018: 按文件类型筛选 */}
+        <Select value={extFilter} onValueChange={setExtFilter}>
+          <SelectTrigger className="h-8 w-32 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all" className="text-xs">全部类型</SelectItem>
+            <SelectItem value="pdf" className="text-xs">PDF</SelectItem>
+            <SelectItem value="md" className="text-xs">Markdown</SelectItem>
+            <SelectItem value="docx" className="text-xs">Word</SelectItem>
+            <SelectItem value="xlsx" className="text-xs">Excel</SelectItem>
+            <SelectItem value="pptx" className="text-xs">PPT</SelectItem>
+            <SelectItem value="txt" className="text-xs">文本</SelectItem>
+            <SelectItem value="html" className="text-xs">HTML</SelectItem>
+            <SelectItem value="epub" className="text-xs">EPUB</SelectItem>
           </SelectContent>
         </Select>
         <span className="ml-auto text-[11px] text-muted-foreground">
