@@ -77,6 +77,22 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.20（2026-10 · 知识库排行榜与文档类型筛选 3 项）
+
+> 本轮聚焦于让用户在仪表盘直观看到各知识库容量分布（Top 5 排行榜），并在文档中心支持按文件类型筛选，提升库管理效率。
+
+**知识库排行榜（FE-017/BE-017）**
+- **BE-017 `/api/dashboard` 增加 `kbLeaderboard` 字段**：Top 5 知识库按 `pointCount` 倒序；每项含 `id/name/docCount/chunkCount/pointCount/createdAt`。
+- **FE-017 仪表盘「知识库容量排行榜」卡**：Top 5 列表，排名徽章（1=金 `amber`，2=银 `stone`，3=铜 `orange`，4-5 灰色）；每行：排名圆徽 + 库名 + 容量进度条（按 `maxPoints` 比例）+ 文案「N 点 · N chunk · N 文档」；「查看全部」按钮跳转知识库列表。
+
+**文档类型筛选（FE-018）**
+- **FE-018 文档中心按文件类型筛选**：`/api/kb/[id]/documents` GET 增加 `ext` 查询参数（`endsWith '.ext'`）；`listDocs` 增加 `ext` 选项；DocumentsView 新增「全部类型」筛选下拉（PDF/Markdown/Word/Excel/PPT/文本/HTML/EPUB），与状态/引擎筛选并列。
+
+**E2E 验证**
+- API: `kbLeaderboard` 返回 2 个库（按 pointCount 排序）✓
+- API: `ext=pdf` 返回 2 PDF / `ext=md` 返回 1 MD ✓
+- UI: 仪表盘排行榜卡渲染 ✓ / 文档中心「全部类型」筛选渲染 ✓
+
 ### v1.19（2026-10 · 吞吐趋势时间范围切换与批量重解析选中 3 项）
 
 > 本轮聚焦于让吞吐趋势图支持 1h/6h/24h 时间范围切换（不同粒度看不同时段），并在文档中心支持对选中（而非全部）文档批量重解析。
