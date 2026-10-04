@@ -77,6 +77,26 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.9（2026-10 · 仓库治理修复与 Dify 导出链路攻坚）
+
+> 本轮为 v1.8 之后的仓库治理与 MinerU 导出问题攻坚补录：包括一次影响仓库完整性的 .gitignore 缺陷修复、MinerU「导出到 Dify」失败根因的分析实证、Dify 对接入口的产品化迁移，以及程序日志的存储可观测性。
+
+**仓库治理（重要修复）**
+- `.gitignore` 规则缺陷导致业务路由被静默忽略：bare `backups/` 等目录规则会匹配任意层级目录，曾使 `src/app/api/system/backups/` 下 9 个备份 API 路由文件从未进入仓库（线上仓库存在 UI 调用缺失 API 的坏状态）——全部目录规则改根锚定（`/backups/`），并根锚定 `db/`、`artifacts/`、`download/`、`upload/` 防同类误伤；恢复环境丢失的 `.env.example` 与 LICENSE
+- 补齐被误忽略的备份系统 9 个 API 路由（列表/创建/详情/删除/下载/恢复/Qdrant 快照恢复/快照文件/定时计划 + 快照下载），仓库与运行代码完全一致
+
+**MinerU 导出到 Dify（失败根因与修复）**
+- 分析 mineru-desktop 前端 bundle 实证导出链路架构：「检查链接/选择导出位置」是用户浏览器直连 `GET /v1/datasets`（跨域 CORS），而「导出」是浏览器 POST mineru.net 后端 `/api/v4/tasks/{taskId}/dify`，由 **mineru.net 服务器**向 `{平台地址}/v1/datasets/{id}/document/create-by-text` 做服务器端转发——因此**检查链接通过 ≠ 导出可用**，导出要求平台地址对 mineru.net 公网可达（内网 / localhost / 临时预览域名会「检查链接成功但导出失败」）
+- 以 MinerU 精确载荷（name/text/indexing_technique=high_quality/process_rule/doc_form/created_from）联调 create-by-text 通过；`docs/dify-compat.md` 新增「导出链路架构（必读）」与故障排查专行
+
+**Dify 对接入口迁移（产品化）**
+- 「Dify 导出对接」入口从 Agent API 视图迁移至**知识库视图**头部配置按钮（与入库 API `/api/input` 彻底分离、相互独立）；对接配置（平台地址自动检测 + 导出专用 Key 内联创建）+ 说明介绍一体
+- Agent API 视图收敛为纯入库 API 文档卡 + Key 管理；契约 §32/§34 与 README 入口描述同步
+
+**可观测性**
+- 程序日志存储占用接入系统运维：磁盘区新增「程序日志（N 条 · 估算）」占用条；日志卡头部显示全量条数与估算体积（`GET /api/system/oplogs` 返回 stats）
+- 程序日志定时清理（默认关闭）：保留时长（1h–1 年）+ 清理级别上限（info/warn/error）可配置，进程内调度器自动轮转（`QdrantSetting.oplogAutoClean*` 三字段）
+
 ### v1.8（2026-10 · 平台定位收敛：知识库管理 + 入库接口生态）
 
 > 本轮按「平台只做知识库管理」重新划定边界：**对外检索 API 与检索日志整体移除**（检索调用与审计由独立平台承担）；
