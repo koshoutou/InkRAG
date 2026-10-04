@@ -143,6 +143,16 @@ interface PipelineEngineState {
   tickCount: number
   /** 模块版本（dev 热重载自愈：新模块实例检测到版本更新即接管引擎） */
   moduleVersion: number
+  /**
+   * BE-005/OPS-003：备份/恢复期间暂停引擎认领新任务。
+   * paused=true 时 tick 与 mineruPollTick 直接 return（不认领新 pending、不轮询 waiting_mineru）；
+   * 已在跑的活跃任务不被中断（避免半途中断破坏数据），仅阻止新任务进入。
+   */
+  paused: boolean
+  /** 暂停原因（审计可见性，如 'backup' / 'restore'） */
+  pausedReason: string
+  /** 暂停开始时间戳（用于日志/监控） */
+  pausedAt: number | null
 }
 
 /**
@@ -191,6 +201,9 @@ export function ensurePipelineEngine(): PipelineEngineState {
       startedAt: Date.now(),
       tickCount: 0,
       moduleVersion: PIPELINE_MODULE_VERSION,
+      paused: false,
+      pausedReason: '',
+      pausedAt: null,
     }
     g.__ragPipeline = eng
   }
@@ -218,6 +231,58 @@ export function ensurePipelineEngine(): PipelineEngineState {
     void recoverStaleJobs()
   }
   return eng
+}
+
+// ---------------------------------------------------------------------------
+// BE-005/OPS-003：备份/恢复期间暂停 / 恢复引擎
+// ---------------------------------------------------------------------------
+
+/**
+ * 暂停流水线引擎：tick 与 mineruPollTick 不再认领新任务。
+ * 已在跑的活跃任务不被中断（避免半途中断破坏数据），仅阻止新 pending/waiting_mineru 进入。
+ * 重复调用安全（幂等）：仅记录最新 reason，不会叠加暂停计数。
+ */
+export function pausePipelineEngine(reason: string): void {
+  const eng = ensurePipelineEngine()
+  if (eng.paused) {
+    // 已暂停：仅更新原因（保留最早 pausedAt 便于统计暂停时长）
+    eng.pausedReason = reason
+    return
+  }
+  eng.paused = true
+  eng.pausedReason = reason
+  eng.pausedAt = Date.now()
+  console.log(`[pipeline] 引擎已暂停（reason=${reason}）：活跃任务继续，新任务暂停认领`)
+  void pipelineActivity({
+    at: Date.now(),
+    level: 'warn',
+    message: `流水线已暂停（${reason}）：活跃任务继续运行，新任务暂停认领`,
+  })
+}
+
+/**
+ * 恢复流水线引擎：清除暂停标志，tick 与 mineruPollTick 恢复认领。
+ * 重复调用安全（幂等）。
+ */
+export function resumePipelineEngine(reason: string): void {
+  const eng = ensurePipelineEngine()
+  if (!eng.paused) return
+  const dur = eng.pausedAt ? Math.round((Date.now() - eng.pausedAt) / 1000) : 0
+  eng.paused = false
+  eng.pausedReason = ''
+  eng.pausedAt = null
+  console.log(`[pipeline] 引擎已恢复（reason=${reason}，暂停 ${dur}s）`)
+  void pipelineActivity({
+    at: Date.now(),
+    level: 'info',
+    message: `流水线已恢复（${reason}，暂停 ${dur}s）`,
+  })
+}
+
+/** 查询引擎是否处于暂停态（监控/状态接口用） */
+export function isPipelinePaused(): { paused: boolean; reason: string; pausedAt: number | null } {
+  const eng = ensurePipelineEngine()
+  return { paused: eng.paused, reason: eng.pausedReason, pausedAt: eng.pausedAt }
 }
 
 /**
@@ -288,6 +353,8 @@ async function touchHeartbeat(jobId: string): Promise<void> {
 }
 
 async function tick(eng: PipelineEngineState): Promise<void> {
+  // BE-005/OPS-003：备份/恢复期间暂停认领新任务（活跃任务不中断）
+  if (eng.paused) return
   if (eng.busy) return
   eng.busy = true
   eng.tickCount++
@@ -356,6 +423,8 @@ const mineruRunningReport = new Map<string, { label: string; at: number }>()
 
 /** 轮询器单轮：收集 waiting_mineru 任务并发查远端状态（不占文档槽） */
 async function mineruPollTick(eng: PipelineEngineState): Promise<void> {
+  // BE-005/OPS-003：备份/恢复期间暂停 MinerU 轮询（避免恢复期间远端任务状态变化被写库）
+  if (eng.paused) return
   if (eng.mineruBusy) return
   eng.mineruBusy = true
   try {
@@ -1797,6 +1866,9 @@ export async function pipelineStats(): Promise<{
   completed: number
   uptimeSec: number
   concurrency: number
+  paused: boolean
+  pausedReason: string
+  pausedAt: number | null
 }> {
   const eng = ensurePipelineEngine()
   const [pending, active, waiting, cancelled, failed, completed] = await Promise.all([
@@ -1816,5 +1888,8 @@ export async function pipelineStats(): Promise<{
     completed,
     uptimeSec: Math.floor((Date.now() - eng.startedAt) / 1000),
     concurrency: CONCURRENCY,
+    paused: eng.paused,
+    pausedReason: eng.pausedReason,
+    pausedAt: eng.pausedAt,
   }
 }

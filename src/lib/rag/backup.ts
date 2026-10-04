@@ -26,8 +26,38 @@ import {
   recoverQdrantWithSnapshotFile,
 } from './qdrant-snapshots'
 import { getRagSettings } from './settings'
+import { pausePipelineEngine, resumePipelineEngine } from './pipeline'
 
 const execFileAsync = promisify(execFile)
+
+/**
+ * BE-005/OPS-003：备份/恢复期间暂停流水线引擎，带超时保护与强制恢复。
+ *
+ * - 暂停期间 tick / mineruPollTick 不认领新任务（活跃任务继续跑完）
+ * - 无论操作成功或抛错，finally 一定调用 resume（防泄漏暂停）
+ * - 额外 watchdog：PAUSE_TIMEOUT_MS 后强制 resume（防进程崩溃后引擎永久暂停）
+ */
+const PAUSE_TIMEOUT_MS = 30 * 60 * 1000 // 30 分钟上限（备份/恢复远超此时长视为异常）
+
+async function withPipelinePaused<T>(reason: string, fn: () => Promise<T>): Promise<T> {
+  pausePipelineEngine(reason)
+  // 兜底 watchdog：即使 finally 因异常未执行，超时后也会自动恢复
+  const watchdog = setTimeout(() => {
+    try {
+      resumePipelineEngine(`${reason} · 超时强制恢复`)
+      console.error(`[backup] 引擎暂停超时 ${PAUSE_TIMEOUT_MS}ms，已强制恢复（reason=${reason}）`)
+    } catch {
+      /* 兜底失败忽略 */
+    }
+  }, PAUSE_TIMEOUT_MS)
+  ;(watchdog as unknown as { unref?: () => void }).unref?.()
+  try {
+    return await fn()
+  } finally {
+    clearTimeout(watchdog)
+    resumePipelineEngine(`${reason} · 完成`)
+  }
+}
 
 /** 备份根目录（与主库 custom.db 同级：{cwd}/db/backups） */
 export const BACKUPS_ROOT = path.resolve(process.cwd(), 'db', 'backups')
@@ -195,6 +225,8 @@ export async function createBackup(
   const dir = path.join(BACKUPS_ROOT, id)
   const dbPath = path.join(dir, 'db.sqlite')
 
+  // BE-005/OPS-003：备份期间暂停流水线引擎（避免备份与流水线并发写库导致快照不一致）
+  return withPipelinePaused(`backup:${id}`, async () => {
   try {
     await fs.mkdir(dir, { recursive: true })
 
@@ -296,6 +328,7 @@ export async function createBackup(
     await fs.rm(dir, { recursive: true, force: true }).catch(() => {})
     throw e
   }
+  }) // /withPipelinePaused
 }
 
 // ---------------------------------------------------------------------------
@@ -395,6 +428,8 @@ export async function restoreBackup(
   const backupDbPath = path.join(dir, 'db.sqlite')
   if (!existsSync(backupDbPath)) throw new Error('备份缺少 db.sqlite 快照（目录不完整）')
 
+  // BE-005/OPS-003：恢复期间暂停流水线引擎（恢复会全表替换主库，与流水线并发会数据错乱）
+  return withPipelinePaused(`restore:${id}`, async () => {
   // 独立 PrismaClient 指向备份库（只读用途，用完即断开，不干扰主库连接）
   const backupClient = new PrismaClient({
     datasources: { db: { url: 'file:' + backupDbPath } },
@@ -534,6 +569,7 @@ export async function restoreBackup(
     tookMs,
     ...(warnings.length > 0 ? { warnings } : {}),
   }
+  }) // /withPipelinePaused
 }
 
 // ---------------------------------------------------------------------------
