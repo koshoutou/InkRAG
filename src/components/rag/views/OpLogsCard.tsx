@@ -51,7 +51,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { ragApi } from '../api'
-import { ErrorCard, formatDateTime, ragScrollbar } from '../ui'
+import { ErrorCard, formatDateTime, ragScrollbar, useDebouncedValue } from '../ui'
 
 export interface OpLogItem {
   id: string
@@ -122,8 +122,11 @@ export function OpLogsCard() {
   const [level, setLevel] = useState('all')
   const [category, setCategory] = useState('all')
   const [hours, setHours] = useState('24')
-  const [q, setQ] = useState('')
   const [qInput, setQInput] = useState('')
+  // FE-004 修复：原 useMemo 设 setTimeout 但 useMemo 不执行返回的 cleanup，
+  // 每次输入都新增一个未被清除的定时器，导致防抖失效并触发多次查询。
+  // 改用现有 useDebouncedValue hook（内部 useEffect + clearTimeout 正确清理）。
+  const q = useDebouncedValue(qInput.trim(), 300)
   const [expanded, setExpanded] = useState<string | null>(null)
   const [size, setSize] = useState(PAGE_SIZE)
   const [cleanOpen, setCleanOpen] = useState(false)
@@ -165,14 +168,12 @@ export function OpLogsCard() {
   // 全量统计（忽略过滤条件）：总条数 + 估算占用（后端 stats 字段）
   const stats = logsQuery.data?.stats
 
-  // 关键词 300ms 防抖
-  useMemo(() => {
-    const t = setTimeout(() => {
-      setQ(qInput.trim())
-      setSize(PAGE_SIZE)
-    }, 300)
-    return () => clearTimeout(t)
-  }, [qInput])
+  // FE-004：关键词防抖已迁移到 useDebouncedValue（上方声明）。
+  // 关键词变化时重置分页为首页大小：在输入 onChange 处直接重置，避免 effect 内 setState。
+  const onSearchChange = (v: string) => {
+    setQInput(v)
+    setSize(PAGE_SIZE)
+  }
 
   const exportJson = () => {
     const blob = new Blob([JSON.stringify(logs, null, 2)], { type: 'application/json' })
@@ -229,7 +230,7 @@ export function OpLogsCard() {
             <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
               value={qInput}
-              onChange={(e) => setQInput(e.target.value)}
+              onChange={(e) => onSearchChange(e.target.value)}
               placeholder="搜索消息 / 动作标识（doc.upload、pipeline.job_failed…）"
               className="h-8 pl-8 text-xs"
             />
