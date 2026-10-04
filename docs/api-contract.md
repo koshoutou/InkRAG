@@ -762,3 +762,26 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 **写入点**：共享层包装（kb.create / doc.upload / doc.ingest_text / kb.delete / doc.delete / doc.retry，成功 info 失败 warn+statusCode）+ pipeline 永久失败（pipeline.job_failed，error 级）+ settings.update（只记字段名）+ auth.key_* + backup.create/restore（warn 破坏性）+ instrumentation onRequestError（system/api.request_error 全局兜底）。
 **API**：`GET /api/system/oplogs?level=&category=&q=&hours=&limit=&offset=` → `{logs, total}`（detail 已 JSON.parse）；`DELETE ?olderThanHours=`（0=清空）。
 **UI**：OpsView「程序日志」卡（关键词防抖搜索 / 三级筛选 / 10s 自动刷新 / 行内详情 / 加载更多 / 导出 JSON / 二次确认清理）。
+
+## §36 面板鉴权与运行时韧性（v1.10 深度审计整改，2026-10-04）
+
+**面板访问鉴权（F-E2E-01）**
+- 密码：`PanelAuth` 单行（scrypt+16 字节盐），默认 `koshoutou` 首次访问播种；「设置 → 面板安全」修改（6-64 位，改密换发新会话）
+- 会话：HttpOnly Cookie `panel_session` = `${exp}.${HMAC(db/.panel.secret, 'session:'+exp)}`（12h；密钥文件自动生成，`PANEL_SECRET` 可注入）
+- 端点：`POST /api/auth/login|logout|password`、`GET /api/auth/session|events-ticket`（catch-all `/api/auth/[...action]`）；登录防爆破限流同 IP 5 次/30s
+- **middleware**：`/api/**` 全部管理端点需会话（401 `PANEL_AUTH_REQUIRED`）；豁免 `/api/auth`、`/api/input`（自有 Bearer Key）、`/v1`（Dify Key）——三条通道相互独立
+- 前端：未登录登录遮罩全屏接管；`req()` 401 拦截 `panel:unauthorized` 事件自动收回遮罩
+
+**事件链路鉴权（F-EXT-14，契约 §9 已更新）**：socket.io 握手需 `auth.ticket`（`GET /api/auth/events-ticket` 派发，12h）；`POST /emit` 需 `x-emit-secret: HMAC(secret,'emit')`；room 白名单 `^(global|kb:\w{10,}|doc:[\w-]{6,})$`
+
+**流水线运行时语义（F-CONC-01/02/05/06/16 + F-EXT-07/09）**
+- 延迟重试：`PipelineJob.notBefore`（2s/8s/30s+jitter 按 attempts），tick 仅认领到期任务；`retrying` 事件文案含退避秒数
+- 僵死回收 `attempts:{decrement:1}` + notBefore+2s；心跳 20s→30s（僵死阈值 120s 不变）
+- 入队背压：在途深度（pending+active+waiting_mineru）≥500 → `IngestError 429` + `Retry-After: 30`（上传/文本两入口，建行前检查）
+- MinerU 轮询：单轮任务并发 ≤4、段探测并发 ≤4、探测失败指数退避（payloadJson.nextProbeAt，5→60s）
+
+**保留与清理（F-LOC-09/11）**：引擎 tick 每 600 次惰性清扫（冷却 1h）——completed/cancelled>7d、failed>30d、QdrantCallLog>30d、队列空闲时 `PRAGMA wal_checkpoint(TRUNCATE)`
+
+**自启动与兜底（F-CONC-04/15/17/18）**：`instrumentation.register()` 自启动流水线引擎/备份调度器/日志清理调度器；`process-guards.ts` 全局 unhandledRejection/uncaughtException → ProgramLog（同类 60s 去重）；引擎定时器 unref
+
+**其它**：MinerU 流式上传/下载 + 体积感知超时（F-EXT-04/05）；`safeUnzip` 三层解压预算（F-LOC-01，ZIP_BUDGET_EXCEEDED 不可重试）；嵌入熔断/动态超时（F-EXT-01/02/03）；`qdrantHnswM` 建库可配置（F-EXT-12）；backfill 预排序+双二分（F-LOC-03）；traceId 贯穿失败日志（F-CONC-12）
