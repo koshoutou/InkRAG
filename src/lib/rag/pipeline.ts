@@ -91,6 +91,16 @@ const UPSERT_CONCURRENCY = 2
 /** 单次轮询器单轮最多处理的 waiting 任务数 */
 const MINERU_POLL_BATCH = 20
 
+// ---- F-LOC-09：终态数据保留策略（防 SQLite 无限增长）----
+/** completed/cancelled 任务保留 7 天 */
+const JOB_RETENTION_MS = 7 * 24 * 60 * 60_000
+/** failed 任务保留 30 天（排障线索，保留更久） */
+const FAILED_JOB_RETENTION_MS = 30 * 24 * 60 * 60_000
+/** 检索调用日志保留 30 天（v1.8 后不再新增，仅清存量） */
+const CALLLOG_RETENTION_MS = 30 * 24 * 60 * 60_000
+/** 清扫频率：每 600 tick（~12 分钟）检查一次，实际执行冷却 1 小时 */
+const RETENTION_SWEEP_EVERY_TICKS = 600
+
 type JobRow = NonNullable<Awaited<ReturnType<typeof db.pipelineJob.findUnique>>>
 type DocRow = NonNullable<Awaited<ReturnType<typeof db.document.findUnique>>>
 type KbRow = NonNullable<Awaited<ReturnType<typeof db.knowledgeBase.findUnique>>>
@@ -284,6 +294,10 @@ async function tick(eng: PipelineEngineState): Promise<void> {
     if (eng.tickCount % RECOVER_EVERY_TICKS === 0) {
       await recoverStaleJobs()
       sweepProgressThrottle()
+    }
+    // F-LOC-09：终态数据保留清扫（每 600 tick 检查，冷却 1h，空表零成本跳过）
+    if (eng.tickCount % RETENTION_SWEEP_EVERY_TICKS === 0) {
+      void sweepRetentions()
     }
     while (shared().active < CONCURRENCY) {
       const candidates = await db.pipelineJob.findMany({
@@ -774,6 +788,57 @@ function sweepProgressThrottle(): void {
   const cutoff = Date.now() - PROGRESS_TTL_MS
   for (const [docId, v] of progressThrottle) {
     if (v.at < cutoff) progressThrottle.delete(docId)
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F-LOC-09：终态数据保留清扫（惰性、冷却 1 小时、失败不影响 tick）
+// ---------------------------------------------------------------------------
+
+const retentionG = globalThis as unknown as { __ragRetentionLastSweep?: number }
+
+async function sweepRetentions(): Promise<void> {
+  const now = Date.now()
+  if (retentionG.__ragRetentionLastSweep && now - retentionG.__ragRetentionLastSweep < 60 * 60_000) {
+    return
+  }
+  retentionG.__ragRetentionLastSweep = now
+  try {
+    const jobCutoff = new Date(now - JOB_RETENTION_MS)
+    const failedCutoff = new Date(now - FAILED_JOB_RETENTION_MS)
+    const logCutoff = new Date(now - CALLLOG_RETENTION_MS)
+    // 终态任务：completed/cancelled > 7 天；failed > 30 天（保留排障线索更久）
+    const [doneJobs, failedJobs] = await Promise.all([
+      db.pipelineJob.deleteMany({
+        where: { status: { in: ['completed', 'cancelled'] }, finishedAt: { lt: jobCutoff } },
+      }),
+      db.pipelineJob.deleteMany({
+        where: { status: 'failed', finishedAt: { lt: failedCutoff } },
+      }),
+    ])
+    // 检索调用日志（v1.8 起不再写入，仅清存量；表缺失时静默）
+    let oldCallLogs = 0
+    try {
+      const r = await db.qdrantCallLog.deleteMany({ where: { createdAt: { lt: logCutoff } } })
+      oldCallLogs = r.count
+    } catch {
+      /* 表不存在（全新库）时静默 */
+    }
+    const total = doneJobs.count + failedJobs.count + oldCallLogs
+    if (total > 0) {
+      console.log(
+        `[pipeline] 保留策略清扫：终态任务 ${doneJobs.count + failedJobs.count} 行（completed/cancelled>7d 或 failed>30d）、调用日志 ${oldCallLogs} 行（>30d）`
+      )
+      recordOp({
+        level: 'info',
+        category: 'system',
+        action: 'system.retention_sweep',
+        message: `终态数据保留清扫：删除过期终态任务 ${doneJobs.count + failedJobs.count} 行、调用日志 ${oldCallLogs} 行`,
+        detail: { completedCancelled: doneJobs.count, failed: failedJobs.count, callLogs: oldCallLogs },
+      })
+    }
+  } catch (e) {
+    console.warn('[pipeline] 保留策略清扫失败（不影响主流程）:', (e as Error).message)
   }
 }
 
