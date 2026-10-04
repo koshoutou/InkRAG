@@ -149,6 +149,7 @@ async function handlePasswordChange(req: NextRequest) {
     return NextResponse.json({ error: '当前密码错误' }, { status: 401 })
   }
   const hashed = hashPassword(next)
+  // SEC-008+：改密同时记录 secretRotatedAt（与 rotatePanelSecret 配合，审计可见上次轮转时间）
   await db.panelAuth.update({
     where: { id: 'default' },
     data: { passwordHash: hashed.hash, passwordSalt: hashed.salt },
@@ -160,6 +161,11 @@ async function handlePasswordChange(req: NextRequest) {
   try {
     await rotatePanelSecret()
     rotated = true
+    // 记录轮转时间到 PanelAuth（审计字段，UI 可展示「上次密钥轮转」）
+    await db.panelAuth.update({
+      where: { id: 'default' },
+      data: { secretRotatedAt: new Date() },
+    })
   } catch (e) {
     // 密钥轮转失败不应阻断改密本身（密码已更新成功）；记录错误供运维排查
     rotateError = (e as Error).message
@@ -197,14 +203,17 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       // 附带是否仍为初始口令（提示用户修改）——比对 getInitialPanelPassword() 返回的口令哈希
       // 历史问题（A02）：早期比对硬编码 DEFAULT_PANEL_PASSWORD，现改为随机初始口令
       let defaultPassword = false
+      let secretRotatedAt: string | null = null
       if (authenticated) {
         const row = await db.panelAuth.findUnique({ where: { id: 'default' } })
         if (row) {
           const initial = await getInitialPanelPassword()
           defaultPassword = verifyPassword(initial, row.passwordSalt, row.passwordHash)
+          // SEC-008+：暴露上次密钥轮转时间（UI 展示「上次密钥轮转」，便于安全合规检查）
+          secretRotatedAt = row.secretRotatedAt ? row.secretRotatedAt.toISOString() : null
         }
       }
-      return NextResponse.json({ authenticated, defaultPassword })
+      return NextResponse.json({ authenticated, defaultPassword, secretRotatedAt })
     }
     return NextResponse.json({ error: '未知鉴权查询' }, { status: 404 })
   } catch (e) {

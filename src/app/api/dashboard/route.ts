@@ -73,6 +73,22 @@ export async function GET() {
         recentDocs,
         jobs: { pending: stats.pending, active: stats.active, failed: stats.failed },
         statusFlow,
+        // FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中）
+        // 前端据此在仪表盘/系统运维页展示横幅，让用户直观看到引擎非正常态
+        pipeline: {
+          pending: stats.pending,
+          active: stats.active,
+          waiting: stats.waiting,
+          completed: stats.completed,
+          failed: stats.failed,
+          uptimeSec: stats.uptimeSec,
+          concurrency: stats.concurrency,
+          paused: stats.paused,
+          pausedReason: stats.pausedReason,
+          pausedAt: stats.pausedAt,
+          draining: stats.draining,
+          drainingAt: stats.drainingAt,
+        },
       },
     })
   } catch (e: any) {

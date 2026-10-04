@@ -197,7 +197,23 @@ export interface HealthInfo {
   embedding: { mode: string; ok: boolean; dim?: number; model: string; message?: string }
   mineru: { mode: string; ok: boolean; message?: string }
   rerank: { mode: string; ok: boolean; model: string }
-  pipeline: { pending: number; active: number; failed: number; uptimeSec: number }
+  pipeline: {
+    mode: string
+    ok: boolean
+    message: string
+    pending: number
+    active: number
+    waiting?: number
+    completed?: number
+    failed: number
+    uptimeSec: number
+    concurrency?: number
+    paused?: boolean
+    pausedReason?: string
+    pausedAt?: number | null
+    draining?: boolean
+    drainingAt?: number | null
+  }
 }
 
 /** /api/system/metrics-summary（Prometheus 指标 JSON 摘要） */
@@ -251,6 +267,21 @@ export interface DashboardData {
   recentDocs: (DocSummary & { kbName: string })[]
   jobs: { pending: number; active: number; failed: number }
   statusFlow: Record<string, number>
+  /** FE-005：流水线引擎状态（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中） */
+  pipeline?: {
+    pending: number
+    active: number
+    waiting: number
+    completed: number
+    failed: number
+    uptimeSec: number
+    concurrency: number
+    paused: boolean
+    pausedReason: string
+    pausedAt: number | null
+    draining: boolean
+    drainingAt: number | null
+  }
 }
 
 // ---------------------------------------------------------------------------

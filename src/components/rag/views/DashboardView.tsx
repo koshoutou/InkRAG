@@ -15,6 +15,8 @@ import {
   Layers,
   Library,
   ListChecks,
+  PauseCircle,
+  Power,
   Sparkles,
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -104,6 +106,26 @@ export function DashboardView() {
 
   return (
     <ViewPage wide>
+      {/* FE-005：流水线引擎状态横幅（paused=备份/恢复期间暂停认领；draining=优雅关闭进行中） */}
+      {d.pipeline?.draining && (
+        <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-rose-300/60 bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-950/40 dark:text-rose-300">
+          <Power className="h-4 w-4 shrink-0 animate-pulse" />
+          <span className="font-medium">服务正在关闭</span>
+          <span className="text-rose-600/80 dark:text-rose-400/80">
+            · 正在排空活跃任务（优雅关闭），不再接收新任务。{d.pipeline.active > 0 ? `当前 ${d.pipeline.active} 个活跃任务收尾中。` : ''}
+          </span>
+        </div>
+      )}
+      {d.pipeline?.paused && !d.pipeline?.draining && (
+        <div className="mb-3 flex items-center gap-2.5 rounded-lg border border-amber-300/60 bg-amber-50 px-4 py-2.5 text-sm text-amber-700 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-300">
+          <PauseCircle className="h-4 w-4 shrink-0" />
+          <span className="font-medium">流水线已暂停</span>
+          <span className="text-amber-600/80 dark:text-amber-400/80">
+            · {d.pipeline.pausedReason || '备份/恢复进行中'}：活跃任务继续运行，新任务暂停认领。
+          </span>
+        </div>
+      )}
+
       {/* 统计卡 */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatCard icon={<Library className="h-4 w-4" />} label="知识库" value={d.totals.kbs} accent="primary" hint={`启用 chunk ${formatNumber(d.totals.enabledChunks)}`} />

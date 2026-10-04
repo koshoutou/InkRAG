@@ -148,27 +148,45 @@ export async function GET() {
 
     // ---- Pipeline ----
     const stats = await pipelineStats()
+    // BE-011：draining 时 health 整体返回 503（k8s readiness probe 据此摘流）；
+    // paused 仅告警不摘流（备份/恢复期间服务仍正常响应）
     const pipeline = {
       mode: 'engine',
-      ok: true,
-      message: `队列运行中 · pending ${stats.pending} / active ${stats.active} / failed ${stats.failed}`,
+      ok: !stats.draining,
+      message: stats.draining
+        ? `服务正在关闭（draining）：排空 ${stats.active} 个活跃任务，不再接收新任务`
+        : stats.paused
+          ? `流水线已暂停（${stats.pausedReason}）：活跃任务继续，新任务暂停认领 · pending ${stats.pending} / active ${stats.active}`
+          : `队列运行中 · pending ${stats.pending} / active ${stats.active} / failed ${stats.failed}`,
       pending: stats.pending,
       active: stats.active,
+      waiting: stats.waiting,
+      completed: stats.completed,
       failed: stats.failed,
       uptimeSec: stats.uptimeSec,
+      concurrency: stats.concurrency,
+      paused: stats.paused,
+      pausedReason: stats.pausedReason,
+      pausedAt: stats.pausedAt,
+      draining: stats.draining,
+      drainingAt: stats.drainingAt,
     }
 
-    return NextResponse.json({
-      health: {
-        qdrant,
-        vectorStore,
-        embedding,
-        mineru,
-        rerank,
-        events,
-        pipeline,
+    return NextResponse.json(
+      {
+        health: {
+          qdrant,
+          vectorStore,
+          embedding,
+          mineru,
+          rerank,
+          events,
+          pipeline,
+        },
       },
-    })
+      // draining → 503 让 k8s readiness / 网关探活摘流（liveness 仍走 /api/system/health/live 200）
+      { status: stats.draining ? 503 : 200 },
+    )
   } catch (e: any) {
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
   }

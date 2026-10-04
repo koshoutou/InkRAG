@@ -23,7 +23,9 @@ import {
   Loader2,
   MemoryStick,
   Pause,
+  PauseCircle,
   Play,
+  Power,
   Radio,
   Plus,
   RefreshCw,
@@ -567,6 +569,26 @@ export function OpsView() {
             </Button>
           </div>
         </div>
+
+        {/* FE-005：流水线引擎状态横幅（paused/draining 可见化，与仪表盘同口径） */}
+        {health?.pipeline?.draining && (
+          <div className="flex items-center gap-2.5 rounded-lg border border-rose-300/60 bg-rose-50 px-4 py-2.5 text-sm text-rose-700 dark:border-rose-500/40 dark:bg-rose-950/40 dark:text-rose-300">
+            <Power className="h-4 w-4 shrink-0 animate-pulse" />
+            <span className="font-medium">服务正在关闭（draining）</span>
+            <span className="text-rose-600/80 dark:text-rose-400/80">
+              · 正在排空活跃任务（优雅关闭），不再接收新任务。{health.pipeline.active > 0 ? `当前 ${health.pipeline.active} 个活跃任务收尾中。` : ''} k8s readiness 探针将摘流。
+            </span>
+          </div>
+        )}
+        {health?.pipeline?.paused && !health?.pipeline?.draining && (
+          <div className="flex items-center gap-2.5 rounded-lg border border-amber-300/60 bg-amber-50 px-4 py-2.5 text-sm text-amber-700 dark:border-amber-500/40 dark:bg-amber-950/40 dark:text-amber-300">
+            <PauseCircle className="h-4 w-4 shrink-0" />
+            <span className="font-medium">流水线已暂停</span>
+            <span className="text-amber-600/80 dark:text-amber-400/80">
+              · {health.pipeline.pausedReason || '备份/恢复进行中'}：活跃任务继续运行，新任务暂停认领。{health.pipeline.active > 0 ? `（当前 ${health.pipeline.active} 个活跃任务）` : ''}
+            </span>
+          </div>
+        )}
 
         {/* 健康矩阵 */}
         {healthQuery.isLoading ? (

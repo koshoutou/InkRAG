@@ -90,6 +90,8 @@ model PanelAuth {
   passwordHash  String
   /// 16 字节随机盐十六进制
   passwordSalt  String
+  /// SEC-008+：面板密钥（db/.panel.secret）上次轮转时间（改密时同步轮转，null=从未轮转/旧库未迁移）
+  secretRotatedAt DateTime?
   createdAt     DateTime @default(now())
   updatedAt     DateTime @updatedAt
 }

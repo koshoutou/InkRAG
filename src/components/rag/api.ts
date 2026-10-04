@@ -316,7 +316,7 @@ export const ragApi = {
   },
 
   // -- 面板鉴权（/api/auth）------------------------------------------------
-  async getAuthSession(): Promise<{ authenticated: boolean; defaultPassword: boolean }> {
+  async getAuthSession(): Promise<{ authenticated: boolean; defaultPassword: boolean; secretRotatedAt: string | null }> {
     return asJson(await req('/api/auth/session', { cache: 'no-store' }))
   },
   async panelLogin(password: string): Promise<{ ok: true }> {

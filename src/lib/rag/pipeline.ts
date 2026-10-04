@@ -153,6 +153,14 @@ interface PipelineEngineState {
   pausedReason: string
   /** 暂停开始时间戳（用于日志/监控） */
   pausedAt: number | null
+  /**
+   * BE-010 follow-up：优雅关闭进行中标志。
+   * draining=true 表示 drainForShutdown 已启动（SIGTERM/SIGINT 收到），
+   * k8s readiness probe 应据此返回 503（不再接新请求），liveness 仍 200。
+   */
+  draining: boolean
+  /** 优雅关闭开始时间戳 */
+  drainingAt: number | null
 }
 
 /**
@@ -204,6 +212,8 @@ export function ensurePipelineEngine(): PipelineEngineState {
       paused: false,
       pausedReason: '',
       pausedAt: null,
+      draining: false,
+      drainingAt: null,
     }
     g.__ragPipeline = eng
   }
@@ -286,6 +296,15 @@ export function isPipelinePaused(): { paused: boolean; reason: string; pausedAt:
 }
 
 /**
+ * BE-010 follow-up：查询引擎是否处于优雅关闭（draining）态。
+ * k8s readiness probe 据此返回 503（不再接新请求），liveness 仍 200。
+ */
+export function isPipelineDraining(): { draining: boolean; drainingAt: number | null } {
+  const eng = ensurePipelineEngine()
+  return { draining: eng.draining, drainingAt: eng.drainingAt }
+}
+
+/**
  * BE-010：优雅关闭——暂停新任务 + Abort 所有活跃 Controller + 等待活跃任务退出或超时。
  *
  * 步骤：
@@ -300,6 +319,9 @@ export function isPipelinePaused(): { paused: boolean; reason: string; pausedAt:
 export async function drainForShutdown(timeoutMs = 30_000): Promise<{ drained: boolean; activeLeft: number; waitedMs: number }> {
   const eng = ensurePipelineEngine()
   const t0 = Date.now()
+  // 0) 标记 draining（k8s readiness probe 据此返回 503）
+  eng.draining = true
+  eng.drainingAt = t0
   // 1) 暂停新任务认领
   pausePipelineEngine('shutdown')
   // 2) Abort 所有活跃 Controller（活跃任务在下一个检查点安静退出）
@@ -1919,6 +1941,8 @@ export async function pipelineStats(): Promise<{
   paused: boolean
   pausedReason: string
   pausedAt: number | null
+  draining: boolean
+  drainingAt: number | null
 }> {
   const eng = ensurePipelineEngine()
   const [pending, active, waiting, cancelled, failed, completed] = await Promise.all([
@@ -1941,5 +1965,7 @@ export async function pipelineStats(): Promise<{
     paused: eng.paused,
     pausedReason: eng.pausedReason,
     pausedAt: eng.pausedAt,
+    draining: eng.draining,
+    drainingAt: eng.drainingAt,
   }
 }

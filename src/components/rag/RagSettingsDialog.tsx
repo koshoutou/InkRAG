@@ -202,6 +202,8 @@ export function RagSettingsDialog() {
   const [pwdNext, setPwdNext] = useState('')
   const [pwdConfirm, setPwdConfirm] = useState('')
   const [pwdBusy, setPwdBusy] = useState(false)
+  // SEC-008+：上次密钥轮转时间（从 /api/auth/session 读取，改密成功后刷新）
+  const [secretRotatedAt, setSecretRotatedAt] = useState<string | null>(null)
 
   useEffect(() => {
     if (!open) {
@@ -232,6 +234,15 @@ export function RagSettingsDialog() {
       })
       .catch((e) => {
         if (!cancelled) toast.error('读取设置失败：' + (e as Error).message)
+      })
+    // SEC-008+：读取上次密钥轮转时间（与 settings 并行，不阻塞表单加载）
+    ragApi
+      .getAuthSession()
+      .then((s) => {
+        if (!cancelled) setSecretRotatedAt(s.secretRotatedAt)
+      })
+      .catch(() => {
+        /* 非关键路径，失败静默 */
       })
     return () => {
       cancelled = true
@@ -591,6 +602,15 @@ export function RagSettingsDialog() {
                 面板访问密码用于登录本管理面板（Cookie 会话 12 小时，连续失败 5 次锁定 30 秒）；与
                 <span className="font-mono"> /api/input </span>入库 API Key、Dify 导出密钥相互独立。密码以 scrypt 哈希存储，平台不保存明文。
               </div>
+              {/* SEC-008+：上次密钥轮转时间（改密时同步轮转 HMAC 密钥，使旧会话/API Key 签名失效） */}
+              <div className="flex items-center justify-between rounded-md border bg-muted/20 px-3 py-2 text-[11px]">
+                <span className="text-muted-foreground">上次密钥轮转</span>
+                <span className={cn('font-mono tabular-nums', secretRotatedAt ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400')}>
+                  {secretRotatedAt
+                    ? `${new Date(secretRotatedAt).toLocaleString('zh-CN', { hour12: false })}（改密时自动轮转）`
+                    : '从未轮转（改密后将自动轮转密钥，使旧会话失效）'}
+                </span>
+              </div>
               <div>
                 <Label htmlFor="panel-pwd-current" className="text-xs text-muted-foreground">当前密码</Label>
                 <Input
@@ -661,6 +681,10 @@ export function RagSettingsDialog() {
                     setPwdNext('')
                     setPwdConfirm('')
                     setPanelAuth(true, false)
+                    // SEC-008+：改密成功后刷新「上次密钥轮转」时间展示
+                    if (r.secretRotated) {
+                      setSecretRotatedAt(new Date().toISOString())
+                    }
                   } catch (e) {
                     toast.error('修改失败：' + (e as Error).message)
                   } finally {
