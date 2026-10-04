@@ -272,7 +272,7 @@ src/lib/
   无票据/过期/伪造 → 服务端拒绝握手（前端收到 connect_error 后自动取新票重连）
 - 客户端 `emit('subscribe', { rooms: string[] })`，room 名白名单校验（正则 `^(global|kb:[A-Za-z0-9]{10,}|doc:[A-Za-z0-9-]{6,})$`）：
   `kb:{kbId}`、`doc:{docId}`、`global`；白名单外的房间名会被拒绝并告警
-- 服务端事件（mini-service 收到 POST /emit 后广播；emit 调用需携带 `x-emit-secret` 请求头 = HMAC(db/.panel.secret, 'emit')，仅主应用流水线可广播）：
+- 服务端事件（mini-service 收到 POST /emit 后广播；emit 调用需携带 `x-inkrag-emit-secret`（旧名 `x-emit-secret` 兼容读取） 请求头 = HMAC(db/.panel.secret, 'emit')，仅主应用流水线可广播）：
   - `document:status` `{ docId, kbId, status, stageProgress, errorCode?, errorMessage? }`
   - `document:progress` `{ docId, kbId, stage, progress, message? }`（阶段内部进度）
   - `document:done` `{ docId, kbId, status, chunkCount, tookMs }`
@@ -772,7 +772,7 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 - **middleware**：`/api/**` 全部管理端点需会话（401 `PANEL_AUTH_REQUIRED`）；豁免 `/api/auth`、`/api/input`（自有 Bearer Key）、`/v1`（Dify Key）——三条通道相互独立
 - 前端：未登录登录遮罩全屏接管；`req()` 401 拦截 `panel:unauthorized` 事件自动收回遮罩
 
-**事件链路鉴权（F-EXT-14，契约 §9 已更新）**：socket.io 握手需 `auth.ticket`（`GET /api/auth/events-ticket` 派发，12h）；`POST /emit` 需 `x-emit-secret: HMAC(secret,'emit')`；room 白名单 `^(global|kb:\w{10,}|doc:[\w-]{6,})$`
+**事件链路鉴权（F-EXT-14，契约 §9 已更新）**：socket.io 握手需 `auth.ticket`（`GET /api/auth/events-ticket` 派发，12h）；`POST /emit` 需 `x-inkrag-emit-secret: HMAC(secret,'emit')`（旧名兼容）；room 白名单 `^(global|kb:\w{10,}|doc:[\w-]{6,})$`
 
 **流水线运行时语义（F-CONC-01/02/05/06/16 + F-EXT-07/09）**
 - 延迟重试：`PipelineJob.notBefore`（2s/8s/30s+jitter 按 attempts），tick 仅认领到期任务；`retrying` 事件文案含退避秒数

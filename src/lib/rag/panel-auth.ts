@@ -7,7 +7,7 @@
  * - 会话：HttpOnly Cookie `panel_session` = `${expTs}.${HMAC-SHA256(secret, 'session:'+expTs)}`
  * - 事件票据：socket.io 握手 auth.ticket = `${expTs}.${HMAC(secret, 'events:'+expTs)}`
  *   （mini-service pipeline-events 用同一密钥文件校验，见 mini-services/pipeline-events/index.ts）
- * - emit 密钥：`x-emit-secret: HMAC(secret, 'emit')`（Next → 2609 /emit 服务间调用头）
+ * - emit 密钥：`x-inkrag-emit-secret: HMAC(secret, 'emit')`（Next → 2609 /emit 服务间调用头）
  *
  * 密钥文件：db/.panel.secret（32 字节随机 hex，gitignore 覆盖 /db/；首次访问自动生成，
  * 跨重启稳定 → 已登录会话与事件票据不失效）。可用环境变量 PANEL_SECRET 覆盖（部署时注入）。
@@ -125,7 +125,7 @@ export async function verifyEventsTicket(ticket: string | undefined | null): Pro
   return verifyToken(await getPanelSecret(), 'events', ticket)
 }
 
-/** 服务间 emit 调用密钥（Next 流水线 → 2609 /emit 请求头 x-emit-secret） */
+/** 服务间 emit 调用密钥（Next 流水线 → 2609 /emit 请求头 x-inkrag-emit-secret） */
 export async function eventsEmitSecret(): Promise<string> {
   return hmacHex(await getPanelSecret(), 'emit')
 }

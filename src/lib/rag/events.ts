@@ -38,7 +38,7 @@ export async function emitToRoom(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-emit-secret': await eventsEmitSecret(),
+        'x-inkrag-emit-secret': await eventsEmitSecret(),
       },
       body: JSON.stringify({ room, event, data }),
       signal: AbortSignal.timeout(EMIT_TIMEOUT_MS),

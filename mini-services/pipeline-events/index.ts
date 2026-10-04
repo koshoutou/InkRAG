@@ -223,12 +223,13 @@ const emitServer = createServer(async (req: IncomingMessage, res: ServerResponse
 
   if (req.method === 'POST' && req.url === '/emit') {
     // F-EXT-14：服务间 emit 密钥校验（仅主应用流水线可广播；密钥 = HMAC(secret, 'emit')）
-    const provided = String(req.headers['x-emit-secret'] ?? '')
+    // A18：请求头命名空间化 x-emit-secret → x-inkrag-emit-secret
+    const provided = String(req.headers['x-inkrag-emit-secret'] ?? req.headers['x-emit-secret'] ?? '')
     const expected = hmacHex(await getSecret(), 'emit')
     if (!expected || !provided || !safeEqualHex(provided, expected)) {
-      console.warn('[pipeline-events] 拒绝未授权 emit 调用（缺少/错误 x-emit-secret）')
+      console.warn('[pipeline-events] 拒绝未授权 emit 调用（缺少/错误 x-inkrag-emit-secret）')
       res.writeHead(403, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ error: 'forbidden: x-emit-secret required' }))
+      res.end(JSON.stringify({ error: 'forbidden: x-inkrag-emit-secret required' }))
       return
     }
     let body = ''
