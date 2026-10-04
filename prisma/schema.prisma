@@ -77,6 +77,21 @@ model QdrantSetting {
 }
 
 // ---------------------------------------------------------------------------
+// 面板访问鉴权（单行记录，id 固定为 "default"）
+// 默认密码 koshoutou 首次访问时播种；scrypt+NACL 盐哈希存储，改密走 /api/auth/password
+// 会话令牌 = HMAC(db/.panel.secret)（进程间共享，socket.io 事件链路鉴权同源）
+// ---------------------------------------------------------------------------
+model PanelAuth {
+  id            String   @id @default("default")
+  /// scrypt(password, salt) 十六进制（128 字节）
+  passwordHash  String
+  /// 16 字节随机盐十六进制
+  passwordSalt  String
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+}
+
+// ---------------------------------------------------------------------------
 // 检索调用日志（基座 QdrantCallLog —— 即计划书 §9.1 retrieval_log，可回放）
 // ---------------------------------------------------------------------------
 model QdrantCallLog {
