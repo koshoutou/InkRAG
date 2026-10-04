@@ -96,6 +96,18 @@ function verifyToken(secret: string, purpose: string, token: unknown): boolean {
  *  global | kb:{cuid 等 ≥10 位字母数字} | doc:{uuid 等 ≥6 位字母数字连字符} */
 const ROOM_RE = /^(global|kb:[A-Za-z0-9]{10,}|doc:[A-Za-z0-9-]{6,})$/
 
+/**
+ * /emit 事件类型白名单（BE-001：阻断事件伪造——仅有权调用方也只能广播已知事件，
+ * 防止伪造 `document:done` / `kb:stats` 等事件欺骗前端刷新状态/隐藏失败）。
+ * 来源：src/lib/rag/events.ts + chunkedit.ts + testset.ts 全量 emit 调用点。 */
+const EMIT_EVENT_RE =
+  /^(chunk:update|document:done|document:progress|document:status|job:update|kb:stats|pipeline:activity|testrun:progress)$/
+
+/** 校验 room 名（订阅与 /emit 共用，返回 true=合法） */
+function isValidRoom(room: string): boolean {
+  return typeof room === 'string' && room.length > 0 && room.length < 128 && ROOM_RE.test(room)
+}
+
 // ---------------------------------------------------------------------------
 // 0) globalThis 单例守护（Task 16：bun --hot 模块重载时复用既有 server/io 实例）
 //
@@ -158,7 +170,7 @@ io.on('connection', (socket: Socket) => {
       ? data.rooms.filter((r) => typeof r === 'string' && r.length > 0 && r.length < 128).slice(0, 32)
       : []
     const rooms = requested.filter((r) => {
-      if (ROOM_RE.test(r)) return true
+      if (isValidRoom(r)) return true
       console.warn(`[pipeline-events] 拒绝白名单外房间订阅: ${r.slice(0, 64)}`)
       return false
     })
@@ -246,7 +258,22 @@ const emitServer = createServer(async (req: IncomingMessage, res: ServerResponse
           res.end(JSON.stringify({ error: 'event required' }))
           return
         }
-        if (room) {
+        // BE-001：事件类型白名单校验（阻断事件伪造）
+        if (!EMIT_EVENT_RE.test(event)) {
+          console.warn(`[pipeline-events] 拒绝白名单外事件 emit: ${event.slice(0, 64)}`)
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: `event not allowed: ${event}` }))
+          return
+        }
+        // BE-001：room 名白名单校验（与 subscribe 同规则；阻断任意房间广播）
+        // room 缺省时仍允许广播到全部（io.emit）——这是已有契约，前端 global 频道靠此实现。
+        if (room !== undefined && room !== '') {
+          if (!isValidRoom(room)) {
+            console.warn(`[pipeline-events] 拒绝白名单外房间 emit: ${String(room).slice(0, 64)}`)
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: `room not allowed: ${room}` }))
+            return
+          }
           io.to(room).emit(event, data ?? {})
         } else {
           io.emit(event, data ?? {})
