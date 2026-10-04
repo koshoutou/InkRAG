@@ -117,9 +117,12 @@ function resolveChunkSnap(kb: KnowledgeBase, opts?: IngestOptions): string {
   return kb.chunkConfig
 }
 
-/** 组装 metaJson（engineChoice 优先级高于全局路由，14-e 语义） */
+/** 组装 metaJson（engineChoice 优先级高于全局路由，14-e 语义；F-CONC-12：traceId 供跨层排障串联） */
 function resolveMetaJson(opts?: IngestOptions): string | undefined {
-  return opts?.engine ? JSON.stringify({ engineChoice: opts.engine }) : undefined
+  return JSON.stringify({
+    traceId: randomUUID(),
+    ...(opts?.engine ? { engineChoice: opts.engine } : {}),
+  })
 }
 
 /** 秒传判定（同 kb + contentHash + parseConfigV） */
@@ -269,7 +272,7 @@ async function ingestTextContentImpl(
       parseConfigV: 1,
       chunkConfigSnap: resolveChunkSnap(kb, opts),
       storageKey: `${kb.id}/${docId}/`,
-      ...(resolveMetaJson(opts) ? { metaJson: resolveMetaJson(opts) } : {}),
+      ...(() => { const m = resolveMetaJson(opts); return m ? { metaJson: m } : {} })(),
     },
   })
   await enqueueDocument(doc.id, 'parse')

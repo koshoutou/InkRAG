@@ -685,13 +685,22 @@ async function handleJobFailure(job: JobRow, e: unknown, startedAt: number): Pro
   } catch (err) {
     console.error('[pipeline] 失败状态回写异常:', err)
   }
-  // Task 17-5：永久失败落程序日志（重试中的失败在活动流可见，此处只记终态）
+  // Task 17-5：永久失败落程序日志（重试中的失败在活动流可见，此处只记终态）；
+  // F-CONC-12：detail 附 traceId（入库时生成、存文档 metaJson）供跨层排障串联
+  let traceId: string | undefined
+  try {
+    const d = await db.document.findUnique({ where: { id: job.documentId }, select: { metaJson: true } })
+    const t = safeParseJson(d?.metaJson ?? '{}').traceId
+    if (typeof t === 'string') traceId = t
+  } catch {
+    /* 文档可能已删 */
+  }
   recordOp({
     level: 'error',
     category: 'pipeline',
     action: 'pipeline.job_failed',
     message: `流水线任务永久失败（${job.type}，attempts ${job.attempts}/${job.maxAttempts}）：${message}`,
-    detail: { jobId: job.id, type: job.type, code, durationMs },
+    detail: { jobId: job.id, type: job.type, code, durationMs, ...(traceId ? { traceId } : {}) },
     statusCode: 500,
     docId: job.documentId,
   })

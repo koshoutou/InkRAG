@@ -173,6 +173,26 @@ export async function PUT(req: NextRequest) {
     // 用落库后的真实值测试（掩码值从不落库，row.apiKey 一定是真实密钥或空串）
     testResult = await testConnection(row.url, row.apiKey)
   }
+  // F-LOC-13：MinerU 接入方式切换时，在途 waiting_mineru 任务会用新 provider 探测旧
+  // jobId → 判 gone → 自动重新上传提交（自愈但重传耗配额）——返回明确警示 + 审计记录
+  let providerSwitchWarning: string | undefined
+  if (data.mineruProvider !== undefined && existing && data.mineruProvider !== existing.mineruProvider) {
+    try {
+      const inFlight = await db.pipelineJob.count({ where: { status: 'waiting_mineru' } })
+      if (inFlight > 0) {
+        providerSwitchWarning = `MinerU 接入方式已从 ${existing.mineruProvider} 切换为 ${data.mineruProvider}：${inFlight} 个在途解析任务将自动重新提交（远端任务 ID 不跨 provider 迁移，重传会消耗新 provider 配额）`
+        recordOp({
+          level: 'warn',
+          category: 'system',
+          action: 'settings.mineru_provider_switched',
+          message: providerSwitchWarning,
+          detail: { from: existing.mineruProvider, to: data.mineruProvider, inFlight },
+        })
+      }
+    } catch {
+      /* 统计失败不阻断保存 */
+    }
+  }
   recordOp({
     level: 'info',
     category: 'system',
@@ -184,6 +204,7 @@ export async function PUT(req: NextRequest) {
   })
   return NextResponse.json({
     ok: true,
+    ...(providerSwitchWarning ? { warning: providerSwitchWarning } : {}),
     settings: serializeSettings(row),
     test: testResult,
   })
