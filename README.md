@@ -77,6 +77,24 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.15（2026-10 · MinerU 降级重试与 standalone PDF worker 修复 2 项）
+
+> 本轮通过 E2E 测试发现 MinerU 云 CDN 证书过期导致 PDF 解析永久失败的链路问题，补全降级重试机制并修复 standalone 构建下 pdfjs worker 文件缺失。
+
+**MinerU 降级重试（FE-008+）**
+- **新增 `/api/documents/[id]/retry-with-node` 路由**：MinerU 失败后把 `engineChoice` 改为 `node`（本地解析器），清 MinerU 续传字段（jobId/uploadId/fileId），失败 parse job 重置为 pending。记录 `fallbackFromMineru` + `fallbackAt` 审计字段。
+- **MinerU CDN TLS 错误分类提示**：`downloadZip` 检测 `certificate/CERT_/tls/ssl` + `expired/invalid/self-signed` 错误，给出明确指引（① 稍后重试 ② 切 cloud-agent ③ Node 引擎重试），不再笼统报「下载失败」。
+- **TaskCenterView 失败任务卡新增「降级重试」按钮**（蓝色，仅 parse 阶段失败显示）：`canFallbackToNode` 判定失败阶段为 parse 即可降级（PDF 受 PERF-004/005 100MB 限制，超限会在 Node 解析时再报 `FALLBACK_PDF_TOO_LARGE`）。
+
+**standalone PDF worker 修复（PERF-006）**
+- **问题**：`next build` standalone 未拷贝 `pdfjs-dist/legacy/build/pdf.worker.mjs` → fake worker 动态 import `./pdf.worker.mjs` 失败 → Node 解析 PDF 报「Setting up fake worker failed: Cannot find module」。
+- **修复**：`package.json` build 脚本增加 `cp pdf.worker.mjs` + `pdf.worker.min.mjs` 到 standalone；`mineru.ts` `parsePdf` 显式设置 `GlobalWorkerOptions.workerSrc = require.resolve(...)`（dev 模式原生可用，standalone 模式文件已拷贝可解析）。
+
+**E2E 验证**
+- 上传 PDF (MinerU engine) → MinerU CDN 证书过期失败 ✓
+- `retry-with-node` → engineChoice=node + 清 MinerU 字段 ✓
+- Node fallback 解析 PDF → parse→chunk→embed→ready，10s 内完成，1 chunk，parseEngine=fallback ✓
+
 ### v1.14（2026-10 · UI 可见化深化与 E2E 验证 3 项）
 
 > 本轮聚焦于仪表盘与运维页的流水线状态可视化深化，并完成完整 E2E RAG 流水线验证（创建知识库 → 上传文档 → parse→chunk→embed→ready 全链路跑通）。
