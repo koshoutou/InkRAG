@@ -55,7 +55,10 @@ export async function POST(req: NextRequest, ctx: Ctx) {
     )
   } catch (e: any) {
     if (e instanceof IngestError) {
-      return NextResponse.json({ error: e.message }, { status: e.status })
+      // F-CONC-05：429 背压时附带 Retry-After（秒）
+      const res = NextResponse.json({ error: e.message }, { status: e.status })
+      if (e.status === 429 && e.retryAfterSec) res.headers.set('Retry-After', String(e.retryAfterSec))
+      return res
     }
     return NextResponse.json({ error: e?.message ?? String(e) }, { status: 500 })
   }

@@ -1700,6 +1700,36 @@ export async function cancelDocumentJobs(docId: string): Promise<number> {
 // 对外接口
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// F-CONC-05/16：入队背压——pending 无长度上限，批量拖拽 500+ 文件会同步产生
+// 500 job 行 + 500 产物目录，磁盘/DB/API 配额全链承压且无任何拒绝信号。
+// 在「建文档行之前」检查在途深度（含延迟重试的 pending），超限抛 QueueFullError
+// 由 ingest 层转 429（带 Retry-After），调用方（UI/MCP/Dify）可感知退避。
+// ---------------------------------------------------------------------------
+
+/** 在途队列深度上限（pending + active + waiting_mineru；与并发 2 / MinerU 槽 2 匹配的缓冲余量） */
+export const MAX_QUEUE_DEPTH = 500
+
+export class QueueFullError extends Error {
+  depth: number
+  constructor(depth: number) {
+    super(`QUEUE_FULL: 当前在途任务 ${depth} 已达上限 ${MAX_QUEUE_DEPTH}，请等待队列消化后重试`)
+    this.name = 'QueueFullError'
+    this.depth = depth
+  }
+}
+
+/** 入队前容量检查（在建文档行之前调用，保证拒绝时不留半写状态） */
+export async function assertQueueCapacity(): Promise<void> {
+  const [pending, active, waiting] = await Promise.all([
+    db.pipelineJob.count({ where: { status: 'pending' } }),
+    db.pipelineJob.count({ where: { status: 'active' } }),
+    db.pipelineJob.count({ where: { status: 'waiting_mineru' } }),
+  ])
+  const depth = pending + active + waiting
+  if (depth >= MAX_QUEUE_DEPTH) throw new QueueFullError(depth)
+}
+
 /** 文档入队（upload / reparse / rechunk / retry 动作统一入口） */
 export async function enqueueDocument(
   docId: string,

@@ -20,7 +20,7 @@ import { once } from 'node:events'
 import path from 'node:path'
 import { db } from '@/lib/db'
 import { ensureDocDir, sourcePath, ARTIFACTS_ROOT } from './artifacts'
-import { enqueueDocument } from './pipeline'
+import { QueueFullError, assertQueueCapacity, enqueueDocument } from './pipeline'
 import { parseChunkConfig } from './serialize'
 import { ALL_ACCEPTED_EXTS, extToMime } from './parsers/formats'
 import type { Document, KnowledgeBase } from '@prisma/client'
@@ -30,9 +30,12 @@ export const INGEST_MAX_FILE_BYTES = 200 * 1024 * 1024 // 单文件 200MB（与 
 
 export class IngestError extends Error {
   status: number
-  constructor(status: number, message: string) {
+  /** 429 时附带 Retry-After 秒数（响应层写头） */
+  retryAfterSec?: number
+  constructor(status: number, message: string, retryAfterSec?: number) {
     super(message)
     this.status = status
+    this.retryAfterSec = retryAfterSec
   }
 }
 
@@ -176,6 +179,13 @@ async function persistDocumentRow(
  * deduplicated=true 时 tmpPath 已清理、不产生新流水线任务。
  */
 async function ingestUploadFileImpl(kb: KnowledgeBase, file: File, opts?: IngestOptions): Promise<IngestResult> {
+  // F-CONC-05：入队背压（建行前检查，拒绝时不留半写状态）
+  await assertQueueCapacity().catch((e) => {
+    if (e instanceof QueueFullError) {
+      throw new IngestError(429, `${e.message}（建议分批上传或稍后重试）`, 30)
+    }
+    throw e
+  })
   const filename = file.name || 'untitled'
   const ext = checkFile(filename, file.size)
   const { tmpPath, sizeBytes, contentHash } = await streamToTemp(file, filename)
@@ -216,6 +226,13 @@ async function ingestTextContentImpl(
   text: string,
   opts?: IngestOptions,
 ): Promise<IngestResult> {
+  // F-CONC-05：入队背压（文本入库同样受限）
+  await assertQueueCapacity().catch((e) => {
+    if (e instanceof QueueFullError) {
+      throw new IngestError(429, `${e.message}（建议稍后重试）`, 30)
+    }
+    throw e
+  })
   const rawName = String(name ?? '').trim() || 'untitled.md'
   let filename = rawName
   let ext = path.extname(rawName).toLowerCase().replace('.', '')
