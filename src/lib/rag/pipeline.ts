@@ -365,12 +365,16 @@ async function pollOneMineruJob(
 ): Promise<void> {
   try {
     const doc = await db.document.findUnique({ where: { id: job.documentId } })
-    if (!doc) return // 文档/库已删（级联会清理本行）
+    if (!doc) {
+      mineruRunningReport.delete(job.id) // F-LOC-10：终态分支统一清理，防 Map 泄漏
+      return // 文档/库已删（级联会清理本行）
+    }
 
     // 16-b：句柄解析统一走 parsePersistedHandle（单任务 / PDF 多段复合句柄 JSON）
     const handle = parsePersistedHandle(doc)
     if (!handle) {
       // 断点字段被清（重解析重置）→ 回 pending 从头跑 parse
+      mineruRunningReport.delete(job.id) // F-LOC-10
       await db.pipelineJob.updateMany({
         where: { id: job.id, status: 'waiting_mineru' },
         data: { status: 'pending', payloadJson: '{}' },
@@ -380,6 +384,7 @@ async function pollOneMineruJob(
 
     // 远端任务等待上限（防永久挂起；重试时 probe gone → 重新提交）
     if (job.startedAt && Date.now() - job.startedAt.getTime() > MINERU_WAIT_CAP_MS) {
+      mineruRunningReport.delete(job.id) // F-LOC-10
       await handleJobFailure(
         job,
         new StoreError('MinerU 远端任务等待超时（6 小时）——请检查 MinerU 服务状态', { retryable: true }),

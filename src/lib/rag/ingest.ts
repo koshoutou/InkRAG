@@ -87,11 +87,18 @@ async function streamToTemp(file: File, filename: string): Promise<{ tmpPath: st
         if (!ws.write(value)) await once(ws, 'drain')
       }
     }
+  } catch (e) {
+    // F-E2E-05：413 中断/读取异常时清理半写临时文件（此前 .upload-*.part 残留磁盘）
+    await fs.rm(tmpPath, { force: true }).catch(() => {})
+    throw e
   } finally {
     ws.end()
     await once(ws, 'finish')
   }
-  if (sizeBytes === 0) throw new IngestError(400, '上传文件为空')
+  if (sizeBytes === 0) {
+    await fs.rm(tmpPath, { force: true }).catch(() => {})
+    throw new IngestError(400, '上传文件为空')
+  }
   return { tmpPath, sizeBytes, contentHash: hash.digest('hex') }
 }
 

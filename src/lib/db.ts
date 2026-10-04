@@ -11,7 +11,10 @@ export const db =
     log: ['error', 'warn'],
   })
 
-if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+// F-LOC-07：无条件缓存——原条件（仅非 production 缓存）疑似写反，Next standalone 生产模式下
+// 不同 route chunk 会各自实例化 client → 连接池膨胀 + SQLITE_BUSY 写锁竞争。
+// 单机单进程定位下全局唯一 client 是正确语义（dev 热重载也复用）。
+if (!globalForPrisma.prisma) globalForPrisma.prisma = db
 
 /**
  * SQLite 健壮性 PRAGMA 预热（Task 15-b / 审计 #6）：
