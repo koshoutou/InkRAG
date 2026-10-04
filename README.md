@@ -77,6 +77,21 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.19（2026-10 · 吞吐趋势时间范围切换与批量重解析选中 3 项）
+
+> 本轮聚焦于让吞吐趋势图支持 1h/6h/24h 时间范围切换（不同粒度看不同时段），并在文档中心支持对选中（而非全部）文档批量重解析。
+
+**吞吐趋势时间范围（FE-015/BE-016）**
+- **BE-016 `/api/dashboard` 支持 `trendRange` 查询参数**：`?trendRange=1h|6h|24h`（默认 24h）；桶大小自适应（1h→5min桶 12 个，6h→30min桶 12 个，24h→1h桶 24 个）；桶标签自适应（1h/6h→`HH:MM`，24h→`HH:00`）；查询范围动态计算。
+- **FE-015 仪表盘吞吐趋势时间范围切换**：DashboardView 新增 `trendRange` state；`useQuery` queryKey 加入 trendRange（切换时重新请求）；趋势卡顶部增加 1h/6h/24h 按钮组（选中态 primary 高亮）；移除原静态「近 24h」文案。
+
+**文档中心批量重解析选中（FE-016）**
+- **FE-016 文档中心「批量重解析选中」按钮**：`runBatchReparseSelected` 仅对 `selectedIds` 中的文档 `reparse`（而非全部 ready/failed）；violet 配色 + 数量 Badge，仅在 `selectedIds.size>0` 显示；与「批量删除」并列形成选中后操作组；成功后清空选中 + 刷新 docs/dashboard。
+
+**E2E 验证**
+- API: default 24h→24 桶 total=6 / 1h→12 桶 HH:MM / 6h→12 桶 HH:MM ✓
+- UI: 1h/6h/24h 按钮组渲染 + 点击切换 ✓；选中后「批量重解析选中」按钮出现 ✓
+
 ### v1.18（2026-10 · 仪表盘吞吐趋势图与文档中心批量删除 3 项）
 
 > 本轮聚焦于让用户直观看到流水线近 24h 的吞吐健康度，并在文档中心支持选中多个文档批量删除，提升运维效率。
