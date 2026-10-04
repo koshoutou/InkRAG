@@ -733,7 +733,7 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 | POST | `/api/input/documents/[id]/retry` | 仅 failed 可重试（retryFailedDocumentCore，409 保护） |
 | DELETE | `/api/input/documents/[id]` | 删除文档（deleteDocumentCore） |
 
-**鉴权**：`Authorization: Bearer rag-…`；401 无效、403 disabled/readonly 写入；命中 callCount+1。
+**鉴权**：`Authorization: Bearer inkrag-…`；401 无效、403 disabled/readonly 写入；命中 callCount+1。
 **共享层**：kbcreate.ts（建库）/ ingest.ts（上传/文本）——与 /api/kb UI 路径同一实现（17-2 重构，回归通过）。
 **并发语义**：多文件 allSettled；流水线并发 2 + MinerU 等待不占槽（waiting_mineru）；sha256 秒传；单文件 200MB / 单请求 500MB。
 

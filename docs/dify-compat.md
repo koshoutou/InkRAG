@@ -13,7 +13,7 @@
 1. 在平台 **知识库视图 → Dify 导出对接**（配置按钮）中创建或选择一把 API Key（建议 `operator` 或 `admin` 角色；`readonly` 无法写入）
 2. 在 MinerU 面板打开 **导出 → Dify**：
    - **API 服务器地址**：填本平台地址（如 `https://your-domain`，**不要带 `/v1`**——面板会自动拼接，与 Dify 官方 `https://api.dify.ai` 的填法一致）
-   - **API 密钥**：填平台 API Key（`rag-` 开头；Dify 官方为 `dataset-` 开头，本平台按 Bearer 原样校验，前缀不限）
+   - **API 密钥**：填平台 API Key（`inkrag-` 开头，存量 `rag-` key 仍可用；Dify 官方为 `dataset-` 开头，本平台按 Bearer 原样校验，前缀不限）
 3. 点击 **检查链接**——面板会请求 `GET /v1/datasets`，返回 200 即连接成功
 4. 选择导出位置（已有数据集 = 平台知识库，或新建数据集 = 平台自动建库）
 5. （可选）配置高级选项：段落分隔符、每段最大 token 数（≤7500）→ 点击 **导出**
@@ -143,26 +143,26 @@ MinerU 导出面板的高级配置对应 Dify 的 `data.process_rule`。本平�
 ```bash
 # 列出数据集（= 检查链接）
 curl -s "https://your-domain/v1/datasets?page=1&limit=20" \
-  -H "Authorization: Bearer rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  -H "Authorization: Bearer inkrag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # 新建数据集
 curl -s -X POST "https://your-domain/v1/datasets" \
-  -H "Authorization: Bearer rag-…" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer inkrag-…" -H "Content-Type: application/json" \
   -d '{ "name": "MinerU 导出", "description": "来自 MinerU 面板", "indexing_technique": "high_quality" }'
 
 # 上传文件（等价 MinerU 导出动作）
 curl -s -X POST "https://your-domain/v1/datasets/{dataset_id}/document/create-by-file" \
-  -H "Authorization: Bearer rag-…" \
+  -H "Authorization: Bearer inkrag-…" \
   -F 'data={"process_rule":{"mode":"custom","rules":{"segmentation":{"separator":"\n\n","max_tokens":500}}},"doc_form":"hierarchical_model","doc_language":"Chinese"}' \
   -F 'file=@./parsed.md'
 
 # 轮询索引进度（batch = create 响应里的 document.id）
 curl -s "https://your-domain/v1/datasets/{dataset_id}/documents/{batch}/indexing-status" \
-  -H "Authorization: Bearer rag-…"
+  -H "Authorization: Bearer inkrag-…"
 
 # 文本直接入库
 curl -s -X POST "https://your-domain/v1/datasets/{dataset_id}/document/create-by-text" \
-  -H "Authorization: Bearer rag-…" -H "Content-Type: application/json" \
+  -H "Authorization: Bearer inkrag-…" -H "Content-Type: application/json" \
   -d '{ "name": "notes", "text": "# 标题\n正文…", "process_rule": {"mode":"custom","rules":{"segmentation":{"max_tokens":300}}} }'
 ```
 

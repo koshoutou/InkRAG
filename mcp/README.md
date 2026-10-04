@@ -30,7 +30,7 @@ cd mcp && npm install
 
 ```bash
 bun run start          # 或 npm start
-INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=rag-xxxx bun src/index.ts
+INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=inkrag-xxxx bun src/index.ts
 ```
 
 `npm run build` 可选（tsc 类型检查，产物不落盘）；开发热重载 `bun run dev`。
@@ -39,7 +39,7 @@ INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=rag-xxxx bun src/index.ts
 
 | 变量 | 必填 | 默认 | 说明 / Description |
 |---|---|---|---|
-| `INKRAG_API_KEY` | ✅ | — | 平台 API Key。在平台「Agent API」视图创建（明文仅创建时展示一次，形如 `rag-<32位hex>`）。缺失时 Server 启动即失败并打印获取指引。Create it in the platform's "Agent API" view; the plaintext key is shown **once** at creation. |
+| `INKRAG_API_KEY` | ✅ | — | 平台 API Key。在平台「Agent API」视图创建（明文仅创建时展示一次，形如 `inkrag-<32位hex>`）。缺失时 Server 启动即失败并打印获取指引。Create it in the platform's "Agent API" view; the plaintext key is shown **once** at creation. |
 | `INKRAG_BASE_URL` | ❌ | `http://localhost:2607` | 平台地址。Platform base URL. |
 
 ## Claude Desktop 配置 / Configuration
@@ -55,7 +55,7 @@ INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=rag-xxxx bun src/index.ts
       "cwd": "/absolute/path/to/inkrag/mcp",
       "env": {
         "INKRAG_BASE_URL": "http://localhost:2607",
-        "INKRAG_API_KEY": "rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        "INKRAG_API_KEY": "inkrag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
   }
@@ -77,7 +77,7 @@ INKRAG_BASE_URL=http://localhost:2607 INKRAG_API_KEY=rag-xxxx bun src/index.ts
       "cwd": "/absolute/path/to/inkrag/mcp",
       "env": {
         "INKRAG_BASE_URL": "http://localhost:2607",
-        "INKRAG_API_KEY": "rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+        "INKRAG_API_KEY": "inkrag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
       }
     }
   }

@@ -29,8 +29,8 @@
 ## 2. 快速开始（30 秒版）
 
 ```bash
-# ① 在平台「Agent API」视图创建 API Key（仅此一次展示明文，形如 rag-<32位hex>）
-export KEY="rag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# ① 在平台「Agent API」视图创建 API Key（仅此一次展示明文，形如 inkrag-<32位hex>）
+export KEY="inkrag-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 # ② 建知识库（retrievalMode 是给外部检索平台读的元数据，本平台不执行检索）
 curl -X POST http://<host>/api/input/knowledge-bases \
@@ -73,7 +73,7 @@ curl -H "Authorization: Bearer $KEY" \
 | 状态码 | 场景 | 处理建议 |
 |---|---|---|
 | 400 | 参数缺失 / 类型错误 / 扩展名不在白名单 / chunkConfig 非法 / 文件为空 / 非 multipart 请求 | 修正请求体后重试 |
-| 401 | 缺少 `Authorization` 头 / Key 无效 | 检查 Key 是否复制完整（`rag-` 前缀） |
+| 401 | 缺少 `Authorization` 头 / Key 无效 | 检查 Key 是否复制完整（`inkrag-` 前缀，存量 `rag-` key 仍可用） |
 | 403 | Key 已禁用（enabled=false）；或 readonly 角色执行写操作 | 换用启用的 operator/admin Key |
 | 404 | 知识库 / 文档 / 文档（docs）不存在 | 确认 id；被并发的删除请求清掉也会 404 |
 | 409 | 建库重名；对非 failed 状态文档重试 | 换名建库；先轮询到终态再重试 |

@@ -37,7 +37,8 @@ export async function POST(req: NextRequest) {
     if (!name) return NextResponse.json({ error: '名称不能为空' }, { status: 400 })
     const role = ['admin', 'operator', 'readonly'].includes(body.role) ? body.role : 'readonly'
 
-    const key = `rag-${randomBytes(16).toString('hex')}`
+    // A17：API Key 前缀 rag- → inkrag-，提升品牌辨识度（verifyApiKey 不校验前缀，存量 rag- key 仍可用）
+    const key = `inkrag-${randomBytes(16).toString('hex')}`
     const created = await db.apiKey.create({ data: { name, role, ...apiKeyColumns(key) } })
     recordOp({
       level: 'info',
