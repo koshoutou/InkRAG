@@ -263,6 +263,10 @@ export interface DashboardData {
     docsReady: number
     docsFailed: number
     docsProcessing: number
+    /** FE-022: 平均文件大小（字节） */
+    avgFileSize?: number
+    /** FE-022: 平均每文档 chunk 数 */
+    avgChunksPerDoc?: number
   }
   recentDocs: (DocSummary & { kbName: string })[]
   jobs: { pending: number; active: number; failed: number }
@@ -271,6 +275,8 @@ export interface DashboardData {
   engineDistribution?: Record<string, number>
   /** FE-020/BE-018: 文件大小分布（按体积分桶） */
   sizeDistribution?: Array<{ label: string; count: number; color: string }>
+  /** FE-021/BE-019: 知识库增长趋势（近 30 天按天桶文档数增量） */
+  growthTrend?: Array<{ day: string; docs: number }>
   /** FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序） */
   kbLeaderboard?: Array<{
     id: string

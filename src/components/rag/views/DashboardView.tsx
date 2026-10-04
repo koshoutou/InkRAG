@@ -29,6 +29,8 @@ import {
   AreaChart,
   CartesianGrid,
   Cell,
+  Line,
+  LineChart,
   Pie,
   PieChart,
   ResponsiveContainer,
@@ -48,6 +50,7 @@ import {
   StatCard,
   StatusBadge,
   ViewPage,
+  formatBytes,
   formatNumber,
   timeAgo,
 } from '../ui'
@@ -146,8 +149,20 @@ export function DashboardView() {
       {/* 统计卡 */}
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6">
         <StatCard icon={<Library className="h-4 w-4" />} label="知识库" value={d.totals.kbs} accent="primary" hint={`启用 chunk ${formatNumber(d.totals.enabledChunks)}`} />
-        <StatCard icon={<FileText className="h-4 w-4" />} label="文档总数" value={d.totals.docs} accent="teal" hint={`就绪 ${d.totals.docsReady} · 失败 ${d.totals.docsFailed}`} />
-        <StatCard icon={<Layers className="h-4 w-4" />} label="Chunk 总数" value={d.totals.chunks} accent="violet" />
+        <StatCard
+          icon={<FileText className="h-4 w-4" />}
+          label="文档总数"
+          value={d.totals.docs}
+          accent="teal"
+          hint={d.totals.avgFileSize ? `平均 ${formatBytes(d.totals.avgFileSize)} · 就绪 ${d.totals.docsReady}` : `就绪 ${d.totals.docsReady} · 失败 ${d.totals.docsFailed}`}
+        />
+        <StatCard
+          icon={<Layers className="h-4 w-4" />}
+          label="Chunk 总数"
+          value={d.totals.chunks}
+          accent="violet"
+          hint={d.totals.avgChunksPerDoc != null ? `平均 ${d.totals.avgChunksPerDoc} 块/文档` : undefined}
+        />
         <StatCard icon={<Database className="h-4 w-4" />} label="向量点数" value={d.totals.points} accent="emerald" />
         <StatCard icon={<Sparkles className="h-4 w-4" />} label="处理中" value={d.totals.docsProcessing} accent="amber" hint="解析/切分/向量化/写入" />
         <StatCard icon={<AlertTriangle className="h-4 w-4" />} label="失败文档" value={d.totals.docsFailed} accent="rose" />
@@ -500,6 +515,70 @@ export function DashboardView() {
                 ))}
               </div>
             </div>
+          </div>
+        )
+      })()}
+
+      {/* FE-021: 知识库增长趋势折线图（近 30 天每天新增文档数） */}
+      {d.growthTrend && d.growthTrend.length > 0 && (() => {
+        const trend = d.growthTrend
+        const total = trend.reduce((a, b) => a + b.docs, 0)
+        const hasData = total > 0
+        return (
+          <div className="rounded-xl border border-border/60 bg-card p-4">
+            <div className="mb-3 flex items-center justify-between">
+              <span className="flex items-center gap-1.5 text-sm font-medium">
+                <Library className="h-3.5 w-3.5 text-muted-foreground" />
+                知识库增长趋势
+              </span>
+              <span className="text-[11px] text-muted-foreground">
+                近 30 天新增 <span className="font-medium tabular-nums text-foreground">{total}</span> 个文档
+              </span>
+            </div>
+            {hasData ? (
+              <ResponsiveContainer width="100%" height={140}>
+                <LineChart data={trend} margin={{ top: 5, right: 8, left: -20, bottom: 0 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" strokeOpacity={0.4} vertical={false} />
+                  <XAxis
+                    dataKey="day"
+                    tick={{ fontSize: 9, fill: 'hsl(var(--muted-foreground))' }}
+                    interval={5}
+                    axisLine={false}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: 'hsl(var(--muted-foreground))' }}
+                    allowDecimals={false}
+                    axisLine={false}
+                    tickLine={false}
+                    width={28}
+                  />
+                  <RTooltip
+                    contentStyle={{
+                      fontSize: 11,
+                      borderRadius: 8,
+                      border: '1px solid hsl(var(--border))',
+                      background: 'hsl(var(--card))',
+                      color: 'hsl(var(--card-foreground))',
+                    }}
+                    labelStyle={{ fontSize: 10, color: 'hsl(var(--muted-foreground))' }}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="docs"
+                    name="新增文档"
+                    stroke="#10b981"
+                    strokeWidth={1.5}
+                    dot={false}
+                    activeDot={{ r: 3 }}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="flex h-32 items-center justify-center text-[11px] text-muted-foreground">
+                近 30 天无新增文档
+              </div>
+            )}
           </div>
         )
       })()}

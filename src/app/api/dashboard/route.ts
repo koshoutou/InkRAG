@@ -115,6 +115,26 @@ export async function GET(req: NextRequest) {
       createdAt: kb.createdAt.toISOString(),
     }))
 
+    // FE-021/BE-019: 知识库增长趋势（近 30 天按天桶文档数/chunk 数增量）
+    // 用于仪表盘「增长趋势」折线图，让用户看到库容量随时间的增长
+    const growthSince = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000)
+    const recentDocsForGrowth = await db.document.findMany({
+      where: { createdAt: { gte: growthSince } },
+      select: { createdAt: true },
+    })
+    // 按 day 桶聚合文档创建数（30 桶，0=最旧 → 29=今天）
+    const growthTrend: Array<{ day: string; docs: number }> = []
+    const nowMs = Date.now()
+    for (let d = 29; d >= 0; d--) {
+      const dayStart = new Date(nowMs - d * 24 * 60 * 60 * 1000)
+      const dayStartMs = dayStart.getTime()
+      const dayLabel = `${dayStart.getMonth() + 1}/${dayStart.getDate()}`
+      const docs = recentDocsForGrowth.filter(
+        (doc) => doc.createdAt.getTime() >= dayStartMs && doc.createdAt.getTime() < dayStartMs + 24 * 60 * 60 * 1000,
+      ).length
+      growthTrend.push({ day: dayLabel, docs })
+    }
+
     // FE-013/BE-015/016: 流水线吞吐趋势（按 trendRange 小时桶完成/失败数）
     // 用于仪表盘「吞吐趋势」折线图，让用户直观看到流水线健康度变化
     // 1h→5min桶(12), 6h→30min桶(12), 24h→1h桶(24)
@@ -126,9 +146,9 @@ export async function GET(req: NextRequest) {
     })
     // 按桶聚合（0=最旧 → bucketCount-1=当前桶）
     const throughputTrend: Array<{ hour: string; completed: number; failed: number }> = []
-    const nowMs = Date.now()
+    const trendNowMs = Date.now()
     for (let b = bucketCount - 1; b >= 0; b--) {
-      const bucketStartMs = nowMs - b * bucketMs
+      const bucketStartMs = trendNowMs - b * bucketMs
       const bucketStart = new Date(bucketStartMs)
       // 桶标签格式：1h→HH:MM, 6h→HH:MM, 24h→HH:00
       const hh = String(bucketStart.getHours()).padStart(2, '0')
@@ -156,6 +176,9 @@ export async function GET(req: NextRequest) {
           docsReady,
           docsFailed,
           docsProcessing,
+          // FE-022: 汇总指标
+          avgFileSize: docs > 0 ? Math.round(allDocs.reduce((a, b) => a + b.sizeBytes, 0) / docs) : 0,
+          avgChunksPerDoc: docs > 0 ? Math.round(chunks / docs) : 0,
         },
         recentDocs,
         jobs: { pending: stats.pending, active: stats.active, failed: stats.failed },
@@ -164,6 +187,8 @@ export async function GET(req: NextRequest) {
         engineDistribution,
         // FE-020/BE-018: 文件大小分布（按体积分桶）
         sizeDistribution,
+        // FE-021/BE-019: 知识库增长趋势（近 30 天按天桶文档数增量）
+        growthTrend,
         // FE-017/BE-017: 知识库容量排行榜（Top 5 按 pointCount 排序）
         kbLeaderboard,
         // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数，0=最旧→23=当前小时）
