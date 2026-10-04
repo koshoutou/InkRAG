@@ -76,8 +76,8 @@ function retryBackoffMs(attempts: number): number {
 const MINERU_POLL_MS = 5_000
 /** MinerU 远端任务等待上限（防远端永久挂起；超时走可重试失败路径） */
 const MINERU_WAIT_CAP_MS = 6 * 60 * 60_000
-/** 活跃任务心跳间隔（≤30s，审计 B：心跳续租替代 10 分钟僵死判定） */
-const HEARTBEAT_INTERVAL_MS = 20_000
+/** 活跃任务心跳间隔（F-CONC-10：20s→30s，写放大减 1/3；僵死阈值 120s 不变，30s 间隔仍有 4 次续租冗余） */
+const HEARTBEAT_INTERVAL_MS = 30_000
 /** 心跳过期阈值（超过即判僵死） */
 const HEARTBEAT_STALE_MS = 120_000
 /** 旧数据回退阈值（heartbeatAt 为空的存量 active 行，沿用 10 分钟） */
@@ -857,6 +857,25 @@ async function sweepRetentions(): Promise<void> {
   }
 }
 
+/**
+ * KB 级写入与事件串行化（F-CONC-09：docWriteChains 只串行化同文档写，KB 统计更新
+ * 与并发文档完成的乱序仍可能旧值覆盖新值）——与 serializeDocWrite 同链式语义。
+ */
+const kbWriteChains = new Map<string, Promise<void>>()
+function serializeKbWrite<T>(kbId: string, task: () => Promise<T>): Promise<T> {
+  const prev = kbWriteChains.get(kbId) ?? Promise.resolve()
+  const run = prev.then(task, task)
+  const tail = run.then(
+    () => undefined,
+    () => undefined
+  )
+  kbWriteChains.set(kbId, tail)
+  void tail.then(() => {
+    if (kbWriteChains.get(kbId) === tail) kbWriteChains.delete(kbId)
+  })
+  return run
+}
+
 /** 重算 KB 统计 + kb:stats 事件 */
 export async function updateKbStats(kbId: string): Promise<void> {
   try {
@@ -866,18 +885,27 @@ export async function updateKbStats(kbId: string): Promise<void> {
       db.document.count({ where: { kbId } }),
       db.chunk.count({ where: { kbId, isParent: false } }),
     ])
-    let pointCount = 0
+    let pointCount = kb.pointCount
+    let pointCountStale = false
     try {
       const store = await getVectorStore()
       pointCount = await store.count(kb.collection)
     } catch {
-      pointCount = 0
+      // F-EXT-11：Qdrant 瞬时不可达时保留上次统计值并标 stale（原先静默置 0，
+      // 瞬时抖动期间完成的文档会让 UI 点数漂移归零误导用户）
+      pointCount = kb.pointCount
+      pointCountStale = true
     }
-    await db.knowledgeBase.update({
-      where: { id: kbId },
-      data: { docCount, chunkCount, pointCount },
+    await serializeKbWrite(kbId, async () => {
+      await db.knowledgeBase.update({
+        where: { id: kbId },
+        data: { docCount, chunkCount, pointCount },
+      })
+      await kbStats({ kbId, docCount, chunkCount, pointCount })
     })
-    await kbStats({ kbId, docCount, chunkCount, pointCount })
+    if (pointCountStale) {
+      console.warn(`[pipeline] KB ${kbId} 点数统计失败（Qdrant 不可达），已保留上次值 ${kb.pointCount}`)
+    }
   } catch (e) {
     console.warn('[pipeline] 更新 KB 统计失败:', (e as Error).message)
   }

@@ -34,18 +34,19 @@ function timingSafeEqualHex(a: string, b: string): boolean {
 /**
  * 校验 Bearer token → 命中返回 ApiKey 行（含迁移后的最新数据），未命中返回 null。
  *
- * 查询顺序：
- *   1) 全量拉取 keyHash 非空的行，恒定时间逐一比对（不因内容不同泄露比对时长差异）
+ * 查询顺序（审计 §5.2 P2：原先全表拉取逐行比对 O(n)，Key 多时每请求扫描全表）：
+ *   1) findFirst({ keyHash: sha256(token) }) 走索引 O(log n)——查找键本身就是哈希，
+ *      无时序泄露面；命中后仍做恒定时间比对兑底（防御未来哈希碰撞/异常数据）
  *   2) 回退存量明文列 findUnique；命中即惰性迁移（keyHash/keyPrefix 写入、明文销毁）
  */
 export async function verifyApiKey(token: string): Promise<ApiKey | null> {
   if (!token) return null
   const tokenHash = createKeyHash(token)
 
-  // ---- 1) keyHash 恒定时间比对 ----
-  const hashedRows = await db.apiKey.findMany({ where: { keyHash: { not: '' } } })
-  for (const row of hashedRows) {
-    if (timingSafeEqualHex(row.keyHash, tokenHash)) return row
+  // ---- 1) 索引直查（O(log n)）+ 恒定时间比对兑底 ----
+  const hit = await db.apiKey.findFirst({ where: { keyHash: tokenHash } })
+  if (hit) {
+    return timingSafeEqualHex(hit.keyHash, tokenHash) ? hit : null
   }
 
   // ---- 2) 存量明文兼容（惰性迁移）----
