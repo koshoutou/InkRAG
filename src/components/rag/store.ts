@@ -29,6 +29,10 @@ interface PlatformStore {
   connectionStatus: ConnectionState
   connectionMessage: string
   vectorMode: VectorMode | null
+  /** 面板登录态：null=检测中 / false=未登录（显示登录遮罩）/ true=已登录 */
+  panelAuthed: boolean | null
+  /** 是否仍在使用默认密码（已登录时有效，用于修改引导） */
+  panelDefaultPassword: boolean
 
   setView: (v: ViewId) => void
   setKb: (id: string | null) => void
@@ -37,6 +41,7 @@ interface PlatformStore {
   setSettings: (s: RagSettings | null) => void
   setConnection: (s: ConnectionState, msg?: string) => void
   setVectorMode: (m: VectorMode | null) => void
+  setPanelAuth: (authed: boolean, defaultPassword?: boolean) => void
 }
 
 export const usePlatformStore = create<PlatformStore>((set) => ({
@@ -48,6 +53,8 @@ export const usePlatformStore = create<PlatformStore>((set) => ({
   connectionStatus: 'unknown',
   connectionMessage: '',
   vectorMode: null,
+  panelAuthed: null,
+  panelDefaultPassword: false,
 
   setView: (v) => set({ activeView: v }),
   setKb: (id) => set({ activeKbId: id }),
@@ -56,6 +63,8 @@ export const usePlatformStore = create<PlatformStore>((set) => ({
   setSettings: (s) => set({ settings: s }),
   setConnection: (s, msg = '') => set({ connectionStatus: s, connectionMessage: msg }),
   setVectorMode: (m) => set({ vectorMode: m }),
+  setPanelAuth: (authed, defaultPassword = false) =>
+    set({ panelAuthed: authed, ...(authed ? { panelDefaultPassword: defaultPassword } : {}) }),
 }))
 
 /** 跨视图快捷跳转：进入某知识库的文档中心 */

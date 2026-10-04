@@ -11,6 +11,7 @@ import { Loader2 } from 'lucide-react'
 import { ThemeProvider } from 'next-themes'
 import { Toaster } from '@/components/ui/sonner'
 import { ragApi } from './api'
+import { LoginOverlay } from './LoginOverlay'
 import { PlatformShell } from './PlatformShell'
 import { RagSettingsDialog } from './RagSettingsDialog'
 import { usePlatformStore } from './store'
@@ -45,15 +46,39 @@ const queryClient = new QueryClient({
   },
 })
 
-/** 初始化：拉取设置与健康状态，判定连接模式；订阅全局 socket 事件做级联刷新 */
+/** 初始化：鉴权检查 → 拉取设置与健康状态，判定连接模式；订阅全局 socket 事件做级联刷新 */
 function Inner() {
   const setSettings = usePlatformStore((s) => s.setSettings)
   const setConnection = usePlatformStore((s) => s.setConnection)
   const setVectorMode = usePlatformStore((s) => s.setVectorMode)
+  const panelAuthed = usePlatformStore((s) => s.panelAuthed)
+  const setPanelAuth = usePlatformStore((s) => s.setPanelAuth)
   const queryCtl = useQueryClient()
   const { subscribeRooms, on } = useRealtime()
 
+  // ① 面板鉴权：会话检查 + 全局 401 拦截（会话过期时收回登录遮罩）
   useEffect(() => {
+    let cancelled = false
+    ragApi
+      .getAuthSession()
+      .then((s) => {
+        if (!cancelled) setPanelAuth(s.authenticated, s.defaultPassword)
+      })
+      .catch(() => {
+        // 会话接口本身失败（服务重启中等）→ 视为未登录，让用户重试
+        if (!cancelled) setPanelAuth(false)
+      })
+    const onUnauthorized = () => setPanelAuth(false)
+    window.addEventListener('panel:unauthorized', onUnauthorized)
+    return () => {
+      cancelled = true
+      window.removeEventListener('panel:unauthorized', onUnauthorized)
+    }
+  }, [setPanelAuth])
+
+  // ② 已登录才拉取设置/健康（未登录时这些请求全部 401）
+  useEffect(() => {
+    if (panelAuthed !== true) return
     let cancelled = false
     ;(async () => {
       try {
@@ -76,10 +101,11 @@ function Inner() {
     return () => {
       cancelled = true
     }
-  }, [setSettings, setConnection, setVectorMode])
+  }, [panelAuthed, setSettings, setConnection, setVectorMode])
 
-  // 全局 socket：文档状态变化 → 刷新仪表盘 / 知识库统计
+  // ③ 全局 socket：文档状态变化 → 刷新仪表盘 / 知识库统计（登录后建立）
   useEffect(() => {
+    if (panelAuthed !== true) return
     subscribeRooms(['global'])
     const refreshStats = () => {
       queryCtl.invalidateQueries({ queryKey: ['dashboard'] })
@@ -93,9 +119,24 @@ function Inner() {
       un2()
       un3()
     }
-  }, [subscribeRooms, on, queryCtl])
+  }, [panelAuthed, subscribeRooms, on, queryCtl])
 
   const activeView = usePlatformStore((s) => s.activeView)
+
+  // 未登录 / 会话过期：登录遮罩全屏接管（不加载任何视图与敏感数据）
+  if (panelAuthed !== true) {
+    return (
+      <>
+        {panelAuthed === false ? <LoginOverlay /> : (
+          <div className="flex min-h-dvh items-center justify-center bg-background text-muted-foreground" role="status">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            <span className="ml-2 text-xs">正在检查面板登录状态…</span>
+          </div>
+        )}
+        <Toaster richColors position="top-right" />
+      </>
+    )
+  }
 
   return (
     <>

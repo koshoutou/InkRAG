@@ -84,6 +84,19 @@ async function req(url: string, init?: RequestInit): Promise<Response> {
     }
   }
   if (!res) throw new Error('网络请求失败（服务可能正在重启，请稍后刷新重试）')
+  // 面板鉴权全局拦截（middleware 401 PANEL_AUTH_REQUIRED）→ 通知应用层弹出登录遮罩。
+  // clone 读 body 不影响原 Response 的后续消费；仅拦管理面 401（/api/auth 自身不在此列）。
+  if (res.status === 401 && !url.startsWith('/api/auth')) {
+    res
+      .clone()
+      .json()
+      .then((j) => {
+        if (j?.code === 'PANEL_AUTH_REQUIRED') {
+          window.dispatchEvent(new CustomEvent('panel:unauthorized'))
+        }
+      })
+      .catch(() => {})
+  }
   return res
 }
 
@@ -298,6 +311,37 @@ export const ragApi = {
           ...(opts?.filename ? { filename: opts.filename } : {}),
           ...(opts?.engine ? { engine: opts.engine } : {}),
         }),
+      }),
+    )
+  },
+
+  // -- 面板鉴权（/api/auth）------------------------------------------------
+  async getAuthSession(): Promise<{ authenticated: boolean; defaultPassword: boolean }> {
+    return asJson(await req('/api/auth/session', { cache: 'no-store' }))
+  },
+  async panelLogin(password: string): Promise<{ ok: true }> {
+    return asJson(
+      await req('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      }),
+    )
+  },
+  async panelLogout(): Promise<{ ok: true }> {
+    return asJson(
+      await req('/api/auth/logout', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    )
+  },
+  async changePanelPassword(current: string, next: string): Promise<{ ok: true }> {
+    return asJson(
+      await req('/api/auth/password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ current, next }),
       }),
     )
   },

@@ -17,11 +17,13 @@ import {
   Eye,
   EyeOff,
   FileSearch,
+  KeyRound,
   Loader2,
   Plug,
   Save,
   Server,
   Settings as SettingsIcon,
+  ShieldCheck,
   Sparkles,
   ToggleLeft,
   XCircle,
@@ -192,9 +194,20 @@ export function RagSettingsDialog() {
   const [testResults, setTestResults] = useState<Partial<Record<TestKind, TestResult>>>({})
   const [saving, setSaving] = useState(false)
 
+  // 面板安全：改密表单（独立于连接配置，不参与底部「保存」按钮）
+  const panelDefaultPassword = usePlatformStore((s) => s.panelDefaultPassword)
+  const setPanelAuth = usePlatformStore((s) => s.setPanelAuth)
+  const [pwdCurrent, setPwdCurrent] = useState('')
+  const [pwdNext, setPwdNext] = useState('')
+  const [pwdConfirm, setPwdConfirm] = useState('')
+  const [pwdBusy, setPwdBusy] = useState(false)
+
   useEffect(() => {
     if (!open) {
       setTestResults({})
+      setPwdCurrent('')
+      setPwdNext('')
+      setPwdConfirm('')
       return
     }
     let cancelled = false
@@ -320,6 +333,7 @@ export function RagSettingsDialog() {
               <TabsTrigger value="rerank" className="gap-1.5 text-xs"><Sparkles className="h-3.5 w-3.5" /> Rerank</TabsTrigger>
               <TabsTrigger value="mineru" className="gap-1.5 text-xs"><FileSearch className="h-3.5 w-3.5" /> MinerU</TabsTrigger>
               <TabsTrigger value="switches" className="gap-1.5 text-xs"><ToggleLeft className="h-3.5 w-3.5" /> 平台开关</TabsTrigger>
+              <TabsTrigger value="panel" className="gap-1.5 text-xs"><ShieldCheck className="h-3.5 w-3.5" /> 面板安全</TabsTrigger>
             </TabsList>
 
             <TabsContent value="qdrant" className="space-y-4 pb-2 pt-4">
@@ -543,6 +557,93 @@ export function RagSettingsDialog() {
                   />
                 </div>
               ))}
+            </TabsContent>
+
+            {/* 面板安全：访问密码修改（独立保存，不参与底部保存按钮） */}
+            <TabsContent value="panel" className="space-y-4 pb-2 pt-4">
+              {panelDefaultPassword && (
+                <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  <span>
+                    <b>当前仍在使用默认密码</b>——首次部署后请立即修改，否则任何知道默认密码的人都可访问与操作本面板（含删除知识库、读取 API Key）。
+                  </span>
+                </div>
+              )}
+              <div className="rounded-md border bg-muted/30 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground">
+                面板访问密码用于登录本管理面板（Cookie 会话 12 小时，连续失败 5 次锁定 30 秒）；与
+                <span className="font-mono"> /api/input </span>入库 API Key、Dify 导出密钥相互独立。密码以 scrypt 哈希存储，平台不保存明文。
+              </div>
+              <div>
+                <Label htmlFor="panel-pwd-current" className="text-xs text-muted-foreground">当前密码</Label>
+                <Input
+                  id="panel-pwd-current"
+                  type="password"
+                  value={pwdCurrent}
+                  onChange={(e) => setPwdCurrent(e.target.value)}
+                  placeholder="••••••••"
+                  autoComplete="current-password"
+                  className="mt-1.5 h-9 text-sm"
+                />
+              </div>
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="panel-pwd-next" className="text-xs text-muted-foreground">新密码（6-64 位）</Label>
+                  <Input
+                    id="panel-pwd-next"
+                    type="password"
+                    value={pwdNext}
+                    onChange={(e) => setPwdNext(e.target.value)}
+                    placeholder="••••••••"
+                    autoComplete="new-password"
+                    className="mt-1.5 h-9 text-sm"
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="panel-pwd-confirm" className="text-xs text-muted-foreground">确认新密码</Label>
+                  <Input
+                    id="panel-pwd-confirm"
+                    type="password"
+                    value={pwdConfirm}
+                    onChange={(e) => setPwdConfirm(e.target.value)}
+                    placeholder="再次输入新密码"
+                    autoComplete="new-password"
+                    className="mt-1.5 h-9 text-sm"
+                  />
+                </div>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-8 gap-1.5 text-xs"
+                disabled={pwdBusy || !pwdCurrent || !pwdNext || pwdNext !== pwdConfirm}
+                onClick={async () => {
+                  if (pwdBusy) return
+                  if (pwdNext.length < 6 || pwdNext.length > 64) {
+                    toast.error('新密码长度需在 6-64 位之间')
+                    return
+                  }
+                  if (pwdNext !== pwdConfirm) {
+                    toast.error('两次输入的新密码不一致')
+                    return
+                  }
+                  setPwdBusy(true)
+                  try {
+                    await ragApi.changePanelPassword(pwdCurrent, pwdNext)
+                    toast.success('面板密码已修改（新会话已签发）')
+                    setPwdCurrent('')
+                    setPwdNext('')
+                    setPwdConfirm('')
+                    setPanelAuth(true, false)
+                  } catch (e) {
+                    toast.error('修改失败：' + (e as Error).message)
+                  } finally {
+                    setPwdBusy(false)
+                  }
+                }}
+              >
+                {pwdBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <KeyRound className="h-3.5 w-3.5" />}
+                修改面板密码
+              </Button>
             </TabsContent>
           </Tabs>
         )}

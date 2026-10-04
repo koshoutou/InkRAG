@@ -5,6 +5,7 @@
 
 import { useState } from 'react'
 import { useTheme } from 'next-themes'
+import { useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
   BookOpenCheck,
@@ -15,6 +16,7 @@ import {
   GitCompareArrows,
   LayoutDashboard,
   Library,
+  LogOut,
   Menu,
   Moon,
   PanelLeftClose,
@@ -26,11 +28,13 @@ import {
   Settings,
   Sun,
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetTitle, SheetTrigger } from '@/components/ui/sheet'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
+import { ragApi } from './api'
 import { CommandPalette, OPEN_COMMAND_PALETTE_EVENT } from './CommandPalette'
 import { usePlatformStore, type ViewId } from './store'
 import { useRealtime } from './useRealtime'
@@ -163,6 +167,38 @@ function ThemeToggleButton() {
   )
 }
 
+function LogoutButton() {
+  const queryCtl = useQueryClient()
+  const [busy, setBusy] = useState(false)
+  const handle = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await ragApi.panelLogout()
+      toast.success('已退出登录')
+    } catch {
+      /* 登出接口失败也继续刷新（本地 Cookie 已到期的情形） */
+    } finally {
+      void queryCtl.clear()
+      window.location.reload()
+    }
+  }
+  return (
+    <Button
+      variant="ghost"
+      size="sm"
+      className="h-8 gap-1.5 text-xs text-muted-foreground hover:text-foreground"
+      onClick={handle}
+      disabled={busy}
+      title="退出面板登录"
+      aria-label="退出面板登录"
+    >
+      <LogOut className="h-3.5 w-3.5" />
+      <span className="hidden sm:inline">退出</span>
+    </Button>
+  )
+}
+
 export function PlatformShell({ children }: { children: React.ReactNode }) {
   const setSettingsOpen = usePlatformStore((s) => s.setSettingsOpen)
   const settings = usePlatformStore((s) => s.settings)
@@ -241,6 +277,7 @@ export function PlatformShell({ children }: { children: React.ReactNode }) {
               {collapsed ? <PanelLeftOpen className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </Button>
             <ThemeToggleButton />
+            <LogoutButton />
             <Button variant="default" size="sm" className="h-8 gap-1.5" onClick={() => setSettingsOpen(true)}>
               <Settings className="h-3.5 w-3.5" />
               <span className="hidden sm:inline">设置</span>
