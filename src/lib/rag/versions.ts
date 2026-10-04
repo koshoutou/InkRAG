@@ -14,10 +14,13 @@ import path from 'node:path'
 import { db } from '@/lib/db'
 import { docDir, chunksDir, resolveStorageKey, markdownPath, middleJsonPath } from './artifacts'
 import { getVectorStore } from './vectorstore'
-import { enqueueDocument } from './pipeline'
+import { updateKbStats } from './pipeline'
 import { assertEmbedScheme, embedTexts } from './embed'
-import { emitToRoom } from './events'
+import { emitToRoom, documentDone } from './events'
 import { realignMiddleBlocks, readMiddleJson } from './docpatch'
+import { countTokens } from './chunking'
+import { getRagSettings } from './settings'
+import type { PointInput } from './types'
 
 export const CURRENT_VERSION = 'current'
 
@@ -698,41 +701,16 @@ export async function restoreDocVersion(docId: string, version: string): Promise
   const kb = await db.knowledgeBase.findUnique({ where: { id: doc.kbId } })
   if (!kb) throw new Error('知识库不存在')
 
-  // v1.6：恢复会重写向量库，先断言当前嵌入与建库时锁定的方案（dim / sparseScheme）一致，
-  // 不一致给明确报错（防止恢复动作把异构向量写进库）
-  try {
-    const sample = snapChunks.find((c) => !c.isParent) ?? snapChunks[0]
-    const sampleText =
-      (typeof sample.fullText === 'string' && sample.fullText) || sample.textPreview || ''
-    const probe = await embedTexts([sampleText || 'connectivity probe'], { dim: kb.dim || 1024 })
-    assertEmbedScheme(kb, probe)
-  } catch (e) {
-    throw new Error(`恢复失败：${(e as Error).message}`)
-  }
-
-  // 1) 归档当前 + 版本号递增
-  const restoredVersion = await bumpDocVersion(docId)
-
-  // 2) 清旧 chunks：行 + 磁盘目录 + 向量
-  await db.chunk.deleteMany({ where: { documentId: docId } })
-  await fs.rm(chunksDir(doc.kbId, docId), { recursive: true, force: true })
-  await fs.mkdir(chunksDir(doc.kbId, docId), { recursive: true })
-  try {
-    const store = await getVectorStore()
-    await store.deleteByFilter(kb.collection, { must: [{ key: 'doc_id', match: { value: docId } }] })
-  } catch (e) {
-    console.warn('[versions] 恢复前清理旧向量跳过（可能无旧数据）:', (e as Error).message)
-  }
-
-  // 3) 重建 chunks 行 + 磁盘全文
+  // ---- 准备 chunk 行 + 全文（无副作用）----
   let degraded = 0
   const rows: Parameters<typeof db.chunk.create>[0]['data'][] = []
+  const childTexts: string[] = [] // 与 rows 中 isParent=false 的子项一一对应，用于嵌入
+  const childRows: (typeof rows)[number][] = [] // 子 chunk 行引用，用于构建 points
   for (const c of snapChunks) {
     const fullText = typeof c.fullText === 'string' && c.fullText.length > 0 ? c.fullText : c.textPreview
     if (typeof c.fullText !== 'string' || c.fullText.length === 0) degraded++
     const storageKey = c.storageKey ?? `${doc.kbId}/${docId}/chunks/${c.id}.txt`
-    await fs.writeFile(resolveStorageKey(storageKey), fullText, 'utf-8')
-    rows.push({
+    const row = {
       id: c.id,
       documentId: docId,
       kbId: doc.kbId,
@@ -750,11 +728,138 @@ export async function restoreDocVersion(docId: string, version: string): Promise
       textPreview: c.textPreview,
       storageKey,
       enabled: c.enabled,
-    })
+    }
+    rows.push(row)
+    if (!c.isParent) {
+      childRows.push(row)
+      childTexts.push(fullText)
+    }
   }
-  const TX = 100
-  for (let i = 0; i < rows.length; i += TX) {
-    await db.$transaction(rows.slice(i, i + TX).map((r) => db.chunk.create({ data: r })))
+
+  // ---- LOGIC-003：先嵌入所有子 chunk 全文（同步），失败则直接抛错，不做任何 DB/磁盘/Qdrant 变更 ----
+  let emb: Awaited<ReturnType<typeof embedTexts>>
+  try {
+    const probeText = childTexts[0] ?? snapChunks[0]?.textPreview ?? 'connectivity probe'
+    const probe = await embedTexts([probeText], { dim: kb.dim || 1024 })
+    assertEmbedScheme(kb, probe) // 维度/方案一致性断言（原 v1.6 行为保留）
+    // 全量子 chunk 嵌入（嵌入失败此处抛错 → 整个恢复中止，零副作用）
+    emb = childTexts.length > 0 ? await embedTexts(childTexts, { dim: kb.dim || 1024 }) : probe
+  } catch (e) {
+    throw new Error(`恢复失败（嵌入阶段，未做任何变更）：${(e as Error).message}`)
+  }
+
+  // ---- LOGIC-003：捕获旧 chunk ID（用于 Qdrant 旧向量清理；DB 事务前读取）----
+  const oldChunks = await db.chunk.findMany({ where: { documentId: docId }, select: { id: true } })
+  const oldChunkIds = new Set(oldChunks.map((c) => c.id))
+  const newChunkIds = new Set(rows.map((r) => r.id))
+  const staleVectorIds = Array.from(oldChunkIds).filter((id) => !newChunkIds.has(id))
+
+  // ---- 1) 归档当前 + 版本号递增（原子；失败抛错，零副作用）----
+  const restoredVersion = await bumpDocVersion(docId)
+
+  // ---- 2) 写新 chunk 全文到磁盘（DB 事务前；失败则清理已写文件并抛错）----
+  await fs.mkdir(chunksDir(doc.kbId, docId), { recursive: true })
+  const writtenFiles: string[] = []
+  try {
+    for (const c of snapChunks) {
+      const fullText = typeof c.fullText === 'string' && c.fullText.length > 0 ? c.fullText : c.textPreview
+      const storageKey = c.storageKey ?? `${doc.kbId}/${docId}/chunks/${c.id}.txt`
+      const p = resolveStorageKey(storageKey)
+      await fs.writeFile(p, fullText, 'utf-8')
+      writtenFiles.push(p)
+    }
+  } catch (e) {
+    // 磁盘写入失败：清理已写文件，DB 未变更；上层可重试
+    await Promise.all(writtenFiles.map((p) => fs.rm(p, { force: true }).catch(() => {})))
+    throw new Error(`恢复失败（磁盘写入阶段，DB 未变更）：${(e as Error).message}`)
+  }
+
+  // ---- LOGIC-002：DB 事务化删除旧 chunks + 创建新 chunks（原子）----
+  try {
+    await db.$transaction([
+      db.chunk.deleteMany({ where: { documentId: docId } }),
+      db.chunk.createMany({ data: rows }),
+    ])
+  } catch (e) {
+    // 事务失败：DB 回滚（旧 chunks 保留），清理刚写的新磁盘文件
+    await Promise.all(writtenFiles.map((p) => fs.rm(p, { force: true }).catch(() => {})))
+    throw new Error(`恢复失败（DB 事务已回滚，旧 chunks 保留）：${(e as Error).message}`)
+  }
+
+  // ---- LOGIC-003：先 upsert 新向量到 Qdrant，成功后再删除旧向量（无空窗）----
+  let vectorRestored = false
+  try {
+    const store = await getVectorStore()
+    const settings = await getRagSettings()
+    // 父文本（与 pipeline.execEmbed 同口径：≤2000 token 入子 payload）
+    const parentIds = Array.from(new Set(rows.map((r) => r.parentId).filter((v): v is string => Boolean(v))))
+    const parentTextMap = new Map<string, string>()
+    if (parentIds.length > 0) {
+      const parents = rows.filter((r) => parentIds.includes(r.id))
+      for (const p of parents) {
+        try {
+          parentTextMap.set(p.id, await fs.readFile(resolveStorageKey(p.storageKey), 'utf-8'))
+        } catch {
+          parentTextMap.set(p.id, p.textPreview)
+        }
+      }
+    }
+    // 构建 points（payload 与 execEmbed §6.4 契约一致）
+    const points: PointInput[] = childRows.map((c, i) => {
+      const parentFull = c.parentId ? parentTextMap.get(c.parentId) : undefined
+      const parentText = parentFull && countTokens(parentFull) <= 2000 ? parentFull : undefined
+      const payload: Record<string, unknown> = {
+        kb_id: kb.id,
+        doc_id: docId,
+        parent_id: c.parentId,
+        page: c.pageFrom,
+        page_from: c.pageFrom,
+        page_to: c.pageTo,
+        bbox_from: safeParseArray(c.bboxFrom),
+        bbox_to: safeParseArray(c.bboxTo),
+        seq: c.seq,
+        token_count: c.tokenCount,
+        text_preview: (childTexts[i] ?? '').slice(0, 200),
+        doc_type: c.docType,
+        enabled: c.enabled,
+        created_at: Date.now(),
+        ...(parentText ? { parent_text: parentText } : {}),
+      }
+      return { id: c.id, dense: emb.vectors[i], sparse: emb.sparse[i], payload }
+    })
+    await store.ensureCollection(kb.collection, kb.dim || 1024, {
+      hnswM: settings.row.qdrantHnswM ?? 0,
+    })
+    // 先 upsert 新向量（按 chunk ID 覆盖/新增）—— 此时旧向量仍在，无空窗
+    const UPSERT_BATCH = 256
+    for (let i = 0; i < points.length; i += UPSERT_BATCH) {
+      await store.upsertPoints(kb.collection, points.slice(i, i + UPSERT_BATCH))
+    }
+    // 再删除旧向量中不在新 chunk 集合的（恢复后已不存在的 chunk 对应向量）
+    // 批量删除（Qdrant deletePoints 单次有上限，按 256 切分）
+    const DELETE_BATCH = 256
+    for (let i = 0; i < staleVectorIds.length; i += DELETE_BATCH) {
+      await store.deletePoints(kb.collection, staleVectorIds.slice(i, i + DELETE_BATCH))
+    }
+    vectorRestored = true
+  } catch (e) {
+    // 向量层失败：DB 与磁盘已成功（chunks 已恢复），仅向量缺失。
+    // 明确报错而非静默丢失；文档状态标记为 failed 提示用户重试 embed。
+    console.error('[versions] 恢复向量层失败（chunk 层已恢复）:', (e as Error).message)
+    await db.document.update({
+      where: { id: docId },
+      data: {
+        status: 'failed',
+        errorCode: 'RESTORE_VECTOR_FAILED',
+        errorMessage: `版本恢复：chunk 已恢复到 v${version}，但向量重写失败：${(e as Error).message}（可在文档中心重试嵌入）`,
+      },
+    })
+    await emitToRoom('global', 'pipeline:activity', {
+      at: Date.now(),
+      level: 'error',
+      message: `版本恢复部分失败：${doc.filename} → v${version}（chunk 已恢复，向量重写失败，需重试嵌入）`,
+    })
+    throw new Error(`版本恢复：chunk 层已恢复到 v${version}，但向量重写失败：${(e as Error).message}（请到文档中心重试嵌入）`)
   }
 
   // 3.5)【16-d】文档产物回写：恢复版本后 full.md 也要回到该版本文本，
@@ -794,13 +899,14 @@ export async function restoreDocVersion(docId: string, version: string): Promise
     console.warn('[versions] 恢复回写 full.md 失败（chunk 层已恢复）:', (e as Error).message)
   }
 
-  // 4) 状态回写 + 入队 embed（重嵌入 + 向量库重写）
+  // 4) 状态回写为 ready（embed + upsert 已同步完成，无需入队流水线）+ 触发文档就绪事件
   const meta = safeMeta(doc.metaJson)
+  const tookMs = 0 // 恢复是即时动作，无 runStartedAt 概念
   await db.document.update({
     where: { id: docId },
     data: {
-      status: 'queued',
-      stageProgress: 0,
+      status: 'ready',
+      stageProgress: 100,
       errorCode: null,
       errorMessage: null,
       metaJson: JSON.stringify({
@@ -811,14 +917,26 @@ export async function restoreDocVersion(docId: string, version: string): Promise
       }),
     },
   })
-  await enqueueDocument(docId, 'embed')
+  // 文档就绪事件 + KB 统计刷新（与 pipeline.finalizeReady 同口径）
+  documentDone({ docId, kbId: doc.kbId, status: 'ready', chunkCount: snapChunks.length, tookMs })
+  await updateKbStats(doc.kbId)
   await emitToRoom('global', 'pipeline:activity', {
     at: Date.now(),
     level: 'info',
-    message: `版本恢复：${doc.filename} → v${version}（新版本 v${restoredVersion}，${snapChunks.length} chunks 重新向量化中）`,
+    message: `版本恢复完成：${doc.filename} → v${version}（新版本 v${restoredVersion}，${snapChunks.length} chunks${vectorRestored ? ' · 向量已同步重写' : ' · 向量未变更'}）`,
   })
 
   return { ok: true, restoredVersion, fromVersion: version, chunkCount: snapChunks.length, degradedChunks: degraded, mdRestored }
+}
+
+/** JSON 数组安全解析（与 pipeline.safeParseArray 同语义，避免循环依赖） */
+function safeParseArray(s: string | null | undefined): number[] {
+  try {
+    const v = JSON.parse(s || '[]')
+  return Array.isArray(v) ? v : []
+  } catch {
+    return []
+  }
 }
 
 /** 删除历史版本快照（§27）：'current' 无文件不可删 */
