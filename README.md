@@ -87,7 +87,7 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 **P1 — 严重**
 - **`/api/metrics` 被 401 拦截（A03）**：v1.10 引入面板鉴权后豁免清单漏配 `/api/metrics` → Prometheus 抓取（不带 panel Cookie）监控断流。修复：路由内独立 scrape token 鉴权——配置 `METRICS_SCRAPE_TOKEN`（≥16 位）后校验 `?token=` 或 `Authorization: Bearer`；面板会话仍可查看；都无则 401（不再无条件公开指标）。
-- **`/api/system/health` 被 401 拦截（A04）**：Docker HEALTHCHECK / 网关探活全失败。修复：`/api/system/health` 加入公开豁免清单（健康探针不含敏感数据）。
+- **`/api/system/health` 被 401 拦截（A04 → SEC-002 拆分）**：Docker HEALTHCHECK / 网关探活全失败。早期修复把 `/api/system/health` 整体豁免，但该端点聚合 Qdrant / 向量 / Embedding / MinerU 等内部状态，公开暴露内部信息（SEC-002）。现拆分：`/api/system/health/live` 公开仅返回 `{ok:true}` 供外部探活；`/api/system/health` 需面板会话返回详细聚合状态。Docker HEALTHCHECK / k8s liveness probe 请改用 `/api/system/health/live`。
 - **备份恢复回退端口 3000（A05）**：`backup.ts` `defaultOrigin()` 回退端口硬编码 3000，v1.10 端口已迁移到 2607。直接 `bun .next/standalone/server.js` 启动时 PORT 为空 → Qdrant 回拉失败、含快照备份静默损坏。修复：回退端口优先级 `PORT > PANEL_PORT > 2607`。
 - **`.env.example` 覆盖 2/13（A06）**：仅定义 `PANEL_PORT`、`DATABASE_URL`，新部署者不知密钥注入、事件端口、监控 token。修复：补齐全部 14 个环境变量（含 A02/A03 新增的初始口令与 scrape token），分五组并标注 `[必配-生产]`/`[可选]`，附生成示例（`openssl rand`）。
 - **全仓无测试（A08）**：v1.10 大量并发/鉴权/重试/解压改动仅静态审计覆盖。修复：引入 `bun test`（原生支持，无需依赖），新增 4 测试文件 25 用例——中间件豁免前缀（固化 A03/A04 回归保护）、`retryBackoffMs` 退避序列边界、`createKeyHash`/`apiKeyColumns` 明文不落库契约、`safeUnzip` 三层解压预算（炸弹不进内存）。为可测性导出 `retryBackoffMs`/`RETRY_BACKOFF_BASE_MS`/`isPublicApiPath`。

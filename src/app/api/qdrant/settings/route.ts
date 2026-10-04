@@ -3,6 +3,7 @@ import { db } from '@/lib/db'
 import { recordOp } from '@/lib/rag/oplog'
 import { testConnection } from '@/lib/qdrant'
 import { MINERU_PROVIDERS, invalidateRagSettingsCache, normalizeMinerUProvider } from '@/lib/rag/settings'
+import { assertPublicHttpUrl, SsrfError } from '@/lib/rag/ssrf'
 
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
@@ -124,6 +125,34 @@ export async function PUT(req: NextRequest) {
         { error: '无效 mineruPdfPartPages（需 0-10000 的整数，0 = 按服务商默认）' },
         { status: 400 },
       )
+    }
+  }
+  // SEC-002：SSRF 校验管理员配置的服务 URL——qdrant.url / mineruApiUrl / embedApiBase / rerankApiBase
+  // 防止管理员误配内网地址（或被低权限子账号篡改到内网）后，主服务被用作 SSRF 跳板访问云元数据等。
+  // 仅校验非空且非掩码值；空串表示「清空配置」，不校验。
+  const ssrfUrls: { field: string; raw: string }[] = []
+  const collectSsrf = (field: keyof SettingsInput, raw: string | undefined) => {
+    const v = typeof raw === 'string' ? raw.trim() : ''
+    if (v && !isMaskedOrEmpty(v)) ssrfUrls.push({ field, raw: v })
+  }
+  collectSsrf('url', body.url)
+  collectSsrf('mineruApiUrl', body.mineruApiUrl)
+  collectSsrf('embedApiBase', body.embedApiBase)
+  collectSsrf('rerankApiBase', body.rerankApiBase)
+  for (const { field, raw } of ssrfUrls) {
+    let parsed: URL
+    try {
+      parsed = new URL(raw)
+    } catch {
+      return NextResponse.json({ error: `${field} 不是合法 URL：${raw.slice(0, 200)}` }, { status: 400 })
+    }
+    try {
+      await assertPublicHttpUrl(parsed)
+    } catch (e) {
+      if (e instanceof SsrfError) {
+        return NextResponse.json({ error: `${field} 被拒绝：${e.message}` }, { status: 400 })
+      }
+      return NextResponse.json({ error: `${field} 校验失败：${(e as Error).message}` }, { status: 400 })
     }
   }
   // mineruProvider 缺省时保留现值（旧客户端/基座 SettingsDialog 不携带该字段，避免意外重置回 selfhost）

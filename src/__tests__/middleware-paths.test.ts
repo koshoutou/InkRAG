@@ -2,12 +2,13 @@
  * 中间件公开豁免前缀单元测试（A08）
  *
  * 覆盖回归：v1.10 引入面板鉴权后，/api/metrics 与 /api/system/health 曾被 401 拦截
- * （A03/A04）。本测试固化豁免清单，防止未来重构再次漏配运维端点。
+ * （A03/A04）。SEC-002 进一步拆分：/api/system/health 改需鉴权（暴露内部状态），
+ * 公开探活迁到 /api/system/health/live（仅 {ok:true}）。本测试固化豁免清单。
  */
 import { test, expect } from 'bun:test'
 import { isPublicApiPath } from '@/middleware'
 
-const PUBLIC_EXACT = ['/api/auth', '/api/input', '/api/system/health', '/api/metrics']
+const PUBLIC_EXACT = ['/api/auth', '/api/input', '/api/system/health/live', '/api/metrics']
 const PROTECTED_SAMPLES = [
   '/api/kb',
   '/api/documents',
@@ -39,8 +40,14 @@ test('前缀匹配不应误判：/api/authx 不应被 /api/auth 豁免', () => {
   expect(isPublicApiPath('/api/authx')).toBe(false)
   expect(isPublicApiPath('/api/input-thing')).toBe(false)
   expect(isPublicApiPath('/api/metrics-summary')).toBe(false)
-  // /api/system/healthz 不应被 /api/system/health 豁免（精确 + 子段）
+  // /api/system/healthz 不应被 /api/system/health/live 豁免（精确 + 子段）
   expect(isPublicApiPath('/api/system/healthz')).toBe(false)
+  // SEC-002：/api/system/health（详细聚合）现需鉴权，不应被豁免
+  expect(isPublicApiPath('/api/system/health')).toBe(false)
+})
+
+test('SEC-002：/api/system/health/live 公开探针应放行', () => {
+  expect(isPublicApiPath('/api/system/health/live')).toBe(true)
 })
 
 test('管理端点应被拦截（需面板会话）', () => {
