@@ -30,20 +30,20 @@ const EMIT_PORT = Number(process.env.RAG_EVENTS_EMIT_PORT ?? process.env.EMIT_PO
 //
 // 密钥来源（按优先级）：
 //   1) 字面量环境变量：PANEL_SECRET（主服务名，推荐）或 RAG_EVENTS_SECRET（历史别名，兼容旧部署）
-//   2) 密钥文件：PANEL_SECRET_FILE 或 RAG_EVENTS_SECRET_FILE，默认 db/.panel.secret
-//      （基址统一为 process.cwd()，与主应用 src/lib/rag/panel-auth.ts 完全一致——
-//       避免 cwd 与 import.meta.dir 两套基址导致两服务读到不同文件、票据 HMAC 不匹配）
+//   2) 密钥文件：PANEL_SECRET_FILE 或 RAG_EVENTS_SECRET_FILE（推荐生产显式指定绝对路径）；
+//      默认用 import.meta.dir 回溯到项目根 db/.panel.secret——与主应用 cwd 基址在 dev 下
+//      指向同一文件（主应用从项目根启动 cwd=项目根，本服务 import.meta.dir/../../ 亦=项目根）。
+//      standalone 部署若 cwd 与项目根不同，显式注入 PANEL_SECRET_FILE 指向同一绝对路径即可。
 //
 // 密钥派生：events ticket（握手）+ emit secret（服务间）。详见 docs/api-contract.md §36。
 // ---------------------------------------------------------------------------
-// 历史问题（A01/A07）：早期 mini-service 仅认 RAG_EVENTS_SECRET 变量名与 import.meta.dir 基址，
-// 主服务仅认 PANEL_SECRET 与 cwd 基址——运维按主服务文档注入 PANEL_SECRET 后，
-// mini-service 读不到密钥 → getSecret() 返回 '' → 所有 socket 握手被拒 + /emit 403，
-// 且无启动期告警。现统一两套变量名与基址，并在启动期探测密钥可达性。
+// 历史问题（A01/A07）：早期 mini-service 仅认 RAG_EVENTS_SECRET 变量名，主服务仅认 PANEL_SECRET
+// ——运维按主服务文档注入 PANEL_SECRET 后，mini-service 读不到密钥 → getSecret() 返回 '' →
+// 所有 socket 握手被拒 + /emit 403，且无启动期告警。现双向兼容两套变量名，并在启动期探测密钥可达性。
 const SECRET_FILE =
   process.env.PANEL_SECRET_FILE ??
   process.env.RAG_EVENTS_SECRET_FILE ??
-  path.resolve(process.cwd(), 'db/.panel.secret')
+  path.resolve(import.meta.dir, '../../db/.panel.secret')
 let cachedSecret: string | null = null
 
 async function getSecret(): Promise<string> {

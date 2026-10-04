@@ -29,9 +29,11 @@ export const SESSION_TTL_MS = 12 * 60 * 60_000
 const secretCacheG = globalThis as unknown as { __panelSecret?: string }
 
 function secretFilePath(): string {
-  // standalone 生产模式下 cwd 为 .next/standalone，退回项目根的 db/（server.js 与 db/ 同级部署时）
-  // 同时接受 PANEL_SECRET_FILE（主服务名）与 RAG_EVENTS_SECRET_FILE（mini-service 历史名），
-  // 两服务共享同一密钥文件——见 A01/A07 修复说明
+  // 主服务基址为 process.cwd()（dev 下 cwd=项目根 → 项目根/db/.panel.secret）。
+  // mini-service 基址为 import.meta.dir/../../（同样回溯到项目根 db/.panel.secret）——
+  // 两服务在 dev 下解析到同一文件；standalone 部署若 cwd 与项目根不同，显式注入
+  // PANEL_SECRET_FILE / RAG_EVENTS_SECRET_FILE 指向同一绝对路径即可（或注入 PANEL_SECRET 字面量跳过文件）。
+  // 双向接受 PANEL_SECRET_FILE（主服务名）与 RAG_EVENTS_SECRET_FILE（mini-service 历史名）。
   return (
     process.env.PANEL_SECRET_FILE ??
     process.env.RAG_EVENTS_SECRET_FILE ??
