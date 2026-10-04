@@ -38,12 +38,23 @@ export async function GET(req: NextRequest, ctx: Ctx) {
     const url = new URL(req.url)
     const status = url.searchParams.get('status') || undefined
     const q = url.searchParams.get('q') || undefined
+    // FE-010: 解析引擎筛选（mineru / fallback）
+    const engine = url.searchParams.get('engine') || undefined
     const limit = Math.min(Math.max(parseInt(url.searchParams.get('limit') ?? '50') || 50, 1), 200)
     const offset = Math.max(parseInt(url.searchParams.get('offset') ?? '0') || 0, 0)
 
     const where: Record<string, unknown> = { kbId: id }
     if (status) where.status = status
     if (q) where.filename = { contains: q }
+    // engine=fallback 时匹配空字符串（未解析的 queued/failed 文档 parseEngine 为 ''），
+    // engine=mineru 时精确匹配；其他值精确匹配
+    if (engine) {
+      if (engine === 'fallback') {
+        where.parseEngine = { in: ['fallback', ''] }
+      } else {
+        where.parseEngine = engine
+      }
+    }
 
     const [docs, total] = await Promise.all([
       db.document.findMany({ where, orderBy: { createdAt: 'desc' }, take: limit, skip: offset }),

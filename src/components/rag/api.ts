@@ -197,7 +197,7 @@ export const ragApi = {
   // -- §2 文档 --------------------------------------------------------------
   async listDocs(
     kbId: string,
-    opts: { status?: string; q?: string; limit?: number; offset?: number } = {},
+    opts: { status?: string; q?: string; engine?: string; limit?: number; offset?: number } = {},
   ): Promise<{ docs: DocSummary[]; total: number }> {
     return asJson(await req(`/api/kb/${encodeURIComponent(kbId)}/documents${qs(opts)}`, { cache: 'no-store' }))
   },

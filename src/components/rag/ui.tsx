@@ -165,6 +165,41 @@ export function VectorModeBadge({ mode, className }: { mode: VectorMode | null |
   )
 }
 
+/**
+ * FE-009: 解析引擎徽章
+ * mineru → 蓝色（云服务精准解析）
+ * fallback → 琥珀色（本地降级解析器）
+ * 空/未知 → 灰色（未解析 / queued）
+ */
+export function ParseEngineBadge({ engine, className }: { engine: string | null | undefined; className?: string }) {
+  if (!engine) {
+    return (
+      <Badge variant="outline" className={cn('border-stone-400/40 bg-stone-400/10 text-stone-500 dark:text-stone-400', className)}>
+        未解析
+      </Badge>
+    )
+  }
+  if (engine === 'mineru') {
+    return (
+      <Badge variant="outline" className={cn('border-sky-500/40 bg-sky-500/10 text-sky-600 dark:text-sky-300', className)}>
+        MinerU
+      </Badge>
+    )
+  }
+  if (engine === 'fallback') {
+    return (
+      <Badge variant="outline" className={cn('border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300', className)}>
+        本地引擎
+      </Badge>
+    )
+  }
+  return (
+    <Badge variant="outline" className={cn('border-stone-400/40 bg-stone-400/10 text-stone-500 dark:text-stone-400', className)}>
+      {engine}
+    </Badge>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // 数字动画（CountUp）
 // ---------------------------------------------------------------------------

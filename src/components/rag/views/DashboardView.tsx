@@ -31,6 +31,7 @@ import {
   DOC_STATUSES,
   STATUS_META,
   ErrorCard,
+  ParseEngineBadge,
   StatCard,
   StatusBadge,
   ViewPage,
@@ -286,6 +287,7 @@ export function DashboardView() {
                 <TableRow>
                   <TableHead className="h-8 text-[11px]">文件名</TableHead>
                   <TableHead className="h-8 text-[11px]">知识库</TableHead>
+                  <TableHead className="h-8 text-[11px]">引擎</TableHead>
                   <TableHead className="h-8 text-[11px]">状态</TableHead>
                   <TableHead className="h-8 text-[11px] text-right">时间</TableHead>
                 </TableRow>
@@ -299,6 +301,7 @@ export function DashboardView() {
                   }}>
                     <TableCell className="max-w-[320px] truncate py-2 text-xs font-medium">{doc.filename}</TableCell>
                     <TableCell className="max-w-[160px] truncate py-2 text-xs text-muted-foreground">{doc.kbName}</TableCell>
+                    <TableCell className="py-2"><ParseEngineBadge engine={doc.parseEngine} /></TableCell>
                     <TableCell className="py-2"><StatusBadge status={doc.status} /></TableCell>
                     <TableCell className="py-2 text-right text-[11px] text-muted-foreground">{timeAgo(doc.updatedAt)}</TableCell>
                   </TableRow>

@@ -56,6 +56,7 @@ import {
   DOC_STATUSES,
   EmptyHint,
   ErrorCard,
+  ParseEngineBadge,
   PROCESSING_STATUSES,
   STATUS_META,
   StatusBadge,
@@ -82,6 +83,7 @@ export function DocumentsView() {
   const { subscribeRooms, on } = useRealtime()
 
   const [statusFilter, setStatusFilter] = useState<string>('all')
+  const [engineFilter, setEngineFilter] = useState<string>('all')
   const [q, setQ] = useState('')
   const [uploadOpen, setUploadOpen] = useState(false)
   const [deleteDoc, setDeleteDoc] = useState<DocSummary | null>(null)
@@ -95,10 +97,11 @@ export function DocumentsView() {
   }, [activeKbId, kbs, setKb])
 
   const docsQuery = useQuery({
-    queryKey: ['docs', activeKbId, statusFilter, q],
+    queryKey: ['docs', activeKbId, statusFilter, engineFilter, q],
     queryFn: () =>
       ragApi.listDocs(activeKbId!, {
         status: statusFilter !== 'all' ? statusFilter : undefined,
+        engine: engineFilter !== 'all' ? engineFilter : undefined,
         q: q.trim() || undefined,
         limit: 200,
       }),
@@ -294,6 +297,17 @@ export function DocumentsView() {
             ))}
           </SelectContent>
         </Select>
+        {/* FE-010: 解析引擎筛选 */}
+        <Select value={engineFilter} onValueChange={setEngineFilter}>
+          <SelectTrigger className="h-8 w-36 text-xs">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all" className="text-xs">全部引擎</SelectItem>
+            <SelectItem value="mineru" className="text-xs">MinerU</SelectItem>
+            <SelectItem value="fallback" className="text-xs">本地引擎</SelectItem>
+          </SelectContent>
+        </Select>
         <span className="ml-auto text-[11px] text-muted-foreground">
           共 {formatNumber(docsQuery.data?.total ?? 0)} 个文档
         </span>
@@ -483,24 +497,7 @@ function DocRow({
         </div>
       </TableCell>
       <TableCell className="py-2.5">
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Badge
-                variant="outline"
-                className={cn(
-                  'text-[10px]',
-                  doc.parseEngine === 'mineru'
-                    ? 'border-teal-500/40 bg-teal-500/10 text-teal-600 dark:text-teal-300'
-                    : 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-300',
-                )}
-              >
-                {doc.parseEngine === 'mineru' ? 'MinerU' : '降级解析'}
-              </Badge>
-            </TooltipTrigger>
-            <TooltipContent className="text-xs">解析引擎：{doc.parseEngine}</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
+        <ParseEngineBadge engine={doc.parseEngine} />
       </TableCell>
       <TableCell className="py-2.5 text-right text-[11px] tabular-nums text-muted-foreground">
         {formatNumber(doc.chunkCount)} / {formatNumber(doc.layoutBlocks)}
