@@ -1,9 +1,11 @@
 /**
  * RAG 知识库平台 · 流水线实时事件服务 (pipeline-events)
  *
- * 端口（双服务器架构，v2.0 起默认 2608/2609，可用环境变量 SOCKET_PORT/EMIT_PORT 覆盖）：
+ * 端口（双服务器架构，v2.0 起默认 2608/2609，可用环境变量覆盖）：
  *   - 2608：socket.io 服务（path 必须为 '/'，Caddy 网关 XTransformPort 转发；前端 io('/?XTransformPort=2608')）
+ *     环境变量：RAG_EVENTS_SOCKET_PORT（推荐，A16 命名空间化）或 SOCKET_PORT（旧名兼容）
  *   - 2609：内部 emit HTTP 服务（Next.js 流水线引擎 → POST http://127.0.0.1:2609/emit）
+ *     环境变量：RAG_EVENTS_EMIT_PORT（推荐）或 EMIT_PORT（旧名兼容）
  *
  * 为什么两个端口：socket.io path='/' 会拦截所有 HTTP 请求（engine.io startsWith 匹配），
  * 普通 REST 端点无法共存于 2608；emit 走服务间直连，不经网关。
@@ -19,8 +21,9 @@ import { promises as fs } from 'node:fs'
 import path from 'node:path'
 import { Server, type Socket } from 'socket.io'
 
-const SOCKET_PORT = Number(process.env.SOCKET_PORT) || 2608
-const EMIT_PORT = Number(process.env.EMIT_PORT) || 2609
+// A16：端口变量名纳入命名空间（RAG_EVENTS_*），保留旧名 SOCKET_PORT/EMIT_PORT 兼容读取
+const SOCKET_PORT = Number(process.env.RAG_EVENTS_SOCKET_PORT ?? process.env.SOCKET_PORT) || 2608
+const EMIT_PORT = Number(process.env.RAG_EVENTS_EMIT_PORT ?? process.env.EMIT_PORT) || 2609
 
 // ---------------------------------------------------------------------------
 // F-EXT-14：事件链路鉴权——与主应用共享密钥文件 db/.panel.secret
