@@ -77,6 +77,21 @@ cd mini-services/pipeline-events && bun install && bun run dev
 
 ## 更新日志
 
+### v1.18（2026-10 · 仪表盘吞吐趋势图与文档中心批量删除 3 项）
+
+> 本轮聚焦于让用户直观看到流水线近 24h 的吞吐健康度，并在文档中心支持选中多个文档批量删除，提升运维效率。
+
+**仪表盘吞吐趋势（FE-013/BE-015）**
+- **BE-015 `/api/dashboard` 增加 `throughputTrend` 字段**：近 24h 按小时桶聚合 `completed`/`failed` 任务数（`finishedAt >= 24h前`）；24 桶，0=最旧 → 23=当前小时，每桶 `{hour: 'HH:00', completed, failed}`。
+- **FE-013 仪表盘「流水线吞吐趋势」图**：recharts `AreaChart` 双路面积图（completed emerald + failed rose），渐变填充 + CartesianGrid + XAxis 每 4h + YAxis 整数 + RTooltip；顶部图例显示完成/失败总数 + 「近 24h」标签；无数据时显示空态提示。
+
+**文档中心批量删除（FE-014）**
+- **文档中心新增批量删除**：`selectedIds` Set + `toggleSelect`/`selectAll`/`selectNone`；表头新增全选 Checkbox 列；DocRow 新增行内 Checkbox + 选中高亮（sky/5）；「批量删除」按钮仅在 `selectedIds.size>0` 时显示（红色 + 数量 Badge）；`runBatchDelete` 循环 `deleteDoc`，toast 汇总成功/失败 + 清理 chunk 数；AlertDialog 二次确认（红色强调不可撤销 + 安全提示）；删除后清空选中 + 刷新 docs/dashboard。
+
+**E2E 验证**
+- API: `throughputTrend` 24 桶，total completed=6 failed=1 ✓
+- UI: 仪表盘「吞吐趋势」卡渲染 ✓；文档中心选中后「批量删除」按钮出现 ✓
+
 ### v1.17（2026-10 · 引擎分布可视化与批量降级 3 项）
 
 > 本轮聚焦于让用户在仪表盘直观看到 MinerU vs 本地引擎的文档占比，并在 MinerU 故障期间支持一键批量降级所有失败文档。
