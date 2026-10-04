@@ -20,6 +20,12 @@ next-env.d.ts
 *.sqlite
 *.db
 
+# 面板鉴权机密文件（即使脱离 /db/ 目录也不入库）
+.panel.secret
+.panel.pass
+*.panel.secret
+*.panel.pass
+
 # logs
 *.log
 dev.log

@@ -2,7 +2,8 @@
  * 面板访问鉴权核心（审计 F-E2E-01 🔴 P0：管理面 API 全链路无鉴权）
  *
  * 设计（轻量优先，无外部依赖）：
- * - 密码：scrypt(password, salt) 哈希存 PanelAuth 表（默认密码 koshoutou 首次播种，可在设置中修改）
+ * - 密码：scrypt(password, salt) 哈希存 PanelAuth 表（首次启动随机生成 32 位初始口令，
+ *   落盘 db/.panel.pass 并打印 stdout，可在设置中修改——取代早期硬编码默认口令，见 A02）
  * - 会话：HttpOnly Cookie `panel_session` = `${expTs}.${HMAC-SHA256(secret, 'session:'+expTs)}`
  * - 事件票据：socket.io 握手 auth.ticket = `${expTs}.${HMAC(secret, 'events:'+expTs)}`
  *   （mini-service pipeline-events 用同一密钥文件校验，见 mini-services/pipeline-events/index.ts）
@@ -115,7 +116,8 @@ export async function verifySessionToken(token: string | undefined | null): Prom
 
 /** 签发 socket.io 事件票据（前端握手 auth.ticket；TTL 与会话一致） */
 export async function createEventsTicket(): Promise<{ ticket: string; exp: number }> {
-  return makeToken(await getPanelSecret(), 'events', SESSION_TTL_MS)
+  const { token, exp } = makeToken(await getPanelSecret(), 'events', SESSION_TTL_MS)
+  return { ticket: token, exp }
 }
 
 /** 校验 socket.io 事件票据（mini-service 侧用同一密钥文件独立实现） */
@@ -132,7 +134,87 @@ export async function eventsEmitSecret(): Promise<string> {
 // 密码哈希（scrypt；仅 /api/auth/* 路由使用，middleware 不涉及）
 // ---------------------------------------------------------------------------
 
-export const DEFAULT_PANEL_PASSWORD = 'koshoutou'
+// 初始面板口令文件（gitignore 覆盖 /db/；首次启动随机生成并落盘，取代早期硬编码默认口令）
+// 历史问题（A02 P0）：DEFAULT_PANEL_PASSWORD 曾硬编码为 'koshoutou'，且该字符串同时是
+// 作者联系 ID（任何拿到仓库者皆知初始口令）。现改为每实例首次启动随机生成 32 位口令，
+// 落盘 db/.panel.pass（0600）并打印到 stdout，登录后建议立即在「设置 → 面板安全」修改。
+const INITIAL_PASS_FILE = process.env.PANEL_INITIAL_PASS_FILE ?? path.join(process.cwd(), 'db', '.panel.pass')
+const initialPassCacheG = globalThis as unknown as { __panelInitialPass?: string }
+
+/** 生成易读随机口令（去除 IO01lo 等易混字符，32 位） */
+function generateRandomPassword(len = 32): string {
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+  const bytes = randomBytes(len)
+  let out = ''
+  for (let i = 0; i < len; i++) out += alphabet[bytes[i] % alphabet.length]
+  return out
+}
+
+/**
+ * 读取（或生成并落盘）首次启动的初始面板口令。
+ *
+ * 来源优先级：
+ *   1) 环境变量 PANEL_INITIAL_PASSWORD（部署时显式注入，跳过文件生成）
+ *   2) 文件 db/.panel.pass（已存在则复用，保持跨重启稳定，避免每次启动口令都变）
+ *   3) 首次启动：生成 32 位随机口令 → 写文件（0600）→ 打印到 stdout
+ *
+ * 该口令仅在 PanelAuth 表为空时用于播种；用户改密后该口令即失效（但文件保留作为「是否仍为
+ * 初始口令」的比对基准，见 /api/auth/session 的 defaultPassword 判定）。
+ */
+export async function getInitialPanelPassword(): Promise<string> {
+  if (initialPassCacheG.__panelInitialPass) return initialPassCacheG.__panelInitialPass
+  // 1) 环境变量优先（部署注入）
+  const fromEnv = process.env.PANEL_INITIAL_PASSWORD?.trim()
+  if (fromEnv && fromEnv.length >= 6) {
+    initialPassCacheG.__panelInitialPass = fromEnv
+    return fromEnv
+  }
+  // 2) 文件复用
+  try {
+    const existing = (await fs.readFile(INITIAL_PASS_FILE, 'utf-8')).trim()
+    if (existing.length >= 16) {
+      initialPassCacheG.__panelInitialPass = existing
+      return existing
+    }
+  } catch {
+    /* 不存在则生成 */
+  }
+  // 3) 首次生成
+  const fresh = generateRandomPassword(32)
+  try {
+    await fs.mkdir(path.dirname(INITIAL_PASS_FILE), { recursive: true })
+    await fs.writeFile(INITIAL_PASS_FILE, fresh, { mode: 0o600 })
+    // 醒目输出，避免运维错过；登录后应立即修改
+    console.warn('\n========================================================')
+    console.warn('[panel-auth] 首次启动：已生成随机初始面板口令（32 位）')
+    console.warn(`[panel-auth] 初始口令：${fresh}`)
+    console.warn(`[panel-auth] 已写入 ${INITIAL_PASS_FILE}（0600，gitignore）`)
+    console.warn('[panel-auth] 请用此口令登录后，立即在「设置 → 面板安全」修改为自己的密码。')
+    console.warn('========================================================\n')
+  } catch (e) {
+    // 只读文件系统等场景：退回进程内口令（重启后失效，需重新生成）
+    console.warn('[panel-auth] 初始口令文件写入失败（退回进程内口令，重启后将重新生成）:', (e as Error).message)
+    console.warn('[panel-auth] 本次启动初始口令：', fresh)
+  }
+  initialPassCacheG.__panelInitialPass = fresh
+  return fresh
+}
+
+/**
+ * @deprecated 早期硬编码默认口令（已移除）。保留导出名以兼容可能的旧引用，
+ * 实际首次口令请改用 getInitialPanelPassword()（异步，每实例随机）。
+ * 访问该属性会抛出，强制调用方迁移到新接口。
+ */
+export const DEFAULT_PANEL_PASSWORD: string = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error(
+        'DEFAULT_PANEL_PASSWORD 已移除（硬编码默认口令不安全），请改用 getInitialPanelPassword()',
+      )
+    },
+  },
+) as string
 
 export function hashPassword(password: string, saltHex?: string): { hash: string; salt: string } {
   const salt = saltHex ?? randomBytes(16).toString('hex')

@@ -8,17 +8,18 @@
  *   POST /api/auth/password { current, next } → 修改面板密码（需已登录）
  *   GET  /api/auth/events-ticket → socket.io 握手票据（需已登录）
  *
- * 密码存储：PanelAuth 单行（scrypt + 盐）；首次访问播种默认密码 koshoutou。
+ * 密码存储：PanelAuth 单行（scrypt + 盐）；首次访问播种「随机初始口令」（每实例独立，
+ * 写入 db/.panel.pass 并打印 stdout，取代早期硬编码默认口令）。详见 src/lib/rag/panel-auth.ts。
  */
 import { NextRequest, NextResponse } from 'next/server'
 import { db } from '@/lib/db'
 import { recordOp } from '@/lib/rag/oplog'
 import {
-  DEFAULT_PANEL_PASSWORD,
   PANEL_SESSION_COOKIE,
   SESSION_TTL_MS,
   createEventsTicket,
   createSessionToken,
+  getInitialPanelPassword,
   hashPassword,
   loginLockRemaining,
   recordLoginFail,
@@ -32,11 +33,12 @@ export const runtime = 'nodejs'
 
 type Ctx = { params: Promise<{ action?: string[] }> }
 
-/** 读取（或播种）面板密码行 */
+/** 读取（或播种）面板密码行；首次为空时用随机初始口令播种 */
 async function getPasswordRow() {
   let row = await db.panelAuth.findUnique({ where: { id: 'default' } })
   if (!row) {
-    const seeded = hashPassword(DEFAULT_PANEL_PASSWORD)
+    const initial = await getInitialPanelPassword()
+    const seeded = hashPassword(initial)
     row = await db.panelAuth.upsert({
       where: { id: 'default' },
       update: {},
@@ -46,7 +48,7 @@ async function getPasswordRow() {
       level: 'info',
       category: 'auth',
       action: 'auth.panel_seeded',
-      message: '面板访问密码未初始化，已播种默认密码（请在设置中修改）',
+      message: '面板访问密码未初始化，已播种随机初始口令（请在设置中修改）',
     })
   }
   return row
@@ -174,15 +176,19 @@ export async function GET(req: NextRequest, ctx: Ctx) {
       if (!authenticated) {
         return NextResponse.json({ error: '面板未登录' }, { status: 401 })
       }
-      const { token: ticket, exp } = await createEventsTicket()
+      const { ticket, exp } = await createEventsTicket()
       return NextResponse.json({ ticket, exp })
     }
     if (kind === 'session') {
-      // 附带是否仍为默认密码（提示用户修改）
+      // 附带是否仍为初始口令（提示用户修改）——比对 getInitialPanelPassword() 返回的口令哈希
+      // 历史问题（A02）：早期比对硬编码 DEFAULT_PANEL_PASSWORD，现改为随机初始口令
       let defaultPassword = false
       if (authenticated) {
         const row = await db.panelAuth.findUnique({ where: { id: 'default' } })
-        if (row) defaultPassword = verifyPassword(DEFAULT_PANEL_PASSWORD, row.passwordSalt, row.passwordHash)
+        if (row) {
+          const initial = await getInitialPanelPassword()
+          defaultPassword = verifyPassword(initial, row.passwordSalt, row.passwordHash)
+        }
       }
       return NextResponse.json({ authenticated, defaultPassword })
     }

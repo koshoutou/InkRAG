@@ -110,7 +110,7 @@ export function LoginOverlay({ reason }: { reason?: 'expired' }) {
           </Button>
 
           <p className="text-center text-[10px] leading-relaxed text-muted-foreground">
-            面板密码在「设置 → 面板安全」中修改；连续失败 5 次将锁定 30 秒。
+            首次部署？初始口令已打印到服务端启动日志并写入 <code className="font-mono">db/.panel.pass</code>，登录后请在「设置 → 面板安全」修改。连续失败 5 次将锁定 30 秒。
           </p>
         </form>
       </div>

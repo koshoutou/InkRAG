@@ -581,7 +581,7 @@ export function RagSettingsDialog() {
                 <div className="flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2.5 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
                   <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   <span>
-                    <b>当前仍在使用默认密码</b>——首次部署后请立即修改，否则任何知道默认密码的人都可访问与操作本面板（含删除知识库、读取 API Key）。
+                    <b>当前仍在使用初始口令</b>——首次部署后请立即修改，否则任何取得该口令者（如查看服务端日志者）都可访问与操作本面板（含删除知识库、读取 API Key）。
                   </span>
                 </div>
               )}
