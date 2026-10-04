@@ -4,7 +4,7 @@
 // 数据：GET /api/dashboard；socket global 房间事件触发自动刷新
 // §32（Task 17-1）：检索质量趋势卡与最近检索日志已随对外检索 API 一并移除（平台定位收敛为知识库管理）
 
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   Activity,
@@ -23,6 +23,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { cn } from '@/lib/utils'
 import {
   Area,
   AreaChart,
@@ -73,9 +74,12 @@ export function DashboardView() {
   const setView = usePlatformStore((s) => s.setView)
   const { subscribeRooms, on } = useRealtime()
 
+  // FE-015: 吞吐趋势时间范围（1h / 6h / 24h，默认 24h）
+  const [trendRange, setTrendRange] = useState<'1h' | '6h' | '24h'>('24h')
+
   const { data, isLoading, error, refetch, isRefetching } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: () => ragApi.getDashboard(),
+    queryKey: ['dashboard', trendRange],
+    queryFn: () => ragApi.getDashboard(trendRange),
     refetchInterval: 30_000,
   })
 
@@ -300,7 +304,24 @@ export function DashboardView() {
                   <span className="h-2 w-2 rounded-full bg-rose-500" />
                   失败 {totalFailed}
                 </span>
-                <span className="text-muted-foreground">近 24h</span>
+                {/* FE-015: 时间范围切换按钮组 */}
+                <div className="flex items-center rounded-md border border-border/60 bg-muted/30 p-0.5">
+                  {(['1h', '6h', '24h'] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setTrendRange(r)}
+                      className={cn(
+                        'h-5 rounded px-1.5 text-[10px] font-medium transition-colors',
+                        trendRange === r
+                          ? 'bg-primary text-primary-foreground shadow-sm'
+                          : 'text-muted-foreground hover:text-foreground',
+                      )}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
               </div>
             </div>
             {hasData ? (

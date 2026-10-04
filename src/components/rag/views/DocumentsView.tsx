@@ -223,6 +223,29 @@ export function DocumentsView() {
     queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
   }, [activeKbId, batchReparseTargets, queryClient])
 
+  // FE-016: 对选中文档批量重解析（仅选中的，而非全部 ready/failed）
+  const [batchReparseSelectedBusy, setBatchReparseSelectedBusy] = useState(false)
+  const runBatchReparseSelected = useCallback(async () => {
+    if (!activeKbId || selectedIds.size === 0) return
+    setBatchReparseSelectedBusy(true)
+    let ok = 0
+    let fail = 0
+    for (const id of selectedIds) {
+      try {
+        await ragApi.docAction(id, 'reparse')
+        ok++
+      } catch {
+        fail++
+      }
+    }
+    setBatchReparseSelectedBusy(false)
+    setSelectedIds(new Set())
+    if (fail === 0) toast.success(`已对选中的 ${ok} 个文档重新解析（全流水线重跑）`)
+    else toast.warning(`批量重解析完成：成功 ${ok} · 失败 ${fail}`)
+    queryClient.invalidateQueries({ queryKey: ['docs', activeKbId] })
+    queryClient.invalidateQueries({ queryKey: ['dashboard'] })
+  }, [activeKbId, selectedIds, queryClient])
+
   // FE-012: 批量降级重试（MinerU 失败文档 → Node 引擎重试）
   // 对当前 KB 全部 failed 文档调用 retry-with-node（MinerU 故障期间一键降级）
   const [batchFallbackBusy, setBatchFallbackBusy] = useState(false)
@@ -350,6 +373,21 @@ export function DocumentsView() {
             <UploadCloud className="h-3.5 w-3.5" />
             上传 / 导入
           </Button>
+          {/* FE-016: 批量重解析选中（对选中文档而非全部） */}
+          {selectedIds.size > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 gap-1 border-violet-500/40 text-xs text-violet-600 hover:bg-violet-500/10 hover:text-violet-700 dark:text-violet-300"
+              onClick={runBatchReparseSelected}
+              disabled={batchReparseSelectedBusy}
+              title={`对选中的 ${selectedIds.size} 个文档重新走全流水线（切换向量库模式后重新入库）`}
+            >
+              <Layers className={cn('h-3 w-3', batchReparseSelectedBusy && 'animate-pulse')} />
+              批量重解析选中
+              <Badge variant="outline" className="ml-1 h-4 px-1 text-[9px]">{selectedIds.size}</Badge>
+            </Button>
+          )}
           {/* FE-014: 批量删除（选中多个文档） */}
           {selectedIds.size > 0 && (
             <Button

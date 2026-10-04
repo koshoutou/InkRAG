@@ -7,9 +7,17 @@ import type { Document, KnowledgeBase } from '@prisma/client'
 export const dynamic = 'force-dynamic'
 export const runtime = 'nodejs'
 
-/** GET /api/dashboard —— 仪表盘聚合（契约 §7） */
-export async function GET() {
+/** GET /api/dashboard —— 仪表盘聚合（契约 §7）
+ *  ?trendRange=1h|6h|24h（默认 24h）：吞吐趋势图时间范围（FE-015/BE-016） */
+export async function GET(req: NextRequest) {
   try {
+    // FE-015/BE-016: 吞吐趋势时间范围（1h / 6h / 24h，默认 24h）
+    const trendRangeParam = new URL(req.url).searchParams.get('trendRange') ?? '24h'
+    const trendRangeHours = trendRangeParam === '1h' ? 1 : trendRangeParam === '6h' ? 6 : 24
+    // 桶大小：1h 范围按 5 分钟桶（12 桶），6h 按半小时桶（12 桶），24h 按小时桶（24 桶）
+    const bucketMs = trendRangeHours === 1 ? 5 * 60 * 1000 : trendRangeHours === 6 ? 30 * 60 * 1000 : 60 * 60 * 1000
+    const bucketCount = trendRangeHours === 1 ? 12 : trendRangeHours === 6 ? 12 : 24
+
     const [kbs, docs, chunks, enabledChunks, pointAgg] = await Promise.all([
       db.knowledgeBase.count(),
       db.document.count(),
@@ -65,25 +73,30 @@ export async function GET() {
       engineDistribution[key] = (engineDistribution[key] ?? 0) + r._count._all
     }
 
-    // FE-013/BE-015: 流水线吞吐趋势（近 24h 按小时桶完成/失败数）
+    // FE-013/BE-015/016: 流水线吞吐趋势（按 trendRange 小时桶完成/失败数）
     // 用于仪表盘「吞吐趋势」折线图，让用户直观看到流水线健康度变化
-    const trendSince = new Date(Date.now() - 24 * 60 * 60 * 1000)
+    // 1h→5min桶(12), 6h→30min桶(12), 24h→1h桶(24)
+    const trendSinceMs = Date.now() - trendRangeHours * 60 * 60 * 1000
+    const trendSince = new Date(trendSinceMs)
     const trendJobs = await db.pipelineJob.findMany({
       where: { finishedAt: { gte: trendSince }, status: { in: ['completed', 'failed'] } },
       select: { status: true, finishedAt: true },
     })
-    // 按小时桶聚合（24 桶，0=最旧 → 23=当前小时）
+    // 按桶聚合（0=最旧 → bucketCount-1=当前桶）
     const throughputTrend: Array<{ hour: string; completed: number; failed: number }> = []
-    const now = Date.now()
-    for (let h = 23; h >= 0; h--) {
-      const bucketStart = new Date(now - h * 60 * 60 * 1000)
-      const bucketStartMs = bucketStart.getTime()
-      const bucketLabel = `${String(bucketStart.getHours()).padStart(2, '0')}:00`
+    const nowMs = Date.now()
+    for (let b = bucketCount - 1; b >= 0; b--) {
+      const bucketStartMs = nowMs - b * bucketMs
+      const bucketStart = new Date(bucketStartMs)
+      // 桶标签格式：1h→HH:MM, 6h→HH:MM, 24h→HH:00
+      const hh = String(bucketStart.getHours()).padStart(2, '0')
+      const mm = String(bucketStart.getMinutes()).padStart(2, '0')
+      const bucketLabel = trendRangeHours === 24 ? `${hh}:00` : `${hh}:${mm}`
       const completed = trendJobs.filter(
-        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + 3600000 && j.status === 'completed',
+        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + bucketMs && j.status === 'completed',
       ).length
       const failed = trendJobs.filter(
-        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + 3600000 && j.status === 'failed',
+        (j) => j.finishedAt && j.finishedAt.getTime() >= bucketStartMs && j.finishedAt.getTime() < bucketStartMs + bucketMs && j.status === 'failed',
       ).length
       throughputTrend.push({ hour: bucketLabel, completed, failed })
     }

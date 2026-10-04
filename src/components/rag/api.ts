@@ -569,8 +569,9 @@ export const ragApi = {
   },
 
   // -- §7 仪表盘 ------------------------------------------------------------
-  async getDashboard(): Promise<{ dashboard: DashboardData }> {
-    return asJson(await req('/api/dashboard', { cache: 'no-store' }))
+  async getDashboard(trendRange?: '1h' | '6h' | '24h'): Promise<{ dashboard: DashboardData }> {
+    const qs = trendRange ? `?trendRange=${trendRange}` : ''
+    return asJson(await req(`/api/dashboard${qs}`, { cache: 'no-store' }))
   },
 
   // -- §35 程序日志（/api/system/oplogs） ------------------------------------
