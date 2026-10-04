@@ -315,7 +315,7 @@ model ApiKey {
   key            String   @unique
   /// sha256(key) 十六进制（64 位定长；timingSafeEqual 比对）
   keyHash        String   @default("")
-  /// key 前缀（如 lkb-xx…，用于 UI 展示与掩码）
+  /// key 前缀（前 12 位入库作掩码展示，如 rag-xxxx…）
   keyPrefix      String   @default("")
   /// admin | operator | readonly（debug 权限 = operator+）
   role           String   @default("readonly")
