@@ -19,7 +19,7 @@
 
 ### 对外接口（供 AI 调用）
 - **入库 API `/api/input`**：Bearer Key 鉴权（401/403 读写角色分离）；建库（含 retrievalMode 检索模式元数据）/ 多文件并发上传 / 文本直接入库 / 跨库文档查询 / 失败重试 / 级联删除；sha256 秒传、单文件 200MB；超详细文档（应用内一键查看 + `docs/input-api.md`）
-- **Dify 兼容导出 API `/v1/datasets`**：MinerU 面板「导出到 Dify」直接对接本平台——配置入口在「知识库」视图「Dify 导出对接」按钮（地址/Key 配置 + 检查链接/模拟导出/公网可达性三步自检 + 对接文档）；状态映射到 Dify indexing_status、process_rule.max_tokens→chunk size；注意导出由 mineru.net 服务器转发，平台需公网可达（文档 §2）；对接文档 `docs/dify-compat.md`
+- **Dify 兼容导出 API `/v1/datasets`**：MinerU 面板「导出到 Dify」直接对接本平台——配置入口在「知识库」视图「Dify 导出对接」按钮（地址/Key 配置 + Key 内联创建/启停/删除 + 对接文档）；状态映射到 Dify indexing_status、process_rule.max_tokens→chunk size；注意导出由 mineru.net 服务器转发，平台需公网可达（文档 §2）；对接文档 `docs/dify-compat.md`
 - **MCP Server（`mcp/`）**：Claude Desktop / Cursor 等通过 Model Context Protocol 直接入库——10 工具与 /api/input 一一对应，stdio transport，中英双语 README
 
 ### 版本管理

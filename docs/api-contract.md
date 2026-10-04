@@ -736,7 +736,7 @@ RestoreResult = { ok, restored: { ...§11 既有, qdrantRestored: number }, back
 
 ## §34 Dify 兼容数据集 API `/v1/datasets`（Task 17-3，2026-10-03）
 
-**定位**：Dify「知识库 API」兼容子集——MinerU 面板「导出到 Dify」填**本平台根地址 + 平台 API Key**即可直连（无需部署 Dify）。完整对接文档 `docs/dify-compat.md`（应用内入口：知识库视图 →「Dify 导出对接」按钮，含地址/Key 配置、三步链路自检与文档查看；注意「导出」由 mineru.net 服务器转发，平台需公网可达——文档 §2）。
+**定位**：Dify「知识库 API」兼容子集——MinerU 面板「导出到 Dify」填**本平台根地址 + 平台 API Key**即可直连（无需部署 Dify）。完整对接文档 `docs/dify-compat.md`（应用内入口：知识库视图 →「Dify 导出对接」按钮，含地址/Key 配置、Key 管理与文档查看；注意「导出」由 mineru.net 服务器转发，平台需公网可达——文档 §2）。
 
 | 方法 | 路径 | Dify 语义 |
 |---|---|---|

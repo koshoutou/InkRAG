@@ -20,7 +20,7 @@
 
 导出完成后，文档进入平台流水线（解析 → 切分 → 向量化 → 写入 Qdrant），可在平台「文档中心」查看实时进度，用「三屏联动」核对解析产物。
 
-平台「知识库视图 → Dify 导出对接」弹窗内置三个诊断按钮：**检查链接（模拟 MinerU）**、**模拟导出**（真实走一遍 create-by-text 并自动清理测试文档）、**公网可达性检测**（§9）。
+诊断方法：从外部网络（如手机热点）访问 `https://your-domain/v1/datasets`，能看到 JSON 401 响应即说明公网可达。
 
 ---
 
@@ -170,29 +170,11 @@ curl -s -X POST "https://your-domain/v1/datasets/{dataset_id}/document/create-by
 
 ---
 
-## 9. 公网可达性检测（导出失败自检工具）
-
-平台内置 `POST /api/dify/reachability`（知识库视图「Dify 导出对接」弹窗的**公网可达性检测**按钮同源）：
-
-```bash
-curl -s -X POST "https://your-domain/api/dify/reachability" \
-  -H "Content-Type: application/json" \
-  -d '{ "url": "https://your-domain" }'
-```
-
-两路探测，返回结论：
-
-- `direct`：平台进程自身 fetch `/v1/datasets`（预期 401 JSON = 端点活着，参考值）
-- `external`：从**外部网络**抓取同一 URL（预期 401 = 公网可达；DNS 失败/超时 = 不可达）
-- `verdict`：`ok`（端点正常且公网可达）/ `external-unreachable`（端点活着但公网访问不到 → 这就是「检查链接成功但导出失败」的原因）/ `unreachable`（地址或服务本身有问题）
-
----
-
 ## 10. 故障排查
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
-| **检查链接成功但导出失败（“操作失败/导出失败”）** | 导出由 mineru.net 服务器转发调用 `create-by-text`，你的平台地址对它不可达（内网/localhost/临时预览域名）；平台侧日志无任何请求记录即此症状 | 平台部署到公网域名（自有服务器 + 反代），用「公网可达性检测」复测通过后再导出（详见 §2） |
+| **检查链接成功但导出失败（“操作失败/导出失败”）** | 导出由 mineru.net 服务器转发调用 `create-by-text`，你的平台地址对它不可达（内网/localhost/临时预览域名）；平台侧日志无任何请求记录即此症状 | 平台部署到公网域名（自有服务器 + 反代）后重试；可从手机热点/外部网络访问 `https://your-domain/v1/datasets` 能看到 JSON 401 即公网可达（详见 §2） |
 | 检查链接失败 401 | Key 错误/被删 | 在平台知识库视图「Dify 导出对接」或 Agent API 视图重建 Key |
 | 检查链接 404 HTML | 填了带 `/v1` 的地址或平台未部署 | 地址只填根（如 `https://your-domain`） |
 | 建库 500 +「未配置 Qdrant/Embedding」 | 平台设置缺连接 | 平台「设置」里配置并测试通过 Qdrant 与 Embedding |
