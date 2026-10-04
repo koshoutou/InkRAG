@@ -286,6 +286,56 @@ export function isPipelinePaused(): { paused: boolean; reason: string; pausedAt:
 }
 
 /**
+ * BE-010：优雅关闭——暂停新任务 + Abort 所有活跃 Controller + 等待活跃任务退出或超时。
+ *
+ * 步骤：
+ * 1) pausePipelineEngine('shutdown')：tick 不再认领新 pending / waiting_mineru
+ * 2) 遍历 shared().controllers，逐个 abort()——活跃任务在下一个 checkAlive() 检查点
+ *    抛 JobCancelledSignal 安静退出（不写 failed、不发失败事件）
+ * 3) 轮询 shared().active 至 0，或超时（默认 30s）后强制返回
+ * 4) 调用方收到结果后决定是否 process.exit（超时仍未排空 → 强制退出）
+ *
+ * @returns drained=true 表示活跃任务全部排空；false 表示超时仍有活跃任务
+ */
+export async function drainForShutdown(timeoutMs = 30_000): Promise<{ drained: boolean; activeLeft: number; waitedMs: number }> {
+  const eng = ensurePipelineEngine()
+  const t0 = Date.now()
+  // 1) 暂停新任务认领
+  pausePipelineEngine('shutdown')
+  // 2) Abort 所有活跃 Controller（活跃任务在下一个检查点安静退出）
+  const sh = shared()
+  const controllers = Array.from(sh.controllers.values())
+  for (const c of controllers) {
+    try {
+      c.abort()
+    } catch {
+      /* abort 二次调用安全 */
+    }
+  }
+  // 3) 轮询 active 至 0 或超时
+  let lastActive = sh.active
+  while (sh.active > 0 && Date.now() - t0 < timeoutMs) {
+    await new Promise((r) => setTimeout(r, 200))
+    lastActive = sh.active
+  }
+  const waitedMs = Date.now() - t0
+  const drained = sh.active === 0
+  if (!drained) {
+    console.warn(`[pipeline] 优雅关闭超时 ${timeoutMs}ms，仍有 ${lastActive} 个活跃任务将被强制中断`)
+  } else {
+    console.log(`[pipeline] 优雅关闭完成：${waitedMs}ms 内活跃任务全部排空`)
+  }
+  // 4) 清理引擎定时器（防 unref 后仍触发一次 tick）
+  try {
+    if (eng.timer) clearInterval(eng.timer)
+    if (eng.mineruTimer) clearInterval(eng.mineruTimer)
+  } catch {
+    /* 清理失败忽略 */
+  }
+  return { drained, activeLeft: sh.active, waitedMs }
+}
+
+/**
  * 僵尸任务恢复（审计 B：心跳续租替代固定 10 分钟判定）。
  * 仅回收 status='active' 且（heartbeatAt 超 120s 未续租，或无心跳旧行且 startedAt 超 10 分钟）
  * 的任务；waiting_mineru / cancelled 不参与恢复。

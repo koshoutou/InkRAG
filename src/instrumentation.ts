@@ -45,6 +45,40 @@ export async function register(): Promise<void> {
   } catch (e) {
     console.warn('[instrumentation] 程序日志清理调度器自启动失败:', (e as Error).message)
   }
+
+  // ---- BE-010：优雅关闭——SIGTERM / SIGINT 时排空活跃任务再退出 ----
+  // 无此处理时，docker stop / k8s rolling update 发送的 SIGTERM 会在 10s 宽限期后
+  // 被 SIGKILL 强杀，正在跑的 embed / mineru 任务被粗暴中断，留下 active 僵尸任务
+  // 与半写产物。本处理先 drainForShutdown（暂停新任务 + Abort 活跃 + 等待排空或超时），
+  // 再 process.exit；超时仍强制退出，保证不卡死容器编排。
+  let shuttingDown = false
+  const shutdownHandler = (sig: 'SIGTERM' | 'SIGINT') => {
+    if (shuttingDown) {
+      console.log(`[instrumentation] 二次收到 ${sig}，立即强制退出`)
+      process.exit(1)
+    }
+    shuttingDown = true
+    console.log(`[instrumentation] 收到 ${sig}，开始优雅关闭（最长等待 30s）`)
+    void (async () => {
+      try {
+        const { drainForShutdown } = await import('./lib/rag/pipeline')
+        const r = await drainForShutdown(30_000)
+        console.log(`[instrumentation] 优雅关闭完成（drained=${r.drained}, waitedMs=${r.waitedMs}）`)
+      } catch (e) {
+        console.error('[instrumentation] 优雅关闭失败:', (e as Error).message)
+      } finally {
+        // drained 或超时都退出；超时强制退出码 1，正常退出 0
+        process.exit(0)
+      }
+    })()
+    // 兜底硬超时：即使 drainForShutdown 卡住，35s 后也强制退出
+    setTimeout(() => {
+      console.error('[instrumentation] 优雅关闭硬超时 35s，强制退出')
+      process.exit(1)
+    }, 35_000).unref?.()
+  }
+  process.on('SIGTERM', () => shutdownHandler('SIGTERM'))
+  process.on('SIGINT', () => shutdownHandler('SIGINT'))
 }
 
 /**
