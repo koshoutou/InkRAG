@@ -186,11 +186,14 @@ export function ensurePipelineEngine(): PipelineEngineState {
     eng.timer = setInterval(() => {
       void tick(eng!)
     }, TICK_MS)
+    // F-CONC-17：unref 不阻止进程优雅退出（SIGTERM 时无需先清定时器）
+    ;(eng.timer as unknown as { unref?: () => void }).unref?.()
     // MinerU 轮询器：独立 5s 定时器（waiting_mineru 任务不占文档槽；审计#P1-1）
     if (!eng.mineruTimer) {
       eng.mineruTimer = setInterval(() => {
         void mineruPollTick(eng!)
       }, MINERU_POLL_MS)
+      ;(eng.mineruTimer as unknown as { unref?: () => void }).unref?.()
     }
     console.log('[pipeline] 引擎已启动（tick=1200ms, concurrency=2, mineru-poll=5000ms）')
     void pipelineActivity({
@@ -533,10 +536,11 @@ async function runJob(jobId: string): Promise<void> {
   sh.controllers.set(jobId, controller)
   const ctx = makeRunCtx(controller)
   const startedAt = Date.now()
-  // 心跳续租：覆盖单个长 await（大文件上传/慢嵌入）期间无法到检查点的场景
+  // 心跳续租：覆盖单个长 await（大文件上传/慢嵌入）期间无法到检查点的场景（F-CONC-17 unref）
   const heartbeatTimer = setInterval(() => {
     void touchHeartbeat(jobId)
   }, HEARTBEAT_INTERVAL_MS)
+  ;(heartbeatTimer as unknown as { unref?: () => void }).unref?.()
   try {
     const doc = await db.document.findUnique({ where: { id: job.documentId } })
     if (!doc) {

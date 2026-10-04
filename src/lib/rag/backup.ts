@@ -863,6 +863,8 @@ function startSchedulerTimer(state: BackupSchedulerState, cfg: ScheduleConfig): 
   state.timer = setInterval(() => {
     void schedulerTick(state, intervalHours, keep)
   }, SCHEDULER_TICK_MS)
+  // F-CONC-17：unref 不阻止进程优雅退出
+  ;(state.timer as unknown as { unref?: () => void }).unref?.()
   console.log(
     `[backup-scheduler] 已启动 interval=${cfg.intervalHours}h keep=${cfg.keep}（下次 ${state.nextRunAt.toISOString()}）`,
   )
