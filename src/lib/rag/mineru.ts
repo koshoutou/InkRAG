@@ -1238,6 +1238,35 @@ async function probeSingle(
 }
 
 /** 状态探测：单任务直查；复合句柄逐段并发查 + 聚合（优先级 failed > gone > error > 全done > running） */
+/** 有限并发执行（F-EXT-07：段探测限 4 路；实现与 pipeline.runLimited 同语义） */
+async function runLimited<T>(concurrency: number, tasks: Array<() => Promise<T>>): Promise<T[]> {
+  let active = 0
+  const queue: Array<() => void> = []
+  return Promise.all(
+    tasks.map(
+      (task) =>
+        new Promise<T>((resolve, reject) => {
+          const start = () => {
+            task().then(resolve, reject).finally(() => {
+              active--
+              const next = queue.shift()
+              if (next) next()
+            })
+          }
+          if (active < concurrency) {
+            active++
+            start()
+          } else {
+            queue.push(() => {
+              active++
+              start()
+            })
+          }
+        })
+    )
+  )
+}
+
 export async function probeMineruJob(
   handle: MinerUHandle,
   settings: RagSettings
@@ -1247,13 +1276,13 @@ export async function probeMineruJob(
     return probeSingle(s, handle)
   }
   const total = handle.parts.length
-  const results = await Promise.all(
-    handle.parts.map((p, i) =>
-      p.jobId
-        ? probeSingle(s, { jobId: p.jobId, uploadId: p.uploadId, fileId: p.fileId }).then((r) => ({ i, r }))
-        : Promise.resolve({ i, r: { state: 'gone' } as MinerUProbeResult })
-    )
-  )
+  // F-EXT-07：复合句柄逐段探测加并发上限（原先全段 Promise.all——600 页 PDF 拆 30 段
+  // = 30 req/5s，远端限流尤其 cloud-agent 的 IP 限频直接 429）
+  const probeOne = async (p: (typeof handle.parts)[number], i: number): Promise<{ i: number; r: MinerUProbeResult }> =>
+    p.jobId
+      ? probeSingle(s, { jobId: p.jobId, uploadId: p.uploadId, fileId: p.fileId }).then((r) => ({ i, r }))
+      : { i, r: { state: 'gone' } as MinerUProbeResult }
+  const results = await runLimited(4, handle.parts.map((p, i) => () => probeOne(p, i)))
   const failed = results.find((x) => x.r.state === 'failed')
   if (failed) {
     return { state: 'failed', error: partError(failed.i, total, handle.parts[failed.i], (failed.r as { error: StoreError }).error) }

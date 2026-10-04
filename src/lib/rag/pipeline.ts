@@ -364,7 +364,9 @@ async function mineruPollTick(eng: PipelineEngineState): Promise<void> {
     })
     if (jobs.length === 0) return
     const settings = await getRagSettings()
-    await Promise.all(jobs.map((job) => pollOneMineruJob(job, settings)))
+    // F-CONC-06：单轮内任务探测限 4 路并发（原先 ≤20 个任务全量 Promise.all，
+    // MINERU_POLL_BATCH 只限单轮数量不限并发度，远端限流风险）
+    await runLimited(4, jobs.map((job) => () => pollOneMineruJob(job, settings)))
   } catch (e) {
     console.warn('[pipeline][mineru] 轮询周期异常:', (e as Error).message)
   } finally {
@@ -407,10 +409,17 @@ async function pollOneMineruJob(
       return
     }
 
+    // F-EXT-09：探测退避窗口内（上次探测失败后的指数退避未到期）本轮跳过，不打点远端
+    const payload0 = safeParseJson(job.payloadJson)
+    const nextProbeAt = Number(payload0.nextProbeAt) || 0
+    if (nextProbeAt > Date.now()) return
+
     const probe = await probeMineruJob(handle, settings)
     // 连续探测失败计数（存 payloadJson.probeFails；成功即清零）。
     // 瞬时错误（网络/5xx/限频）→ 下轮再查不计失败；但连续 ~10 分钟（120 轮 × 5s）
     // 仍不可达时转可重试失败，避免对死掉的端点无限打点（旧实现会以 5s 频率刷 6 小时日志）。
+    // F-EXT-09：探测失败按 probeFails 指数退避（5s→10s→20s→40s→60s 封顶，存 payloadJson.nextProbeAt），
+    // 远端停机时打点频率从固定 5s/轮 自适应降频，日志噪音与限流压力同步下降。
     let probeFails = Number(safeParseJson(job.payloadJson).probeFails) || 0
     if (probe.state === 'running') {
       probeFails = 0
@@ -436,6 +445,7 @@ async function pollOneMineruJob(
     if (probe.state === 'error') {
       probeFails += 1
       if (probeFails >= 120) {
+        mineruRunningReport.delete(job.id)
         await handleJobFailure(
           job,
           new StoreError(`MinerU 状态探测连续失败约 10 分钟（${probe.error.message.slice(0, 120)}）——请检查 MinerU 服务可用性`, { retryable: true }),
@@ -447,9 +457,14 @@ async function pollOneMineruJob(
       if (probeFails % 12 === 1) {
         console.warn(`[pipeline][mineru] ${doc.filename} 探测瞬时失败（连续第 ${probeFails} 轮）: ${probe.error.message.slice(0, 160)}`)
       }
+      // F-EXT-09：指数退避下轮探测时间（5s×2^min(fails,4) 封顶 60s）
+      const backoffMs = Math.min(60_000, 5_000 * Math.pow(2, Math.min(probeFails, 4)))
       await db.pipelineJob.updateMany({
         where: { id: job.id, status: 'waiting_mineru' },
-        data: { heartbeatAt: new Date(), payloadJson: JSON.stringify({ probeFails }) },
+        data: {
+          heartbeatAt: new Date(),
+          payloadJson: JSON.stringify({ probeFails, nextProbeAt: Date.now() + backoffMs }),
+        },
       })
       return
     }
