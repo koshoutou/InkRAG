@@ -378,7 +378,11 @@ export async function deleteBackup(id: string): Promise<void> {
 
 /** 默认平台文件服务基址（location 回退时 qdrant 自行回拉；同机 qdrant 可达） */
 function defaultOrigin(): string {
-  return `http://127.0.0.1:${process.env.PORT ?? '3000'}`
+  // A05 修复：回退端口由 3000 改为 2607（v1.10 端口体系迁移后，3000 段已废弃）。
+  // 优先级：PORT > PANEL_PORT > 2607。直接 bun .next/standalone/server.js 启动时
+  // PORT 可能为空，此前会生成 http://127.0.0.1:3000 → qdrant 回拉失败、含快照备份静默损坏。
+  const port = process.env.PORT ?? process.env.PANEL_PORT ?? '2607'
+  return `http://127.0.0.1:${port}`
 }
 
 export async function restoreBackup(
